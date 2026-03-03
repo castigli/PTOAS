@@ -11,7 +11,7 @@ PYTHON_BIN="${PYTHON_BIN:-}"
 PTOAS_OUT_DIR="${PTOAS_OUT_DIR:-}"
 PTOAS_ENABLE_INSERT_SYNC="${PTOAS_ENABLE_INSERT_SYNC:-1}"
 PTOAS_FLAGS="${PTOAS_FLAGS:-}"
-PTO_PTO_DIRS="${PTO_PTO_DIRS:-InjectSync}"
+PTO_PTO_DIRS="${PTO_PTO_DIRS:-Sync}"
 ENABLE_BC=0
 
 usage() {
@@ -28,7 +28,7 @@ Env:
   PTOAS_OUT_DIR  # where generated *.mlir/*.cpp go (optional; defaults to a temp dir)
   PTOAS_FLAGS  # extra flags passed to ptoas (e.g. --enable-insert-sync)
   PTOAS_ENABLE_INSERT_SYNC  # 1 to append --enable-insert-sync to PTOAS_FLAGS (default: 1)
-  PTO_PTO_DIRS  # space-separated dirs to run .pto directly (default: InjectSync)
+  PTO_PTO_DIRS  # space-separated dirs to run .pto directly (default: Sync)
 
 Flags:
   --enablebc  # enable: python -> .pto -> ptobc -> .pto -> ptoas
@@ -168,6 +168,19 @@ process_one_dir() {
     case "$base" in
       *_invalid|*_xfail) expect_fail=1 ;;
     esac
+
+    # A5-only sample: buffer-id synchronization ops lower to CCEC get_buf/rls_buf
+    # intrinsics, which are not supported on older SoCs (e.g. Ascend910(A3)).
+    # Skip this python sample unless SOC_VERSION indicates an A5 target.
+    if [[ "$base" == "test_a5_buf_sync" ]]; then
+      soc="${SOC_VERSION:-}"
+      soc_lc="$(printf '%s' "${soc}" | tr '[:upper:]' '[:lower:]')"
+      if [[ "$soc_lc" != *"a5"* && "$soc_lc" != *"950"* ]]; then
+        echo -e "${A}(${base}.py)\tSKIP\trequires A5 (set SOC_VERSION to A5/950)"
+        continue
+      fi
+    fi
+
     # Some samples are expected to fail depending on the selected ptoas flags.
     #
     # alloc_tile_addr.py uses `pto.alloc_tile addr=...`, which is only accepted
@@ -316,7 +329,7 @@ process_one_dir() {
     echo -e "${A}(${base}.py)\tOK\tgenerated: $(basename "$cpp")"
   done
 
-  # Run .pto files only for allowed dirs (default: InjectSync) to avoid legacy IR.
+  # Run .pto files only for allowed dirs (default: Sync) to avoid legacy IR.
   local allow_pto=0
   for d in ${PTO_PTO_DIRS}; do
     if [[ "$A" == "$d" ]]; then
