@@ -357,15 +357,30 @@ process_one_dir() {
       fi
     fi
 
-    # Regression guard for Issue #190:
-    # Infer layout for a 2D column-vector view (16 x 1) should prefer DN.
-    if [[ "$base" == "tensor_view_infer_layout_dn" ]]; then
-      if ! grep -Eq "pto::Shape<1, 1, 1, 16, 1>.*pto::Layout::DN" "$cpp"; then
-        echo -e "${A}(${base}.py)\tFAIL\texpected pto::Layout::DN for shape (16 x 1) GlobalTensor"
-        overall=1
-        continue
-      fi
-    fi
+	    # Regression guard for Issue #190:
+	    # Infer layout for a 2D column-vector view (16 x 1) should prefer DN.
+	    if [[ "$base" == "tensor_view_infer_layout_dn" ]]; then
+	      if ! grep -Eq "pto::Shape<1, 1, 1, 16, 1>.*pto::Layout::DN" "$cpp"; then
+	        echo -e "${A}(${base}.py)\tFAIL\texpected pto::Layout::DN for shape (16 x 1) GlobalTensor"
+	        overall=1
+	        continue
+	      fi
+	    fi
+
+	    # Sync regression: InjectSync samples use `make_tensor_view` for GM.
+	    # They must not fall back to inferring a fractal (NZ) layout in C++.
+	    if [[ "$base" == "test_inject_sync_if" || \
+	          "$base" == "test_inject_sync_if_else" || \
+	          "$base" == "test_inject_sync_loop" || \
+	          "$base" == "test_inject_sync_loop_nest" || \
+	          "$base" == "test_inject_sync_two_event_id" || \
+	          "$base" == "test_mem_inject_sync_basic" ]]; then
+	      if grep -Fq "pto::Layout::NZ" "$cpp"; then
+	        echo -e "${A}(${base}.py)\tFAIL\tunexpected pto::Layout::NZ in emitted GlobalTensor"
+	        overall=1
+	        continue
+	      fi
+	    fi
 
     echo -e "${A}(${base}.py)\tOK\tgenerated: $(basename "$cpp")"
   done
