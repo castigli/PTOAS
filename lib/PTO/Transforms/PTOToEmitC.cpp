@@ -6317,8 +6317,199 @@ struct PTOBindTileToEmitC : public OpConversionPattern<pto::BindTileOp> {
 
   LogicalResult matchAndRewrite(pto::BindTileOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto *ctx = rewriter.getContext();
     // 获取 Config
     auto configAttr = op.getConfigAttr();
+
+    // If the BindTile source is already a Tile-like value (SSA view lowering of
+    // `pto.treshape` into `pto.bind_tile`), lower into a single `TRESHAPE(dst,
+    // src)` call instead of rebinding via pointer casts.
+    auto peelAllCasts = [](Value v) {
+      while (auto castOp = v.getDefiningOp<UnrealizedConversionCastOp>())
+        v = castOp.getOperand(0);
+      if (auto castOp = v.getDefiningOp<emitc::CastOp>())
+        v = castOp.getOperand();
+      return v;
+    };
+    Value tileCandidate = peelAllCasts(adaptor.getSource());
+    auto isTileLike = [](Value v) -> bool {
+      auto ot = dyn_cast<emitc::OpaqueType>(v.getType());
+      if (!ot)
+        return false;
+      StringRef s = ot.getValue();
+      return s.contains("Tile<") || s.contains("ConvTile<");
+    };
+
+    if (isTileLike(tileCandidate)) {
+      auto resMrTy = dyn_cast<MemRefType>(op.getType());
+      if (!resMrTy)
+        return failure();
+
+      const char *roleTok = "TileType::Vec";
+      if (auto asAttr =
+              dyn_cast_or_null<pto::AddressSpaceAttr>(resMrTy.getMemorySpace())) {
+        switch (asAttr.getAddressSpace()) {
+        case pto::AddressSpace::VEC:
+          roleTok = "TileType::Vec";
+          break;
+        case pto::AddressSpace::MAT:
+          roleTok = "TileType::Mat";
+          break;
+        case pto::AddressSpace::LEFT:
+          roleTok = "TileType::Left";
+          break;
+        case pto::AddressSpace::RIGHT:
+          roleTok = "TileType::Right";
+          break;
+        case pto::AddressSpace::ACC:
+          roleTok = "TileType::Acc";
+          break;
+        case pto::AddressSpace::BIAS:
+          roleTok = "TileType::Bias";
+          break;
+        case pto::AddressSpace::SCALING:
+          roleTok = "TileType::Scaling";
+          break;
+        case pto::AddressSpace::GM:
+        case pto::AddressSpace::Zero:
+          roleTok = "TileType::Vec";
+          break;
+        }
+      }
+
+      Type elemTy = resMrTy.getElementType();
+      Type emitElemTy = getTypeConverter()->convertType(elemTy);
+      if (!emitElemTy)
+        return failure();
+      auto emitElemOpaque = dyn_cast<emitc::OpaqueType>(emitElemTy);
+      if (!emitElemOpaque)
+        return failure();
+      std::string elemTypeStr = emitElemOpaque.getValue().str();
+
+      if (resMrTy.getRank() < 2)
+        return failure();
+      int64_t rows = resMrTy.getDimSize(0);
+      int64_t cols = resMrTy.getDimSize(1);
+      if (rows == ShapedType::kDynamic || cols == ShapedType::kDynamic)
+        return failure();
+
+      std::string blTok = "BLayout::RowMajor";
+      if (auto blAttr = dyn_cast<BLayoutAttr>(configAttr.getBLayout())) {
+        if (static_cast<int32_t>(blAttr.getValue()) == 1)
+          blTok = "BLayout::ColMajor";
+      }
+
+      std::string slTok = "SLayout::NoneBox";
+      if (auto slAttr = dyn_cast<SLayoutAttr>(configAttr.getSLayout())) {
+        int32_t slVal = static_cast<int32_t>(slAttr.getValue());
+        slTok = (slVal == 1) ? "SLayout::RowMajor"
+                             : (slVal == 2) ? "SLayout::ColMajor"
+                                            : "SLayout::NoneBox";
+      }
+
+      int32_t fractal = 512;
+      if (auto frAttr = dyn_cast<IntegerAttr>(configAttr.getSFractalSize()))
+        fractal = frAttr.getInt();
+
+      std::string padTok = "PadValue::Null";
+      if (auto padAttr = dyn_cast<PadValueAttr>(configAttr.getPad())) {
+        switch (static_cast<int32_t>(padAttr.getValue())) {
+        case 1:
+          padTok = "PadValue::Zero";
+          break;
+        case 2:
+          padTok = "PadValue::Max";
+          break;
+        case 3:
+          padTok = "PadValue::Min";
+          break;
+        default:
+          padTok = "PadValue::Null";
+          break;
+        }
+      }
+
+      auto getIndexConst = [](Value v, int64_t &out) -> bool {
+        if (!v)
+          return false;
+        if (auto cst = v.getDefiningOp<arith::ConstantOp>()) {
+          if (auto ia = dyn_cast<IntegerAttr>(cst.getValue())) {
+            out = ia.getValue().getSExtValue();
+            return true;
+          }
+        }
+        return false;
+      };
+
+      std::string vrowTok, vcolTok;
+      bool useConstructor = false;
+      bool rowIsDynamic = false;
+      bool colIsDynamic = false;
+      SmallVector<Value> constructorArgs;
+
+      Value vRow = op.getValidRow();
+      Value vCol = op.getValidCol();
+      Value vRowEmitC = adaptor.getValidRow();
+      Value vColEmitC = adaptor.getValidCol();
+      int64_t cRow = 0, cCol = 0;
+
+      if (vRow && getIndexConst(vRow, cRow)) {
+        vrowTok = std::to_string(cRow);
+      } else if (vRow) {
+        vrowTok = "-1";
+        rowIsDynamic = true;
+        useConstructor = true;
+      } else {
+        vrowTok = std::to_string(rows);
+      }
+
+      if (vCol && getIndexConst(vCol, cCol)) {
+        vcolTok = std::to_string(cCol);
+      } else if (vCol) {
+        vcolTok = "-1";
+        colIsDynamic = true;
+        useConstructor = true;
+      } else {
+        vcolTok = std::to_string(cols);
+      }
+
+      if (useConstructor) {
+        if (rowIsDynamic && vRowEmitC)
+          constructorArgs.push_back(vRowEmitC);
+        if (colIsDynamic && vColEmitC)
+          constructorArgs.push_back(vColEmitC);
+      }
+
+      std::string tileTypeStr = std::string("Tile<") + roleTok + ", " +
+                                elemTypeStr + ", " + std::to_string(rows) +
+                                ", " + std::to_string(cols) + ", " + blTok +
+                                ", " + vrowTok + ", " + vcolTok + ", " + slTok +
+                                ", " + std::to_string(fractal) + ", " + padTok +
+                                ">";
+
+      auto tileType = emitc::OpaqueType::get(ctx, tileTypeStr);
+      Value dstTile;
+      if (useConstructor) {
+        dstTile = rewriter
+                      .create<emitc::CallOpaqueOp>(
+                          loc, tileType, tileTypeStr, ArrayAttr{}, ArrayAttr{},
+                          ValueRange(constructorArgs))
+                      .getResult(0);
+      } else {
+        dstTile = rewriter
+                      .create<emitc::VariableOp>(
+                          loc, tileType, emitc::OpaqueAttr::get(ctx, ""))
+                      .getResult();
+      }
+
+      rewriter.create<emitc::CallOpaqueOp>(
+          loc, TypeRange{}, "TRESHAPE", ArrayAttr{}, ArrayAttr{},
+          ValueRange{dstTile, tileCandidate});
+
+      rewriter.replaceOp(op, dstTile);
+      return success();
+    }
 
     // [关键修复] 回溯寻找原始物理地址
     // BindTile 的输入 (op.getSource()) 通常是由 alloc -> pointer_cast 产生的。

@@ -358,6 +358,22 @@ process_one_dir() {
       fi
     fi
 
+    # Regression guard for Issue #207:
+    # SSA `pto.treshape` (lowered into `pto.bind_tile`) must lower to a single
+    # `TRESHAPE(dst, src)` instead of an invalid Tile-to-pointer cast sequence.
+    if [[ "$base" == "reshape" ]]; then
+      if ! grep -Fq "TRESHAPE(" "$cpp"; then
+        echo -e "${A}(${base}.py)\tFAIL\tmissing TRESHAPE() lowering for SSA treshape"
+        overall=1
+        continue
+      fi
+      if grep -Eq "= \\(__ubuf__ [^)]+\\*\\) v[0-9]+;" "$cpp"; then
+        echo -e "${A}(${base}.py)\tFAIL\tfound invalid Tile-to-__ubuf__ pointer cast (issue #207)"
+        overall=1
+        continue
+      fi
+    fi
+
 	    # Regression guard for Issue #190:
 	    # Infer layout for a 2D column-vector view (16 x 1) should prefer DN.
 	    if [[ "$base" == "tensor_view_infer_layout_dn" ]]; then
