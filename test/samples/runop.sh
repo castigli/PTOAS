@@ -385,7 +385,7 @@ process_one_dir() {
         overall=1
         continue
       fi
-      if [[ $(grep -c "TRESHAPE(" "$cpp") -ne 1 ]]; then
+      if [[ $(grep -c "TRESHAPE(" "$cpp") -ne 0 ]]; then
         echo -e "${A}(${base}.py)	FAIL	pto.bitcast should not lower via TRESHAPE()"
         overall=1
         continue

@@ -6619,7 +6619,8 @@ struct PTOBindTileToEmitC : public OpConversionPattern<pto::BindTileOp> {
       return success();
     }
 
-    if (isTileLike(tileCandidate)) {
+    if (viewSemantics && viewSemantics.getValue() == "treshape" &&
+        isTileLike(tileCandidate)) {
       FailureOr<Value> dstTile = buildTileValue();
       if (failed(dstTile))
         return failure();
