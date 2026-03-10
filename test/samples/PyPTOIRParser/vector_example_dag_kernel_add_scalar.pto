@@ -1,0 +1,17 @@
+module {
+  func.func @kernel_add_scalar(%arg0: !pto.ptr<f32>, %arg1: f32, %arg2: !pto.ptr<f32>) {
+  %c128 = arith.constant 128 : index
+  %c1 = arith.constant 1 : index
+  %c0 = arith.constant 0 : index
+  %2 = pto.make_tensor_view %arg0, shape = [%c128, %c128], strides = [%c128, %c1] : !pto.tensor_view<?x?xf32>
+  %3 = pto.make_tensor_view %arg2, shape = [%c128, %c128], strides = [%c128, %c1] : !pto.tensor_view<?x?xf32>
+  %0 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=128, cols=128, v_row=128, v_col=128, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+  %1 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=128, cols=128, v_row=128, v_col=128, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+  %4 = pto.partition_view %2, offsets = [%c0, %c0], sizes = [%c128, %c128] : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<128x128xf32>
+  pto.tload ins(%4 : !pto.partition_tensor_view<128x128xf32>) outs(%0 : !pto.tile_buf<loc=vec, dtype=f32, rows=128, cols=128, v_row=128, v_col=128, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+  pto.tadds ins(%0, %arg1 : !pto.tile_buf<loc=vec, dtype=f32, rows=128, cols=128, v_row=128, v_col=128, blayout=row_major, slayout=none_box, fractal=512, pad=0>, f32) outs(%1 : !pto.tile_buf<loc=vec, dtype=f32, rows=128, cols=128, v_row=128, v_col=128, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+  %5 = pto.partition_view %3, offsets = [%c0, %c0], sizes = [%c128, %c128] : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<128x128xf32>
+  pto.tstore ins(%1 : !pto.tile_buf<loc=vec, dtype=f32, rows=128, cols=128, v_row=128, v_col=128, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%5 : !pto.partition_tensor_view<128x128xf32>)
+  return
+  }
+}
