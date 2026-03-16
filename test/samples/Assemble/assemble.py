@@ -130,7 +130,7 @@ def build():
                 pto.TMatmulOp(None, a_left, b_right, src_acc)
 
                 # Main operation under test: lowering must emit TINSERT(dst, src, row, col).
-                pto.TAssembleOp(src_acc, c0, c0, dst_mat)
+                pto.TInsertOp(src_acc, c0, c0, dst_mat)
 
                 pto.TLoadOp(None, sv_i, i_mat)
                 pto.TMovOp(None, dst_mat, out_left)

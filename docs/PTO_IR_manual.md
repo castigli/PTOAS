@@ -4517,7 +4517,7 @@ pto.treshape ins(%src : !pto.tile_buf<...>) outs(%dst : !pto.tile_buf<...>)
 
 ---
 
-##### `pto.tassemble` - Insert Sub-Tile Window
+##### `pto.tinsert` - Insert Sub-Tile Window
 
 **Summary:** Inserts a source tile into a destination tile at a given row/col offset.
 
@@ -4550,7 +4550,7 @@ dst[i + indexRow, j + indexCol] = src[i, j]
 **Basic Example:**
 
 ```mlir
-pto.tassemble ins(%src, %row, %col : !pto.tile_buf<...>, index, index) outs(%dst : !pto.tile_buf<...>)
+pto.tinsert ins(%src, %row, %col : !pto.tile_buf<...>, index, index) outs(%dst : !pto.tile_buf<...>)
 ```
 
 ---

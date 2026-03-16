@@ -1528,10 +1528,10 @@ mlir::LogicalResult mlir::pto::TExtractOp::verify() {
   return mlir::success();
 }
 //===----------------------------------------------------------------------===//
-// TAssembleOp_DPS verifier
+// TInsertOp_DPS verifier
 //===----------------------------------------------------------------------===//
 
-mlir::LogicalResult mlir::pto::TAssembleOp::verify() {
+mlir::LogicalResult mlir::pto::TInsertOp::verify() {
   Type srcTy = getSrc().getType();
   Type dstTy = getDst().getType();
   if (!isPTOShapedLike(srcTy) || !isPTOShapedLike(dstTy))
@@ -4351,8 +4351,8 @@ void TExtractOp::getEffects(
   PTO_ADD_WRITE(getDstMutable());
 }
 
-// TASSEMBLE: Read(src) -> Write(dst)
-void TAssembleOp::getEffects(
+// TINSERT: Read(src) -> Write(dst)
+void TInsertOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>> &effects) {
   PTO_ADD_READ(getSrcMutable());
   PTO_ADD_WRITE(getDstMutable());

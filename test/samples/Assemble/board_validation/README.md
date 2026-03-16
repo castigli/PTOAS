@@ -1,11 +1,11 @@
 # Assemble NPU Validation (A3)
 
-This test validates `pto.tassemble` functional correctness on board.
+This test validates `pto.tinsert` functional correctness on board.
 
 Semantics under test (A3-legal path):
 
 1. `acc0 = matmul(v1, v2)` in `ACC<f32>`
-2. `tassemble(acc0 -> MAT<f16>, indexRow=0, indexCol=0)`
+2. `tinsert(acc0 -> MAT<f16>, indexRow=0, indexCol=0)`
 3. `acc1 = matmul(MAT_after_assemble, v3_identity)`
 4. store `acc1` to `v4`
 

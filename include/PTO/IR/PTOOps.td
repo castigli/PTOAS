@@ -2027,7 +2027,7 @@ def TExtractOp : PTO_TOp<"textract", [
   }];
 }
 
-def TAssembleOp : PTO_TOp<"tassemble", [
+def TInsertOp : PTO_TOp<"tinsert", [
   PTO_DpsInitOpInterface,
   OpPipeInterface,
   DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
