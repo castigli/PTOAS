@@ -5242,6 +5242,14 @@ mlir::LogicalResult mlir::pto::TSqrtOp::verify() {
 
 
 mlir::LogicalResult mlir::pto::TStoreFPOp::verify() {
+  auto shouldBypassDecoded = [&]() -> bool {
+    Value src = getSrc();
+    Value fp = getFp();
+    return isa<MemRefType>(src.getType()) || isa<MemRefType>(fp.getType()) ||
+           src.getDefiningOp<pto::BindTileOp>() ||
+           fp.getDefiningOp<pto::BindTileOp>();
+  };
+
   auto verifyA2A3 = [&]() -> LogicalResult {
     Type srcTy = getSrc().getType();
     Type fpTy = getFp().getType();
@@ -5298,7 +5306,14 @@ mlir::LogicalResult mlir::pto::TStoreFPOp::verify() {
       return emitOpError() << "expects src to be in the acc address space";
     return mlir::success();
   };
-  return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
+  if (shouldBypassDecoded())
+    return success();
+  switch (getVerifierTargetArch(getOperation())) {
+  case VerifierTargetArch::A2A3:
+    return verifyA2A3();
+  case VerifierTargetArch::A5:
+    return verifyA5();
+  }
 }
 
 
