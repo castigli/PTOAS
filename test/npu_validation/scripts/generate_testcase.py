@@ -1058,9 +1058,15 @@ def generate_testcase(
             f"    WriteFile(\"./{p['name']}.bin\", {p['name']}Host, {size_var});"
         )
 
+    runtime_rt_include = '#include "runtime/rt.h"' if ffts_ptrs else ""
+    runtime_host_include_dirs = ""
+    if ffts_ptrs:
+        runtime_host_include_dirs = "    ${ASCEND_HOME_PATH}/pkg_inc/runtime\n"
+
     param_decls = "\n".join(param_decls_lines)
     main_cpp = (
         template
+        .replace("@RUNTIME_RT_INCLUDE@", runtime_rt_include)
         .replace("@TEST_SUITE@", testcase.upper())
         .replace("@CASE_NAME@", case_name)
         .replace(
@@ -1353,7 +1359,7 @@ target_compile_options({testcase} PRIVATE ${{CMAKE_CPP_COMPILE_OPTIONS}})
 target_include_directories({testcase} PRIVATE
     ${{PTO_ISA_ROOT}}/include
     ${{PTO_ISA_ROOT}}/tests/common
-)
+{runtime_host_include_dirs})
 
 target_link_directories({testcase} PUBLIC
     ${{ASCEND_HOME_PATH}}/lib64
@@ -1372,7 +1378,7 @@ if(ENABLE_SIM_GOLDEN)
     target_include_directories({testcase}_sim PRIVATE
         ${{PTO_ISA_ROOT}}/include
         ${{PTO_ISA_ROOT}}/tests/common
-    )
+{runtime_host_include_dirs})
     target_link_directories({testcase}_sim PUBLIC
         ${{ASCEND_HOME_PATH}}/lib64
         ${{ASCEND_HOME_PATH}}/aarch64-linux/simulator/${{SOC_VERSION}}/lib

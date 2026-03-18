@@ -10,7 +10,7 @@ See LICENSE in the root of the software repository for the full text of the Lice
 
 #include "test_common.h"
 #include "acl/acl.h"
-#include "runtime/rt.h"
+@RUNTIME_RT_INCLUDE@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
