@@ -7,7 +7,7 @@ import subprocess
 import sys
 
 
-DEFAULT_REPO_URL = "https://github.com/PTO-ISA/pto-isa.git"
+DEFAULT_REPO_URL = "https://gitcode.com/cann/pto-isa.git"
 
 
 def parse_args() -> argparse.Namespace:
@@ -103,7 +103,7 @@ def update_dockerfile(path: pathlib.Path, commit: str) -> bool:
     )
     updated = replace_exactly_once(
         updated,
-        r"^(# pinned: https://github\.com/PTO-ISA/pto-isa/commit/)([0-9a-f]{40})$",
+        r"^(# pinned: https://gitcode\.com/cann/pto-isa/commit/)([0-9a-f]{40})$",
         rf"\g<1>{commit}",
         path,
     )
@@ -133,7 +133,7 @@ def extract_docker_commit(path: pathlib.Path) -> tuple[str, str]:
     text = read_text(path)
     arg_match = re.search(r"^ARG PTO_ISA_COMMIT=([0-9a-f]{40})$", text, flags=re.MULTILINE)
     comment_match = re.search(
-        r"^# pinned: https://github\.com/PTO-ISA/pto-isa/commit/([0-9a-f]{40})$",
+        r"^# pinned: https://gitcode\.com/cann/pto-isa/commit/([0-9a-f]{40})$",
         text,
         flags=re.MULTILINE,
     )

@@ -41,14 +41,12 @@ on:
       pto_isa_repo:
         description: "pto-isa repo URL on remote"
         type: string
-        default: https://github.com/PTO-ISA/pto-isa.git
+        default: https://gitcode.com/cann/pto-isa.git
       pto_isa_commit:
         description: "pto-isa ref (commit/tag/branch; empty = repo-pinned weekly commit)"
         type: string
-        # NOTE: Pin a known-good commit for deterministic runs.
-        # GitCode 082b94a3d2eaa17d63d1e5b0d74714a00594ace0 (TSEL bugfix) is
-        # already included in the initial import on GitHub.
-        default: 66228909d00ca77ee3ed55cedd2b0438ac8545e0
+        # NOTE: Pin a known-good GitCode commit for deterministic runs.
+        default: 893e4b00a826231e776539512b5b17f82fc11838
       remote_host:
         description: "SSH host/IP for the NPU machine"
         type: string
@@ -249,8 +247,8 @@ jobs:
           DEVICE_ID: ${{ github.event.inputs.device_id || '2' }}
           SKIP_CASES: ${{ github.event.inputs.skip_cases || '' }}
           RUN_ONLY_CASES: ${{ github.event.inputs.run_only_cases || '' }}
-          PTO_ISA_REPO: ${{ github.event.inputs.pto_isa_repo || 'https://github.com/PTO-ISA/pto-isa.git' }}
-          PTO_ISA_COMMIT: ${{ github.event.inputs.pto_isa_commit || '66228909d00ca77ee3ed55cedd2b0438ac8545e0' }}
+          PTO_ISA_REPO: ${{ github.event.inputs.pto_isa_repo || 'https://gitcode.com/cann/pto-isa.git' }}
+          PTO_ISA_COMMIT: ${{ github.event.inputs.pto_isa_commit || '893e4b00a826231e776539512b5b17f82fc11838' }}
           REMOTE_HOST: ${{ github.event.inputs.remote_host || '101.245.68.6' }}
           REMOTE_USER: ${{ github.event.inputs.remote_user || 'zhongxuan' }}
           REMOTE_PORT: ${{ github.event.inputs.remote_port || '22' }}
