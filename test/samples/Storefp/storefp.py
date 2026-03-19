@@ -1,7 +1,6 @@
 from mlir.ir import Context, Location, Module, InsertionPoint
-from mlir.dialects import func, pto
-from mlir.ir import F32Type, IntegerType, MemRefType
-
+from mlir.dialects import func, arith, pto
+from mlir.ir import F32Type, IntegerType, IndexType
 
 def build():
     with Context() as ctx:
@@ -13,8 +12,10 @@ def build():
             f32 = F32Type.get(ctx)
             i8 = IntegerType.get_signless(8, ctx)
             u64 = IntegerType.get_unsigned(64, ctx)
+            ptr_i8 = pto.PtrType.get(i8, ctx)
+            tv2_i8 = pto.TensorViewType.get(2, i8, ctx)
+            tile_view_8 = pto.PartitionTensorViewType.get([32, 32], i8, ctx)
 
-            gm = pto.AddressSpaceAttr.get(pto.AddressSpace.GM, ctx)
             acc = pto.AddressSpaceAttr.get(pto.AddressSpace.ACC, ctx)
             scaling = pto.AddressSpaceAttr.get(pto.AddressSpace.SCALING, ctx)
 
@@ -37,18 +38,24 @@ def build():
 
             acc_tile_ty = pto.TileBufType.get([16, 32], f32, acc, [1, 32], cfg_acc, ctx)
             fp_tile_ty = pto.TileBufType.get([1, 16], u64, scaling, [1, 16], cfg_fp, ctx)
-            dst_memref_ty = MemRefType.get([1, 32], i8, memory_space=gm)
 
-            fn_ty = func.FunctionType.get([dst_memref_ty], [])
+            fn_ty = func.FunctionType.get([ptr_i8], [])
             with InsertionPoint(m.body):
                 fn = func.FuncOp("tstore_fp_pass", fn_ty)
                 entry = fn.add_entry_block()
 
             with InsertionPoint(entry):
-                dst = entry.arguments[0]
+                dst_ptr = entry.arguments[0]
+                c0 = arith.ConstantOp(IndexType.get(ctx), 0).result
+                c1 = arith.ConstantOp(IndexType.get(ctx), 1).result
+                c32 = arith.ConstantOp(IndexType.get(ctx), 32).result
+
+                tv = pto.MakeTensorViewOp(tv2_i8, dst_ptr, [c32, c32], [c32, c1]).result
+                sv = pto.PartitionViewOp(tile_view_8, tv, offsets=[c0, c0], sizes=[c32, c32]).result
+
                 acc_tile = pto.AllocTileOp(acc_tile_ty).result
                 fp_tile = pto.AllocTileOp(fp_tile_ty).result
-                pto.TStoreFPOp(acc_tile, fp_tile, dst)
+                pto.TStoreFPOp(acc_tile, fp_tile, sv)
                 func.ReturnOp([])
 
             m.operation.verify()

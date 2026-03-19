@@ -5931,7 +5931,7 @@ dst[...] = Convert(src[i, j]; fp)
 |------|------|-------------|
 | `src` | `pto.tile_buf` | Source accumulator tile |
 | `fp` | `pto.tile_buf` | Scaling tile |
-| `dst` | `AnyMemRef` | Destination memory |
+| `dst` | `PartitionTensorViewType` | Destination memory |
 
 **Results:** None. Writes into `dst` via DPS pattern.
 

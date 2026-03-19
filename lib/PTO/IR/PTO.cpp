@@ -5420,18 +5420,32 @@ mlir::LogicalResult mlir::pto::TStoreFPOp::verify() {
            fp.getDefiningOp<pto::BindTileOp>();
   };
 
+  auto verifyDstType = [&]() -> LogicalResult {
+    Type dstTy = getDst().getType();
+    if (!isa<MemRefType, pto::PartitionTensorViewType>(dstTy))
+      return emitOpError()
+             << "expects dst to be a memref or !pto.partition_tensor_view";
+    if (auto dstPart = dyn_cast<pto::PartitionTensorViewType>(dstTy)) {
+      for (auto [idx, dim] : llvm::enumerate(dstPart.getShape())) {
+        if (dim != ShapedType::kDynamic && dim <= 0)
+          return emitOpError()
+                 << "expects dst shape[" << idx << "] to be positive";
+      }
+    }
+    return success();
+  };
+
   auto verifyA2A3 = [&]() -> LogicalResult {
     Type srcTy = getSrc().getType();
     Type fpTy = getFp().getType();
-    Type dstTy = getDst().getType();
     if (!isa<pto::TileBufType>(srcTy))
       return emitOpError() << "expects src to be a !pto.tile_buf";
     if (!isa<pto::TileBufType>(fpTy))
       return emitOpError() << "expects fp to be a !pto.tile_buf";
-    if (!isa<MemRefType>(dstTy))
-      return emitOpError() << "expects dst to be a memref";
     if (failed(verifyTileBufCommon(*this, srcTy, "src")) ||
         failed(verifyTileBufCommon(*this, fpTy, "fp")))
+      return failure();
+    if (failed(verifyDstType()))
       return failure();
     auto srcSpace = getPTOMemorySpaceEnum(srcTy);
     if (!srcSpace || *srcSpace != pto::AddressSpace::ACC)
@@ -5461,15 +5475,14 @@ mlir::LogicalResult mlir::pto::TStoreFPOp::verify() {
   auto verifyA5 = [&]() -> LogicalResult {
     Type srcTy = getSrc().getType();
     Type fpTy = getFp().getType();
-    Type dstTy = getDst().getType();
     if (!isa<pto::TileBufType>(srcTy))
       return emitOpError() << "expects src to be a !pto.tile_buf";
     if (!isa<pto::TileBufType>(fpTy))
       return emitOpError() << "expects fp to be a !pto.tile_buf";
-    if (!isa<MemRefType>(dstTy))
-      return emitOpError() << "expects dst to be a memref";
     if (failed(verifyTileBufCommon(*this, srcTy, "src")) ||
         failed(verifyTileBufCommon(*this, fpTy, "fp")))
+      return failure();
+    if (failed(verifyDstType()))
       return failure();
     auto srcSpace = getPTOMemorySpaceEnum(srcTy);
     if (!srcSpace || *srcSpace != pto::AddressSpace::ACC)

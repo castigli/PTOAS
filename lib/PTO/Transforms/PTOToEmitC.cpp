@@ -2796,6 +2796,11 @@ static std::string getElemTypeStringForGT(Type elemTy) {
   return "float";
 }
 
+static uint64_t nextGlobalTensorNameId() {
+  static uint64_t counter = 0;
+  return counter++;
+}
+
 static Value buildGlobalTensorFromMemref(ConversionPatternRewriter &rewriter,
                                          Location loc, Value basePtr,
                                          MemRefType mrTy,
@@ -2838,7 +2843,8 @@ static Value buildGlobalTensorFromMemref(ConversionPatternRewriter &rewriter,
                                         offVal);
   }
 
-  std::string suffix = "_" + std::to_string(reinterpret_cast<uintptr_t>(anchor));
+  (void)anchor;
+  std::string suffix = "_" + std::to_string(nextGlobalTensorNameId());
   std::string shapeTypeName  = "GTShape"  + suffix;
   std::string strideTypeName = "GTStride" + suffix;
   std::string gtTypeName     = "GT"       + suffix;
@@ -6406,8 +6412,22 @@ struct PTOStoreFPSToEmitC : public OpConversionPattern<pto::TStoreFPOp> {
     Value src = peelUnrealized(adaptor.getSrc());
     Value fp = peelUnrealized(adaptor.getFp());
     Value dst = peelUnrealized(adaptor.getDst());
+    Value dstArg = dst;
+    if (auto dstMrTy = dyn_cast<MemRefType>(op.getDst().getType())) {
+      bool isGlobal = true;
+      if (auto asAttr =
+              dyn_cast_or_null<pto::AddressSpaceAttr>(dstMrTy.getMemorySpace())) {
+        auto as = asAttr.getAddressSpace();
+        isGlobal = (as == pto::AddressSpace::GM || as == pto::AddressSpace::Zero);
+      }
+      if (isGlobal) {
+        if (Value gt = buildGlobalTensorFromMemref(rewriter, loc, dst, dstMrTy,
+                                                  op.getOperation()))
+          dstArg = gt;
+      }
+    }
 
-    SmallVector<Value, 4> operands{dst, src, fp};
+    SmallVector<Value, 3> operands{dstArg, src, fp};
     rewriter.create<emitc::CallOpaqueOp>(
         loc, TypeRange{}, "TSTORE_FP",
         /*args=*/ArrayAttr{}, /*templateArgs=*/ArrayAttr{},
