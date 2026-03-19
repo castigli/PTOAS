@@ -5631,11 +5631,9 @@ mlir::LogicalResult mlir::pto::TSelSOp::verify() {
       emitOpError("failed to get element type for operands");
       return failure();
     }
-    if (eMask != eDst || eSrc != eDst || eTmp != eDst)
-      return emitOpError("expects mask, src, tmp, and dst to have the same element type");
-    if (failed(verifyTileBufSameValidShape(*this, tMask, tDst, "mask", "dst")) ||
-        failed(verifyTileBufSameValidShape(*this, tSrc, tDst, "src", "dst")) ||
-        failed(verifyTileBufSameValidShape(*this, tTmp, tDst, "tmp", "dst")))
+    if (eSrc != eDst)
+      return emitOpError("expects src and dst to have the same element type");
+    if (failed(verifyTileBufSameValidShape(*this, tSrc, tDst, "src", "dst")))
       return failure();
     return eDst;
   };
@@ -5644,20 +5642,17 @@ mlir::LogicalResult mlir::pto::TSelSOp::verify() {
     FailureOr<Type> elemOr = verifyCommon();
     if (failed(elemOr))
       return failure();
-    Type tMask = getMask().getType();
     Type tSrc = getSrc().getType();
-    Type tTmp = getTmp().getType();
     Type tDst = getDst().getType();
-    if (!isRowMajorTileBuf(tMask) || !isRowMajorTileBuf(tSrc) ||
-        !isRowMajorTileBuf(tTmp) || !isRowMajorTileBuf(tDst))
-      return emitOpError("expects mask, src, tmp, and dst to use row-major layout");
+    if (!isRowMajorTileBuf(tSrc) || !isRowMajorTileBuf(tDst))
+      return emitOpError("expects src and dst to use row-major layout");
     Type elem = *elemOr;
     bool ok = elem.isF16() || elem.isF32();
     if (auto it = mlir::dyn_cast<mlir::IntegerType>(elem))
       ok = it.isSignless() && (it.getWidth() == 16 || it.getWidth() == 32);
     if (!ok)
       return emitOpError(
-          "expects A2/A3 tsels mask, src, and dst element type to be i16, i32, f16, or f32");
+          "expects A2/A3 tsels src and dst element type to be i16, i32, f16, or f32");
     return success();
   };
 
@@ -5669,16 +5664,15 @@ mlir::LogicalResult mlir::pto::TSelSOp::verify() {
     Type tSrc = getSrc().getType();
     Type tTmp = getTmp().getType();
     Type tDst = getDst().getType();
-    if (!isRowMajorTileBuf(tMask) || !isRowMajorTileBuf(tSrc) ||
-        !isRowMajorTileBuf(tTmp) || !isRowMajorTileBuf(tDst))
-      return emitOpError("expects mask, src, tmp, and dst to use row-major layout");
+    if (!isRowMajorTileBuf(tSrc) || !isRowMajorTileBuf(tDst))
+      return emitOpError("expects src and dst to use row-major layout");
     Type elem = *elemOr;
     bool ok = elem.isF16() || elem.isF32();
     if (auto it = mlir::dyn_cast<mlir::IntegerType>(elem))
       ok = it.isSignless() && (it.getWidth() == 8 || it.getWidth() == 16 || it.getWidth() == 32);
     if (!ok)
       return emitOpError(
-          "expects A5 tsels mask, src, and dst element type to be i8, i16, i32, f16, or f32");
+          "expects A5 tsels src and dst element type to be i8, i16, i32, f16, or f32");
     return success();
   };
 
