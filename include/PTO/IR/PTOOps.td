@@ -1173,6 +1173,378 @@ def SectionCubeOp : PTO_SectionOp<"section.cube">;
 def SectionVectorOp : PTO_SectionOp<"section.vector">;
 
 //===----------------------------------------------------------------------===//
+// Frontend TPUSH/TPOP Pipe Communication Ops
+//===----------------------------------------------------------------------===//
+
+def AicInitializePipeOp : PTO_Op<"aic_initialize_pipe"> {
+  let summary = "Frontend Cube-kernel pipe initialization";
+
+  let arguments = (ins
+      I8Attr:$dir_mask,
+      I32Attr:$slot_size,
+      Optional<I32>:$gm_slot_buffer,
+      I32:$c2v_consumer_buf,
+      I32:$v2c_consumer_buf
+  );
+
+  let results = (outs);
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `{` `dir_mask` `=` $dir_mask `,`
+        `slot_size` `=` $slot_size `}`
+    `(`
+      (`gm_slot_buffer` `=` $gm_slot_buffer^ `:` type($gm_slot_buffer) `,`)?
+      `c2v_consumer_buf` `=` $c2v_consumer_buf `:` type($c2v_consumer_buf) `,`
+      `v2c_consumer_buf` `=` $v2c_consumer_buf `:` type($v2c_consumer_buf)
+    `)`
+    attr-dict
+  }];
+}
+
+def AivInitializePipeOp : PTO_Op<"aiv_initialize_pipe"> {
+  let summary = "Frontend Vector-kernel pipe initialization";
+
+  let arguments = (ins
+      I8Attr:$dir_mask,
+      I32Attr:$slot_size,
+      Optional<I32>:$gm_slot_buffer,
+      I32:$c2v_consumer_buf,
+      I32:$v2c_consumer_buf
+  );
+
+  let results = (outs);
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `{` `dir_mask` `=` $dir_mask `,`
+        `slot_size` `=` $slot_size `}`
+    `(`
+      (`gm_slot_buffer` `=` $gm_slot_buffer^ `:` type($gm_slot_buffer) `,`)?
+      `c2v_consumer_buf` `=` $c2v_consumer_buf `:` type($c2v_consumer_buf) `,`
+      `v2c_consumer_buf` `=` $v2c_consumer_buf `:` type($v2c_consumer_buf)
+    `)`
+    attr-dict
+  }];
+}
+
+def TPushToAivOp : PTO_TOp<"tpush_to_aiv"> {
+  let summary = "Frontend C2V producer push from Cube to Vector";
+
+  let arguments = (ins
+      PTODpsType:$tile,
+      I8Attr:$split
+  );
+
+  let results = (outs);
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `(` $tile `:` qualified(type($tile)) `)`
+    `{` `split` `=` $split `}` attr-dict
+  }];
+}
+
+def TPushToAicOp : PTO_TOp<"tpush_to_aic"> {
+  let summary = "Frontend V2C producer push from Vector to Cube";
+
+  let arguments = (ins
+      PTODpsType:$tile,
+      I8Attr:$split
+  );
+
+  let results = (outs);
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `(` $tile `:` qualified(type($tile)) `)`
+    `{` `split` `=` $split `}` attr-dict
+  }];
+}
+
+def TPopFromAicOp : PTO_TOp<"tpop_from_aic"> {
+  let summary = "Frontend C2V consumer pop in Vector kernel";
+
+  let arguments = (ins
+      I8Attr:$split
+  );
+
+  let results = (outs PTODpsType:$tile);
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `{` `split` `=` $split `}` attr-dict `->` qualified(type($tile))
+  }];
+}
+
+def TPopFromAivOp : PTO_TOp<"tpop_from_aiv"> {
+  let summary = "Frontend V2C consumer pop in Cube kernel";
+
+  let arguments = (ins
+      I8Attr:$split
+  );
+
+  let results = (outs PTODpsType:$tile);
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `{` `split` `=` $split `}` attr-dict `->` qualified(type($tile))
+  }];
+}
+
+def TFreeFromAicOp : PTO_TOp<"tfree_from_aic"> {
+  let summary = "Frontend C2V consumer free in Vector kernel";
+
+  let arguments = (ins
+      I8Attr:$split
+  );
+
+  let results = (outs);
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `{` `split` `=` $split `}` attr-dict
+  }];
+}
+
+def TFreeFromAivOp : PTO_TOp<"tfree_from_aiv"> {
+  let summary = "Frontend V2C consumer free in Cube kernel";
+
+  let arguments = (ins
+      I8Attr:$split
+  );
+
+  let results = (outs);
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `{` `split` `=` $split `}` attr-dict
+  }];
+}
+
+def ReserveBufferOp : PTO_Op<"reserve_buffer"> {
+  let summary = "Reserve a local consumer slot buffer";
+
+  let arguments = (ins
+      StrAttr:$name,
+      I32Attr:$size,
+      PTO_AddressSpaceAttr:$location,
+      BoolAttr:$autoAlloc,
+      OptionalAttr<I32Attr>:$base
+  );
+
+  let results = (outs I32:$addr);
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `{` `name` `=` $name `,`
+        `size` `=` $size `,`
+        `location` `=` $location `,`
+        `auto` `=` $autoAlloc
+        (`,` `base` `=` $base^)?
+        `}` attr-dict `->` type($addr)
+  }];
+}
+
+def ImportReservedBufferOp : PTO_Op<"import_reserved_buffer"> {
+  let summary = "Import a peer reserved local consumer slot buffer";
+
+  let arguments = (ins
+      StrAttr:$name,
+      FlatSymbolRefAttr:$peer_func
+  );
+
+  let results = (outs I32:$addr);
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `{` `name` `=` $name `,`
+        `peer_func` `=` $peer_func
+        `}` attr-dict `->` type($addr)
+  }];
+}
+
+//===----------------------------------------------------------------------===//
+// TPUSH/TPOP Pipe Communication Ops
+//===----------------------------------------------------------------------===//
+
+def InitializeL2G2LPipeOp : PTO_Op<"initialize_l2g2l_pipe", [
+    DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
+]> {
+  let summary = "Initialize a local-to-global-to-local pipe handle";
+
+  let arguments = (ins
+      I8Attr:$dir_mask,
+      I32Attr:$slot_size,
+      I32Attr:$slot_num,
+      OptionalAttr<I32Attr>:$local_slot_num,
+      OptionalAttr<I32Attr>:$flag_base,
+      AnyType:$gm_addr,
+      AnyType:$local_addr
+  );
+
+  let results = (outs PipeType:$pipe);
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `{` `dir_mask` `=` $dir_mask `,`
+        `slot_size` `=` $slot_size `,`
+        `slot_num` `=` $slot_num
+        (`,` `local_slot_num` `=` $local_slot_num^)?
+        (`,` `flag_base` `=` $flag_base^)?
+        `}`
+    `(` $gm_addr `:` type($gm_addr) `,` $local_addr `:` type($local_addr) `)`
+    attr-dict `->` qualified(type($pipe))
+  }];
+}
+
+def InitializeL2LPipeOp : PTO_Op<"initialize_l2l_pipe", [
+    DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
+]> {
+  let summary = "Initialize a local-to-local pipe handle";
+
+  let arguments = (ins
+      I8Attr:$dir_mask,
+      I32Attr:$slot_size,
+      I32Attr:$slot_num,
+      OptionalAttr<I32Attr>:$flag_base,
+      AnyType:$local_addr
+  );
+
+  let results = (outs PipeType:$pipe);
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `{` `dir_mask` `=` $dir_mask `,`
+        `slot_size` `=` $slot_size `,`
+        `slot_num` `=` $slot_num
+        (`,` `flag_base` `=` $flag_base^)?
+        `}`
+    `(` $local_addr `:` type($local_addr) `)`
+    attr-dict `->` qualified(type($pipe))
+  }];
+}
+
+def TPushOp : PTO_TOp<"tpush", [
+    OpPipeInterface,
+    DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
+]> {
+  let summary = "Push tile data through a unified pipe handle";
+
+  let arguments = (ins
+      PTODpsType:$tile,
+      PipeType:$pipe_handle,
+      I8Attr:$split
+  );
+
+  let results = (outs);
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `(` $tile `,` $pipe_handle `:` qualified(type($tile)) `,` qualified(type($pipe_handle)) `)`
+    `{` `split` `=` $split `}` attr-dict
+  }];
+
+  let extraClassDeclaration = [{
+    ::mlir::pto::PIPE getPipe() {
+      auto getAddressSpace = [](Type ty) -> std::optional<::mlir::pto::AddressSpace> {
+        if (auto tb = ::mlir::dyn_cast<::mlir::pto::TileBufType>(ty)) {
+          if (auto as = ::mlir::dyn_cast_or_null<::mlir::pto::AddressSpaceAttr>(
+                  tb.getMemorySpace()))
+            return as.getAddressSpace();
+          return std::nullopt;
+        }
+        if (auto mr = ::mlir::dyn_cast<::mlir::MemRefType>(ty)) {
+          if (auto ms = mr.getMemorySpace()) {
+            if (auto as = ::mlir::dyn_cast<::mlir::pto::AddressSpaceAttr>(ms))
+              return as.getAddressSpace();
+          }
+          return std::nullopt;
+        }
+        return std::nullopt;
+      };
+
+      auto as = getAddressSpace(getTile().getType());
+      if (!as)
+        return ::mlir::pto::PIPE::PIPE_UNASSIGNED;
+      if (*as == ::mlir::pto::AddressSpace::ACC)
+        return ::mlir::pto::PIPE::PIPE_FIX;
+      if (*as == ::mlir::pto::AddressSpace::VEC)
+        return ::mlir::pto::PIPE::PIPE_MTE3;
+      return ::mlir::pto::PIPE::PIPE_UNASSIGNED;
+    }
+  }];
+}
+
+def DeclareTileOp : PTO_Op<"declare_tile", [Pure]> {
+  let summary = "Declare a tile value whose address will be assigned later";
+
+  let results = (outs PTODpsType:$tile);
+
+  let assemblyFormat = [{
+    attr-dict `->` qualified(type($tile))
+  }];
+}
+
+def TPopOp : PTO_TOp<"tpop", [
+    PTO_DpsInitOpInterface,
+    OpPipeInterface,
+    DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
+]> {
+  let summary = "Bind a declared consumer tile to the next FIFO slot";
+
+  let arguments = (ins
+      PTODpsType:$tile,
+      PipeType:$pipe_handle,
+      I8Attr:$split
+  );
+
+  let results = (outs);
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `(` $tile `,` $pipe_handle `:` qualified(type($tile)) `,` qualified(type($pipe_handle)) `)`
+    `{` `split` `=` $split `}` attr-dict
+  }];
+
+  let extraClassDeclaration = [{
+    ::mlir::pto::PIPE getPipe() {
+      if (getPipeHandle().getDefiningOp<::mlir::pto::InitializeL2G2LPipeOp>())
+        return ::mlir::pto::PIPE::PIPE_MTE2;
+      if (getPipeHandle().getDefiningOp<::mlir::pto::InitializeL2LPipeOp>())
+        return ::mlir::pto::PIPE::PIPE_S;
+      return ::mlir::pto::PIPE::PIPE_UNASSIGNED;
+    }
+
+    ::mlir::MutableOperandRange getDpsInitsMutable() { return getTileMutable(); }
+  }];
+}
+
+def TFreeOp : PTO_TOp<"tfree", [
+    OpPipeInterface,
+    DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
+]> {
+  let summary = "Release the current consumer slot for a pipe";
+
+  let arguments = (ins
+      PipeType:$pipe_handle,
+      I8Attr:$split
+  );
+
+  let results = (outs);
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `(` $pipe_handle `:` qualified(type($pipe_handle)) `)`
+    `{` `split` `=` $split `}` attr-dict
+  }];
+
+  let extraClassDeclaration = [{
+    ::mlir::pto::PIPE getPipe() { return ::mlir::pto::PIPE::PIPE_S; }
+  }];
+}
+
+//===----------------------------------------------------------------------===//
 // Synchronization Ops
 //===----------------------------------------------------------------------===//
 

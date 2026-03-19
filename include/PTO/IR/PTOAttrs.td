@@ -194,6 +194,23 @@ def PTO_LayoutAttr : PTO_Attr<"Layout", "layout"> {
 // Function and Module Core Type
 //===----------------------------------------------------------------------===//
 
+def PTO_FunctionKernelKindCube : I32EnumAttrCase<"Cube", 0, "cube">;
+def PTO_FunctionKernelKindVector : I32EnumAttrCase<"Vector", 1, "vector">;
+
+def PTO_FunctionKernelKindEnum : PTO_I32Enum<
+  "FunctionKernelKind", "PTO Function Kernel Kind", [
+    PTO_FunctionKernelKindCube,
+    PTO_FunctionKernelKindVector
+  ]>;
+
+def PTO_FunctionKernelKindAttr : PTO_Attr<"FunctionKernelKind", "kernel_kind"> {
+  let parameters = (ins EnumParameter<PTO_FunctionKernelKindEnum>:$kernelKind);
+  let assemblyFormat = "`<` params `>`";
+  let description = [{
+    Stable frontend-visible function attribute for cube or vector kernel kind.
+  }];
+}
+
 def PTO_AIC : I32EnumAttrCase<"AIC", 1>;
 def PTO_AIV : I32EnumAttrCase<"AIV", 2>;
 def PTO_MIX : I32EnumAttrCase<"MIX", 3>;

@@ -194,3 +194,8 @@ def TileBufType : TypeDef<PTO_Dialect, "TileBuf"> {
     int32_t getPadValueI32() const;       // 0 null, 1 zero, 2 max, 3 min
   }];
 }
+
+def PipeType : TypeDef<PTO_Dialect, "Pipe"> {
+  let mnemonic = "pipe";
+  let summary = "Opaque pipe handle type for TPUSH/TPOP communication";
+}

@@ -6159,6 +6159,74 @@ pto.sync.wait #pto.pipe<PIPE_V>, 0
 
 ### 4.17 CV-Related Operations
 
+##### `#pto.kernel_kind<cube>` - Cube Kernel Function Attribute
+
+**Summary:** Marks a `func.func` as a Cube-side kernel function.
+
+**Semantics:**
+
+```mlir
+func.func @cube_kernel(...) attributes {pto.kernel_kind = #pto.kernel_kind<cube>}
+```
+
+The attribute declares that the function is executed in Cube kernel context.
+PTOAS uses this attribute to validate Cube-only frontend operations and to
+recognize the function as a Cube participant in Cube/Vector communication.
+
+**Attachment Site:** `func.func` attribute.
+
+**Constraints & Verification:**
+
+- Applies to kernel functions only
+- Must not conflict with Vector-only frontend operations
+
+**Basic Example:**
+
+```mlir
+func.func @cube_kernel()
+    attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+  // Cube-only operation
+  pto.tmatmul ins(...) outs(...)
+  return
+}
+```
+
+---
+
+##### `#pto.kernel_kind<vector>` - Vector Kernel Function Attribute
+
+**Summary:** Marks a `func.func` as a Vector-side kernel function.
+
+**Semantics:**
+
+```mlir
+func.func @vector_kernel(...) attributes {pto.kernel_kind = #pto.kernel_kind<vector>}
+```
+
+The attribute declares that the function is executed in Vector kernel context.
+PTOAS uses this attribute to validate Vector-only frontend operations and to
+recognize the function as a Vector participant in Cube/Vector communication.
+
+**Attachment Site:** `func.func` attribute.
+
+**Constraints & Verification:**
+
+- Applies to kernel functions only
+- Must not conflict with Cube-only frontend operations
+
+**Basic Example:**
+
+```mlir
+func.func @vector_kernel()
+    attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+  // Vector-only operation
+  pto.tadd ins(...) outs(...)
+  return
+}
+```
+
+---
+
 ##### `pto.section.cube` - Core-Specific Section (Cube)
 
 **Summary:** Marks a region of code that should be emitted only for cube cores.
@@ -6225,7 +6293,258 @@ pto.section.vector {
 
 ---
 
-### 4.18 Runtime Intrinsics
+### 4.18 Frontend Pipe Communication Operations
+
+PTOAS exposes a frontend-facing pipe communication interface for Cube/Vector
+FIFO-style tile exchange. These operations are intended for frontend/framework
+generated IR. The detailed design document is:
+
+- `docs/designs/ptoas-tpush-tpop-design.md`
+
+#### Common Notes
+
+- `dir_mask` uses the current directional encoding:
+  - `1`: C2V
+  - `2`: V2C
+  - `3`: both directions at frontend level
+- `slot_size` is expressed in bytes and uses the pre-split logical tile size.
+- `split` is a compile-time attribute, not a runtime SSA operand.
+- `split = 0/1/2` corresponds to `TILE_NO_SPLIT`, `TILE_UP_DOWN`, and
+  `TILE_LEFT_RIGHT`.
+- `pto.tpop_from_aic` and `pto.tpop_from_aiv` are result-valued frontend ops.
+- A single function currently models at most one logical C2V pipe and one
+  logical V2C pipe.
+
+##### `pto.reserve_buffer` - Reserve Local Consumer FIFO Buffer
+
+**Summary:** Declares a local reserved FIFO buffer region for the consumer side
+of one frontend logical pipe.
+
+**Syntax:**
+
+```mlir
+%buf = pto.reserve_buffer {
+  name = "c2v_fifo",
+  size = 8192,
+  location = #pto.address_space<vec>,
+  auto = true
+} -> i32
+```
+
+**Arguments:**
+
+- `name`: string attribute identifying the logical reserved buffer
+- `size`: reserved buffer size in bytes
+- `location`: local address-space attribute, typically `vec` or `mat`
+- `auto`: boolean allocation-mode flag in textual IR
+- `base`: optional explicit local base address
+
+**Results:** `i32` local base address value.
+
+**Constraints & Verification:**
+
+- At most one `pto.reserve_buffer` is expected in one function
+- `auto = false` requires explicit `base`
+- `location` must be a supported local address space
+
+##### `pto.import_reserved_buffer` - Import Peer Reserved FIFO Buffer
+
+**Summary:** Imports the resolved local FIFO base address from the peer
+function's reserved buffer declaration.
+
+**Syntax:**
+
+```mlir
+%buf = pto.import_reserved_buffer {
+  name = "c2v_fifo",
+  peer_func = @vector_kernel
+} -> i32
+```
+
+**Arguments:**
+
+- `name`: reserved-buffer name in the peer function
+- `peer_func`: peer `func.func` symbol
+
+**Results:** `i32` imported local base address value.
+
+**Constraints & Verification:**
+
+- At most one `pto.import_reserved_buffer` is expected in one function
+- `peer_func` must contain a matching `pto.reserve_buffer`
+
+##### `pto.aic_initialize_pipe` - Frontend Cube Pipe Initialization
+
+**Summary:** Frontend pipe initialization op used in Cube kernels.
+
+**Syntax:**
+
+```mlir
+pto.aic_initialize_pipe {dir_mask = 1, slot_size = 1024}
+  (c2v_consumer_buf = %c2v_import : i32,
+   v2c_consumer_buf = %c0_i32 : i32)
+```
+
+**Arguments:**
+
+- `dir_mask`: communication direction encoding
+- `slot_size`: logical slot size in bytes
+- `gm_slot_buffer`: optional GM slot-buffer operand
+- `c2v_consumer_buf`: C2V consumer local base address
+- `v2c_consumer_buf`: V2C consumer local base address
+
+**Results:** None.
+
+**Constraints & Verification:**
+
+- Must appear in Cube kernels
+- At most one `pto.aic_initialize_pipe` is expected in one Cube function
+
+##### `pto.aiv_initialize_pipe` - Frontend Vector Pipe Initialization
+
+**Summary:** Frontend pipe initialization op used in Vector kernels.
+
+**Syntax:**
+
+```mlir
+pto.aiv_initialize_pipe {dir_mask = 1, slot_size = 1024}
+  (c2v_consumer_buf = %c2v_local : i32,
+   v2c_consumer_buf = %c0_i32 : i32)
+```
+
+**Arguments:** Same operand and attribute structure as
+`pto.aic_initialize_pipe`.
+
+**Results:** None.
+
+**Constraints & Verification:**
+
+- Must appear in Vector kernels
+- At most one `pto.aiv_initialize_pipe` is expected in one Vector function
+
+##### `pto.tpush_to_aiv` - Frontend C2V Producer Push
+
+**Summary:** Pushes one tile from a Cube kernel to the C2V logical pipe.
+
+**Syntax:**
+
+```mlir
+pto.tpush_to_aiv(%tile : !pto.tile_buf<...>) {split = 1}
+```
+
+**Arguments:**
+
+- one tile operand
+- compile-time `split` attribute
+
+**Results:** None.
+
+**Constraints & Verification:**
+
+- Must appear in Cube kernels
+- Represents the producer side of a C2V transfer
+
+##### `pto.tpush_to_aic` - Frontend V2C Producer Push
+
+**Summary:** Pushes one tile from a Vector kernel to the V2C logical pipe.
+
+**Syntax:**
+
+```mlir
+pto.tpush_to_aic(%tile : !pto.tile_buf<...>) {split = 1}
+```
+
+**Arguments:**
+
+- one tile operand
+- compile-time `split` attribute
+
+**Results:** None.
+
+**Constraints & Verification:**
+
+- Must appear in Vector kernels
+- Represents the producer side of a V2C transfer
+
+##### `pto.tpop_from_aic` - Frontend C2V Consumer Pop
+
+**Summary:** Pops one tile from a C2V logical pipe in a Vector kernel.
+
+**Syntax:**
+
+```mlir
+%tile = pto.tpop_from_aic {split = 1} -> !pto.tile_buf<...>
+```
+
+**Arguments:** compile-time `split` attribute.
+
+**Results:** one `!pto.tile_buf<...>` result tile.
+
+**Constraints & Verification:**
+
+- Must appear in Vector kernels
+- Represents the consumer side of a C2V transfer
+
+##### `pto.tpop_from_aiv` - Frontend V2C Consumer Pop
+
+**Summary:** Pops one tile from a V2C logical pipe in a Cube kernel.
+
+**Syntax:**
+
+```mlir
+%tile = pto.tpop_from_aiv {split = 1} -> !pto.tile_buf<...>
+```
+
+**Arguments:** compile-time `split` attribute.
+
+**Results:** one `!pto.tile_buf<...>` result tile.
+
+**Constraints & Verification:**
+
+- Must appear in Cube kernels
+- Represents the consumer side of a V2C transfer
+
+##### `pto.tfree_from_aic` - Frontend C2V Consumer Free
+
+**Summary:** Releases the current C2V consumer slot in a Vector kernel.
+
+**Syntax:**
+
+```mlir
+pto.tfree_from_aic {split = 1}
+```
+
+**Arguments:** compile-time `split` attribute.
+
+**Results:** None.
+
+**Constraints & Verification:**
+
+- Must appear in Vector kernels
+- Represents the consumer free side of a C2V transfer
+
+##### `pto.tfree_from_aiv` - Frontend V2C Consumer Free
+
+**Summary:** Releases the current V2C consumer slot in a Cube kernel.
+
+**Syntax:**
+
+```mlir
+pto.tfree_from_aiv {split = 1}
+```
+
+**Arguments:** compile-time `split` attribute.
+
+**Results:** None.
+
+**Constraints & Verification:**
+
+- Must appear in Cube kernels
+- Represents the consumer free side of a V2C transfer
+
+---
+
+### 4.19 Runtime Intrinsics
 
 ##### `pto.get_block_idx`
 
@@ -6345,7 +6664,7 @@ result = subblock_num()
 %num = pto.get_subblock_num
 ```
 
-### 4.19 Debug Operations
+### 4.20 Debug Operations
 
 ##### `pto.tprint` - Print Tile
 

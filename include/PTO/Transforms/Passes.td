@@ -116,4 +116,78 @@ def PTOLoweringSyncToPipe : Pass<"pto-lowering-sync-to-pipe", "func::FuncOp"> {
   ];
 }
 
+def PTOWrapFunctionsInSections : Pass<"pto-wrap-functions-in-sections", "func::FuncOp"> {
+  let summary = "Wrap attributed single-core functions in PTO cube/vector sections";
+  let description = [{
+    Rewrites frontend-marked functions into the existing PTO section form:
+    - `pto.kernel_kind = #pto.kernel_kind<cube>` -> wrap the function body in
+      `pto.section.cube`
+    - `pto.kernel_kind = #pto.kernel_kind<vector>` -> wrap the function body
+      in `pto.section.vector`
+  }];
+
+  let constructor = "mlir::pto::createPTOWrapFunctionsInSectionsPass()";
+
+  let dependentDialects = [
+    "mlir::pto::PTODialect",
+    "mlir::func::FuncDialect"
+  ];
+}
+
+def PTOLowerFrontendPipeOps : Pass<"pto-lower-frontend-pipe-ops", "func::FuncOp"> {
+  let summary = "Lower frontend TPUSH/TPOP pipe ops to internal pipe ops";
+  let description = [{
+    Converts frontend `aic/aiv_initialize_pipe`, `tpush_to_*`,
+    `tpop_from_*`, and `tfree_from_*` ops into the internal unified pipe IR:
+    `initialize_l2l_pipe` / `initialize_l2g2l_pipe`, `tpush`,
+    `declare_tile`, `tpop`, and `tfree`.
+  }];
+
+  let constructor = "mlir::pto::createPTOLowerFrontendPipeOpsPass()";
+
+  let dependentDialects = [
+    "mlir::pto::PTODialect",
+    "mlir::func::FuncDialect"
+  ];
+}
+
+def PTOResolveReservedBuffers : Pass<"pto-resolve-reserved-buffers", "ModuleOp"> {
+  let summary = "Resolve reserved local buffer addresses and peer pipe flag bases";
+  let description = [{
+    Runs after `pto-plan-memory`. Assumes `pto.reserve_buffer` base addresses
+    have already been planned, then:
+    - aligns missing `flag_base` attrs for peer internal pipe init ops
+    - rejects internal pipe init ops without explicit `flag_base` when their
+      `local_addr` cannot be traced back to `pto.reserve_buffer` /
+      `pto.import_reserved_buffer`
+    - replaces `pto.reserve_buffer` / `pto.import_reserved_buffer` results with
+      resolved constant local addresses
+    - erases the frontend-only reserve/import ops before EmitC lowering
+  }];
+
+  let constructor = "mlir::pto::createPTOResolveReservedBuffersPass()";
+
+  let dependentDialects = [
+    "mlir::pto::PTODialect",
+    "mlir::func::FuncDialect",
+    "mlir::arith::ArithDialect"
+  ];
+}
+
+def PTOVerifyTFree : Pass<"pto-verify-tfree", "func::FuncOp"> {
+  let summary = "Verify explicit matching pto.tfree placement for pto.tpop";
+  let description = [{
+    For each `pto.tpop` in section.cube / section.vector, verify there is a
+    matching later `pto.tfree(pipe_handle)` in the same block, the borrowed
+    tile is not used after the free, and the same pipe does not accumulate
+    multiple outstanding pops before the matching free.
+  }];
+
+  let constructor = "mlir::pto::createPTOVerifyTFreePass()";
+
+  let dependentDialects = [
+    "mlir::pto::PTODialect"
+  ];
+}
+
 #endif // MLIR_DIALECT_PTO_PASSES

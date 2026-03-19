@@ -933,6 +933,11 @@ int main(int argc, char **argv) {
   // pm.addNestedPass<mlir::func::FuncOp>(pto::createPTOInsertCVMovPass());
   // pm.addNestedPass<mlir::func::FuncOp>(pto::createPTOConvertToDPSPass());
   // pm.addNestedPass<mlir::func::FuncOp>(pto::createPTOInsertLoadStoreForMixCVPass());
+  pm.addNestedPass<mlir::func::FuncOp>(
+      pto::createPTOLowerFrontendPipeOpsPass());
+  pm.addNestedPass<mlir::func::FuncOp>(
+      pto::createPTOWrapFunctionsInSectionsPass());
+  pm.addNestedPass<mlir::func::FuncOp>(pto::createPTOVerifyTFreePass());
   pm.addNestedPass<mlir::func::FuncOp>(pto::createLoweringSyncToPipePass());
   
   if (!disableInferLayout)
@@ -947,6 +952,7 @@ int main(int argc, char **argv) {
     planMemoryOption.enableGlobalReuse = false;
     planMemoryOption.enablePrintMemoryAllocatedSize = false;
     pm.addPass(pto::createPlanMemoryPass(planMemoryOption));
+    pm.addPass(pto::createPTOResolveReservedBuffersPass());
   }
 
   // Conditionally add Sync pass based on flag.

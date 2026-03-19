@@ -8,6 +8,7 @@
 
 #include "PTOPlanMemory.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Transforms/DialectConversion.h"
@@ -15,6 +16,10 @@
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
 #include "llvm/Support/Debug.h"
+
+#include <algorithm>
+#include <optional>
+#include <vector>
 
 #define DEBUG_TYPE "pto-plan-memory"
 #define LDBG(X) LLVM_DEBUG(llvm::dbgs() << X)
@@ -30,6 +35,201 @@ using namespace mlir;
 using namespace pto;
 
 namespace {
+
+struct LocalMemSpec {
+  int64_t capacityBits = 0;
+  int64_t alignBytes = 1;
+};
+
+static int64_t ceilDivBitsToBytes(int64_t bits) { return (bits + 7) / 8; }
+
+static int64_t alignUpBytes(int64_t value, int64_t align) {
+  if (align <= 1)
+    return value;
+  int64_t rem = value % align;
+  if (rem == 0)
+    return value;
+  return value + (align - rem);
+}
+
+static LocalMemSpec getLocalMemSpec(Operation *op, AddressSpace as) {
+  auto moduleOp = op->getParentOfType<ModuleOp>();
+  bool isA5 = false;
+  if (moduleOp) {
+    if (auto archAttr = moduleOp->getAttrOfType<StringAttr>("pto.target_arch"))
+      isA5 = archAttr.getValue().equals_insensitive("a5");
+  }
+
+  switch (as) {
+  case AddressSpace::VEC:
+    return isA5 ? LocalMemSpec{2031616, 256} : LocalMemSpec{1572864, 256};
+  case AddressSpace::MAT:
+    return LocalMemSpec{4194304, 256};
+  default:
+    return LocalMemSpec{};
+  }
+}
+
+enum class ReserveBufferMode {
+  None,
+  Auto,
+  Manual,
+};
+
+struct ReserveBufferPlan {
+  ReserveBufferMode mode = ReserveBufferMode::None;
+  ReserveBufferOp reserveOp;
+  AddressSpace addressSpace = AddressSpace::Zero;
+  int64_t sizeBytes = 0;
+  int64_t capacityBytes = 0;
+  int64_t alignBytes = 1;
+};
+
+static LogicalResult analyzeReserveBufferPlan(func::FuncOp funcOp,
+                                              ReserveBufferPlan &plan) {
+  SmallVector<ReserveBufferOp> reserveOps;
+  funcOp.walk(
+      [&](ReserveBufferOp reserveOp) { reserveOps.push_back(reserveOp); });
+
+  if (reserveOps.empty())
+    return success();
+  if (reserveOps.size() > 1) {
+    return funcOp.emitOpError(
+        "expects at most one pto.reserve_buffer per function");
+  }
+
+  ReserveBufferOp reserveOp = reserveOps.front();
+  AddressSpace as = reserveOp.getLocation().getAddressSpace();
+  auto spec = getLocalMemSpec(reserveOp.getOperation(), as);
+  if (spec.capacityBits <= 0 || spec.alignBytes <= 0)
+    return reserveOp.emitOpError("unsupported reserve_buffer location");
+
+  int64_t capacityBytes = spec.capacityBits / 8;
+  int64_t sizeBytes = reserveOp.getSize();
+  bool autoAlloc = reserveOp.getAutoAlloc();
+  plan.mode = autoAlloc ? ReserveBufferMode::Auto : ReserveBufferMode::Manual;
+  plan.reserveOp = reserveOp;
+  plan.addressSpace = as;
+  plan.sizeBytes = sizeBytes;
+  plan.capacityBytes = capacityBytes;
+  plan.alignBytes = spec.alignBytes;
+
+  // Auto mode only declares that one contiguous region must be reserved.
+  // The concrete base is filled later from a hole in the target local space.
+  if (autoAlloc) {
+    if (reserveOp.getBaseAttr()) {
+      return reserveOp.emitOpError(
+          "expects 'base' to be absent when 'auto' is true");
+    }
+    return success();
+  }
+
+  // In manual mode, reserve_buffer.base is already fixed by the frontend or an
+  // earlier stage. Only basic validation is needed here.
+  auto baseAttr = reserveOp.getBaseAttr();
+  if (!baseAttr)
+    return reserveOp.emitOpError("expects 'base' when 'auto' is false");
+
+  int64_t baseBytes = baseAttr.getInt();
+  if (baseBytes % spec.alignBytes != 0) {
+    return reserveOp.emitOpError(
+        "expects 'base' to satisfy the address-space alignment");
+  }
+  if (baseBytes + sizeBytes > capacityBytes) {
+    return reserveOp.emitOpError("exceeds available local memory capacity");
+  }
+
+  return success();
+}
+
+struct OccupiedByteRange {
+  int64_t begin = 0;
+  int64_t end = 0;
+};
+
+static LogicalResult assignAutoReserveBufferBase(
+    ReserveBufferPlan &plan,
+    const std::map<Value, BufferInfo, ValueComparator> &bufferInfos,
+    const DenseMap<Value, SmallVector<uint64_t>> &buffer2Offsets) {
+  if (plan.mode != ReserveBufferMode::Auto || !plan.reserveOp)
+    return success();
+
+  SmallVector<OccupiedByteRange> occupied;
+  for (const auto &it : bufferInfos) {
+    Value buffer = it.first;
+    const BufferInfo &bufferInfo = it.second;
+    if (bufferInfo.bufferScope != plan.addressSpace)
+      continue;
+
+    auto offsetsIt = buffer2Offsets.find(buffer);
+    if (offsetsIt == buffer2Offsets.end())
+      continue;
+
+    // Reserve-buffer allocation intentionally happens after normal MemPlan.
+    // Reconstruct the already occupied byte ranges from the planned local
+    // buffers, then place reserve_buffer into the first aligned hole.
+    int64_t occupiedSizeBytes =
+        alignUpBytes(ceilDivBitsToBytes(bufferInfo.constBits), plan.alignBytes);
+    for (uint64_t offsetBytes : offsetsIt->second) {
+      occupied.push_back(OccupiedByteRange{static_cast<int64_t>(offsetBytes),
+                                           static_cast<int64_t>(offsetBytes) +
+                                               occupiedSizeBytes});
+    }
+  }
+
+  llvm::sort(occupied,
+             [](const OccupiedByteRange &lhs, const OccupiedByteRange &rhs) {
+               return lhs.begin < rhs.begin;
+             });
+
+  // Merge overlapping or adjacent occupied ranges first so the later scan only
+  // needs to reason about real holes between disjoint intervals.
+  SmallVector<OccupiedByteRange> merged;
+  for (const OccupiedByteRange &range : occupied) {
+    if (merged.empty() || range.begin > merged.back().end) {
+      merged.push_back(range);
+      continue;
+    }
+    merged.back().end = std::max(merged.back().end, range.end);
+  }
+
+  // First-fit search: try address 0 first, then keep moving the candidate to
+  // the end of the current occupied interval until a large-enough aligned hole
+  // is found.
+  int64_t candidateBase = 0;
+  for (const OccupiedByteRange &range : merged) {
+    candidateBase = alignUpBytes(candidateBase, plan.alignBytes);
+    if (candidateBase + plan.sizeBytes <= range.begin)
+      break;
+    candidateBase = std::max(candidateBase, range.end);
+  }
+  candidateBase = alignUpBytes(candidateBase, plan.alignBytes);
+
+  if (candidateBase + plan.sizeBytes > plan.capacityBytes) {
+    return plan.reserveOp.emitOpError(
+        "failed to allocate local memory hole for reserve_buffer");
+  }
+
+  plan.reserveOp->setAttr(
+      "base",
+      IntegerAttr::get(IntegerType::get(plan.reserveOp.getContext(), 32),
+                       candidateBase));
+  return success();
+}
+
+static LogicalResult verifyManualReserveBufferMode(func::FuncOp funcOp) {
+  LogicalResult result = success();
+  funcOp.walk([&](memref::AllocOp allocOp) {
+    auto memorySpaceAttr = GetBufferSpaceAttr(allocOp.getResult());
+    if (!isLocalBuffer(memorySpaceAttr))
+      return WalkResult::advance();
+    result = allocOp.emitOpError("cannot use pto.reserve_buffer with auto = "
+                                 "false when local memref.alloc "
+                                 "still requires PlanMemory allocation");
+    return WalkResult::interrupt();
+  });
+  return result;
+}
 
 // bool isReusableCastOp(pto::VCastOp &castOp, Value output, Value input) {
 //   auto rank = dyn_cast<MemRefType>(output.getType()).getRank();
@@ -107,8 +307,8 @@ void MemLivenessAnalysis::RecursionIR(Region *region, Liveness live) {
       auto aliasPair = mayAliasOp.value();
       UpdateBufferAlias(aliasPair.first, aliasPair.second);
     } else if (auto bindOp = dyn_cast<pto::BindTileOp>(op)) {
-      // 逻辑：BindTile 的 Result 只是 Source 的别名
-      // 这告诉 Liveness Analysis：用到 result 的地方就是在用 source
+      // BindTile result is only an alias of the source buffer. Treat every use
+      // of the result as a use of the source in liveness analysis.
       UpdateBufferAlias(bindOp.getResult(), bindOp.getSource());
       return WalkResult::advance();
     } else if (isLocalMemPlan() && dyn_cast<memref::AllocOp>(op)) {
@@ -162,6 +362,10 @@ void MemLivenessAnalysis::RecursionIR(Region *region, Liveness live) {
     } else if (auto callOp = dyn_cast<func::CallOp>(op)) {
       UpdateOpGenInfo(curOpInfo, llvm::to_vector(callOp->getOperands()));
       // UpdateOpTempGenInfo(curOpInfo);
+      OpKillHandle(curOpInfo, live, op->getBlock());
+    } else if (isa<pto::TPushOp, pto::TFreeOp, pto::InitializeL2LPipeOp,
+                   pto::InitializeL2G2LPipeOp>(op)) {
+      UpdateOpGenInfo(curOpInfo, llvm::to_vector(op->getOperands()));
       OpKillHandle(curOpInfo, live, op->getBlock());
     } else if (auto gpuLaunchOp = dyn_cast<gpu::LaunchFuncOp>(op)) {
       UpdateOpGenInfo(curOpInfo, llvm::to_vector(gpuLaunchOp->getOperands()));
@@ -1974,6 +2178,21 @@ void PlanMemoryPass::runOnOperation() {
     //   }
     // }
 
+    ReserveBufferPlan reservePlan;
+    if (this->memMode == MemPlanMode::LOCAL_MEM_PLAN &&
+        failed(analyzeReserveBufferPlan(funcOp, reservePlan))) {
+      return signalPassFailure();
+    }
+    if (this->memMode == MemPlanMode::LOCAL_MEM_PLAN &&
+        reservePlan.mode == ReserveBufferMode::Manual) {
+      // Manual mode means the function's local addresses are already fixed.
+      // Reject any remaining local allocs that would still need PlanMemory.
+      if (failed(verifyManualReserveBufferMode(funcOp))) {
+        return signalPassFailure();
+      }
+      continue;
+    }
+
     MemLivenessAnalysis memLiveness(funcOp, this->memMode);
     memLiveness.build();
 
@@ -1993,6 +2212,14 @@ void PlanMemoryPass::runOnOperation() {
     // memPlan.SetVFInplaceReuseInfo(
     //     vfInplaceReuseAnalysis.getVFCallInplaceReuseInfo(funcOp));
     if (failed(memPlan.plan())) {
+      return signalPassFailure();
+    }
+    // Keep reserve_buffer allocation outside the core MemPlan algorithm:
+    // normal local buffers are planned first, then reserve_buffer claims one
+    // aligned hole in its target address space.
+    if (this->memMode == MemPlanMode::LOCAL_MEM_PLAN &&
+        failed(assignAutoReserveBufferBase(reservePlan, memLiveness.bufferInfos,
+                                           memPlan.GetBuffer2Offsets()))) {
       return signalPassFailure();
     }
 

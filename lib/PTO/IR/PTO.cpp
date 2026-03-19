@@ -21,6 +21,7 @@
 #include "mlir/IR/TypeUtilities.h"
 #include "mlir/IR/Value.h"
 #include "mlir/IR/AsmState.h"
+#include "mlir/IR/SymbolTable.h"
 #include "mlir/IR/Types.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Support/LLVM.h"
@@ -6981,6 +6982,315 @@ void TMatmulMxBiasOp::getEffects(SmallVectorImpl<SideEffects::EffectInstance<Mem
   // 这里的 bias 是必选的 AnyType:$bias，所以是 Singleton
   addEffect(effects, &getBiasMutable(), MemoryEffects::Read::get());
   addEffect(effects, &getDstMutable(), MemoryEffects::Write::get());
+}
+
+static bool isInsideSectionCube(Operation *op) {
+  return op->getParentOfType<pto::SectionCubeOp>() != nullptr;
+}
+
+static bool isInsideSectionVector(Operation *op) {
+  return op->getParentOfType<pto::SectionVectorOp>() != nullptr;
+}
+
+static std::optional<FunctionKernelKind>
+getEnclosingFunctionKernelKind(Operation *op) {
+  auto funcOp = op->getParentOfType<func::FuncOp>();
+  if (!funcOp)
+    return std::nullopt;
+
+  auto kernelKindAttr =
+      funcOp->getAttrOfType<FunctionKernelKindAttr>(
+          FunctionKernelKindAttr::name);
+  if (!kernelKindAttr)
+    return std::nullopt;
+
+  return kernelKindAttr.getKernelKind();
+}
+
+static bool isInsideSectionOrAttributedKernel(Operation *op) {
+  return isInsideSectionCube(op) || isInsideSectionVector(op) ||
+         getEnclosingFunctionKernelKind(op).has_value();
+}
+
+static LogicalResult verifySplitAttr(Operation *op, int64_t split) {
+  if (split < 0 || split > 2)
+    return op->emitOpError("expects 'split' to be 0, 1, or 2");
+  return success();
+}
+
+static LogicalResult verifyFrontendKernelKind(Operation *op,
+                                              FunctionKernelKind expected,
+                                              StringRef kernelName) {
+  auto kernelKind = getEnclosingFunctionKernelKind(op);
+  if (!kernelKind || *kernelKind != expected) {
+    return op->emitOpError("must be inside a ")
+           << kernelName << " kernel function";
+  }
+  return success();
+}
+
+template <typename InitOpT>
+static LogicalResult verifyFrontendInitCommon(InitOpT op,
+                                              FunctionKernelKind expected,
+                                              StringRef kernelName) {
+  if (failed(verifyFrontendKernelKind(op.getOperation(), expected, kernelName)))
+    return failure();
+
+  auto funcOp = op->template getParentOfType<func::FuncOp>();
+  if (!funcOp)
+    return op.emitOpError("must be nested under a func.func");
+
+  unsigned sameInitCount = 0;
+  funcOp.walk([&](InitOpT) { ++sameInitCount; });
+  if (sameInitCount > 1)
+    return op.emitOpError("requires at most one matching initialize_pipe op per function");
+
+  int8_t dirMask = op.getDirMask();
+  if (dirMask != 1 && dirMask != 2 && dirMask != 3)
+    return op.emitOpError("expects 'dir_mask' to be 1, 2, or 3");
+  if (op.getSlotSize() <= 0)
+    return op.emitOpError("expects 'slot_size' to be greater than 0");
+
+  return success();
+}
+
+static ReserveBufferOp findReserveBufferByName(func::FuncOp funcOp,
+                                               StringRef name) {
+  ReserveBufferOp found;
+  funcOp.walk([&](ReserveBufferOp reserveOp) {
+    if (reserveOp.getName() != name)
+      return WalkResult::advance();
+    found = reserveOp;
+    return WalkResult::interrupt();
+  });
+  return found;
+}
+
+LogicalResult ReserveBufferOp::verify() {
+  auto funcOp = getOperation()->getParentOfType<func::FuncOp>();
+  if (!funcOp)
+    return emitOpError("must be nested under a func.func");
+
+  if (getSize() <= 0)
+    return emitOpError("expects 'size' to be greater than 0");
+
+  auto location = getLocation().getAddressSpace();
+  if (location != AddressSpace::VEC && location != AddressSpace::MAT)
+    return emitOpError("expects 'location' to be #pto.address_space<vec> or #pto.address_space<mat>");
+
+  if (!getAutoAlloc() && !getBaseAttr())
+    return emitOpError("expects 'base' when 'auto' is false");
+
+  if (auto baseAttr = getBaseAttr(); baseAttr && baseAttr.getInt() < 0)
+    return emitOpError("expects 'base' to be non-negative when present");
+
+  unsigned reserveCount = 0;
+  funcOp.walk([&](ReserveBufferOp) { ++reserveCount; });
+  if (reserveCount > 1)
+    return emitOpError("expects at most one reserve_buffer in the function");
+
+  unsigned sameNameCount = 0;
+  funcOp.walk([&](ReserveBufferOp reserveOp) {
+    if (reserveOp.getName() == getName())
+      ++sameNameCount;
+  });
+  if (sameNameCount > 1)
+    return emitOpError("requires 'name' to be unique within the function");
+
+  return success();
+}
+
+LogicalResult ImportReservedBufferOp::verify() {
+  auto funcOp = getOperation()->getParentOfType<func::FuncOp>();
+  if (!funcOp)
+    return emitOpError("must be nested under a func.func");
+
+  unsigned importCount = 0;
+  funcOp.walk([&](ImportReservedBufferOp) { ++importCount; });
+  if (importCount > 1)
+    return emitOpError("expects at most one import_reserved_buffer in the function");
+
+  auto peerFunc = SymbolTable::lookupNearestSymbolFrom<func::FuncOp>(
+      getOperation(), getPeerFuncAttr());
+  if (!peerFunc)
+    return emitOpError("expects 'peer_func' to reference an existing func.func");
+
+  if (!findReserveBufferByName(peerFunc, getName()))
+    return emitOpError("expects matching peer reserve_buffer to exist");
+
+  return success();
+}
+
+static LogicalResult verifyFrontendSplitOp(Operation *op,
+                                           FunctionKernelKind expected,
+                                           StringRef kernelName,
+                                           int64_t split) {
+  if (failed(verifyFrontendKernelKind(op, expected, kernelName)))
+    return failure();
+  return verifySplitAttr(op, split);
+}
+
+static LogicalResult verifyPipeShape(Operation *op, int8_t dirMask, int32_t slotSize,
+                                     int32_t slotNum,
+                                     std::optional<int32_t> flagBase) {
+  if (dirMask != 1 && dirMask != 2)
+    return op->emitOpError("expects 'dir_mask' to be 1 or 2");
+  if (slotSize <= 0)
+    return op->emitOpError("expects 'slot_size' to be greater than 0");
+  if (slotNum != 4 && slotNum != 8)
+    return op->emitOpError("expects 'slot_num' to be 4 or 8");
+  if (flagBase && *flagBase < 0)
+    return op->emitOpError("expects 'flag_base' to be non-negative when present");
+
+  return success();
+}
+
+static LogicalResult verifyPipeHandleProducer(Operation *op, Value pipeHandle) {
+  if (!isa<pto::PipeType>(pipeHandle.getType()))
+    return op->emitOpError("expects pipe operand type !pto.pipe");
+  if (!pipeHandle.getDefiningOp<InitializeL2LPipeOp>() &&
+      !pipeHandle.getDefiningOp<InitializeL2G2LPipeOp>()) {
+    return op->emitOpError(
+        "pipe_handle must be produced by pto.initialize_l2l_pipe or "
+        "pto.initialize_l2g2l_pipe");
+  }
+  return success();
+}
+
+LogicalResult AicInitializePipeOp::verify() {
+  return verifyFrontendInitCommon(*this, FunctionKernelKind::Cube, "cube");
+}
+
+LogicalResult AivInitializePipeOp::verify() {
+  return verifyFrontendInitCommon(*this, FunctionKernelKind::Vector, "vector");
+}
+
+LogicalResult TPushToAivOp::verify() {
+  return verifyFrontendSplitOp(getOperation(), FunctionKernelKind::Cube,
+                               "cube", getSplit());
+}
+
+LogicalResult TPushToAicOp::verify() {
+  return verifyFrontendSplitOp(getOperation(), FunctionKernelKind::Vector,
+                               "vector", getSplit());
+}
+
+LogicalResult TPopFromAicOp::verify() {
+  return verifyFrontendSplitOp(getOperation(), FunctionKernelKind::Vector,
+                               "vector", getSplit());
+}
+
+LogicalResult TPopFromAivOp::verify() {
+  return verifyFrontendSplitOp(getOperation(), FunctionKernelKind::Cube,
+                               "cube", getSplit());
+}
+
+LogicalResult TFreeFromAicOp::verify() {
+  return verifyFrontendSplitOp(getOperation(), FunctionKernelKind::Vector,
+                               "vector", getSplit());
+}
+
+LogicalResult TFreeFromAivOp::verify() {
+  return verifyFrontendSplitOp(getOperation(), FunctionKernelKind::Cube,
+                               "cube", getSplit());
+}
+
+LogicalResult InitializeL2G2LPipeOp::verify() {
+  if (failed(verifyPipeShape(getOperation(), getDirMask(), getSlotSize(),
+                             getSlotNum(),
+                             getFlagBaseAttr()
+                                 ? std::optional<int32_t>(getFlagBaseAttr().getInt())
+                                 : std::nullopt)))
+    return failure();
+
+  if (auto localSlotNumAttr = getLocalSlotNumAttr()) {
+    int32_t localSlotNum = localSlotNumAttr.getInt();
+    if (localSlotNum <= 0)
+      return emitOpError("expects 'local_slot_num' to be greater than 0");
+    if (localSlotNum > getSlotNum())
+      return emitOpError(
+          "expects 'local_slot_num' to be less than or equal to slot_num");
+  }
+
+  return success();
+}
+
+LogicalResult InitializeL2LPipeOp::verify() {
+  return verifyPipeShape(getOperation(), getDirMask(), getSlotSize(),
+                         getSlotNum(),
+                         getFlagBaseAttr()
+                             ? std::optional<int32_t>(getFlagBaseAttr().getInt())
+                             : std::nullopt);
+}
+
+LogicalResult TPushOp::verify() {
+  if (!isInsideSectionOrAttributedKernel(getOperation()))
+    return emitOpError("must be inside pto.section.cube/vector or a kernel_kind function");
+  if (failed(verifyPipeHandleProducer(getOperation(), getPipeHandle())))
+    return failure();
+  if (failed(verifySplitAttr(getOperation(), getSplit())))
+    return failure();
+  if (getPipe() == pto::PIPE::PIPE_UNASSIGNED)
+    return emitOpError("tile type must map to a supported producer pipe");
+  return success();
+}
+
+LogicalResult TPopOp::verify() {
+  if (!isInsideSectionOrAttributedKernel(getOperation()))
+    return emitOpError("must be inside pto.section.cube/vector or a kernel_kind function");
+  if (failed(verifyPipeHandleProducer(getOperation(), getPipeHandle())))
+    return failure();
+  if (failed(verifySplitAttr(getOperation(), getSplit())))
+    return failure();
+  if (getPipe() == pto::PIPE::PIPE_UNASSIGNED)
+    return emitOpError("pipe_handle must map to a supported consumer pipe");
+  return success();
+}
+
+LogicalResult TFreeOp::verify() {
+  if (!isInsideSectionOrAttributedKernel(getOperation()))
+    return emitOpError("must be inside pto.section.cube/vector or a kernel_kind function");
+  if (failed(verifyPipeHandleProducer(getOperation(), getPipeHandle())))
+    return failure();
+  return verifySplitAttr(getOperation(), getSplit());
+}
+
+void InitializeL2G2LPipeOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  addEffect(effects, &getGmAddrMutable(), MemoryEffects::Read::get());
+  addEffect(effects, &getLocalAddrMutable(), MemoryEffects::Read::get());
+  addEffect(effects, getOperation()->getOpResult(0), MemoryEffects::Write::get());
+}
+
+void InitializeL2LPipeOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  addEffect(effects, &getLocalAddrMutable(), MemoryEffects::Read::get());
+  addEffect(effects, getOperation()->getOpResult(0), MemoryEffects::Write::get());
+}
+
+void TPushOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  addEffect(effects, &getTileMutable(), MemoryEffects::Read::get());
+  addEffect(effects, &getPipeHandleMutable(), MemoryEffects::Read::get());
+  addEffect(effects, &getPipeHandleMutable(), MemoryEffects::Write::get());
+}
+
+void TPopOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  addEffect(effects, &getPipeHandleMutable(), MemoryEffects::Read::get());
+  addEffect(effects, &getPipeHandleMutable(), MemoryEffects::Write::get());
+  addEffect(effects, &getTileMutable(), MemoryEffects::Write::get());
+}
+
+void TFreeOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  addEffect(effects, &getPipeHandleMutable(), MemoryEffects::Read::get());
+  addEffect(effects, &getPipeHandleMutable(), MemoryEffects::Write::get());
 }
 
 // [Include 必须放在最后]
