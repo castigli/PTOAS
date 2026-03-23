@@ -96,6 +96,14 @@ static LogicalResult verifyNoTileUsesAfterTFree(TPopOp tpopOp,
   return success();
 }
 
+static bool isInsideSectionOrAttributedKernel(TPopOp tpopOp, func::FuncOp funcOp) {
+  if (tpopOp->getParentOfType<SectionCubeOp>() ||
+      tpopOp->getParentOfType<SectionVectorOp>())
+    return true;
+  return funcOp &&
+         funcOp->hasAttr(FunctionKernelKindAttr::name);
+}
+
 struct PTOVerifyTFreePass
     : public mlir::pto::impl::PTOVerifyTFreeBase<PTOVerifyTFreePass> {
   void runOnOperation() override {
@@ -105,8 +113,7 @@ struct PTOVerifyTFreePass
     funcOp.walk([&](TPopOp op) { tpops.push_back(op); });
 
     for (TPopOp tpopOp : tpops) {
-      if (!tpopOp->getParentOfType<SectionCubeOp>() &&
-          !tpopOp->getParentOfType<SectionVectorOp>())
+      if (!isInsideSectionOrAttributedKernel(tpopOp, funcOp))
         continue;
 
       TFreeOp existingTFree = findMatchingTFree(tpopOp);

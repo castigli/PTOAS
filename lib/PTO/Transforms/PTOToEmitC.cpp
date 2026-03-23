@@ -2441,6 +2441,22 @@ static void inferTileMNK(func::FuncOp f, int &M, int &N, int &K) {
   }
 }
 
+static std::optional<StringRef> getKernelKindMacro(func::FuncOp funcOp) {
+  auto kernelKindAttr =
+      funcOp->getAttrOfType<FunctionKernelKindAttr>(FunctionKernelKindAttr::name);
+  if (!kernelKindAttr)
+    return std::nullopt;
+
+  switch (kernelKindAttr.getKernelKind()) {
+  case FunctionKernelKind::Cube:
+    return StringRef("__DAV_CUBE__");
+  case FunctionKernelKind::Vector:
+    return StringRef("__DAV_VEC__");
+  }
+
+  llvm_unreachable("unexpected kernel kind");
+}
+
 struct FuncToEmitC : public OpConversionPattern<func::FuncOp> {
   using OpConversionPattern<func::FuncOp>::OpConversionPattern;
 
@@ -2500,11 +2516,31 @@ struct FuncToEmitC : public OpConversionPattern<func::FuncOp> {
                                            *getTypeConverter(), &entryConv)))
       return failure();
 
-    // [Compatibility patch] Preserve existing snippets that rely on `T`.
+    std::optional<StringRef> kernelKindMacro = getKernelKindMacro(op);
+
+    // Preserve the existing function prologue shape. `kernel_kind` functions are
+    // emitted with the same macro guard/reset sequence that used to come from
+    // early pto.section wrapping, but only after SCF pre-lowering has finished.
     {
       Block &entryBlock = emitcFunc.getBody().front();
       rewriter.setInsertionPointToStart(&entryBlock);
       rewriter.create<emitc::VerbatimOp>(op.getLoc(), "using T = float;");
+      if (kernelKindMacro) {
+        std::string startMacro = "\n#if defined(" + kernelKindMacro->str() + ")";
+        rewriter.create<emitc::VerbatimOp>(op.getLoc(), startMacro);
+        if (*kernelKindMacro == "__DAV_VEC__") {
+          rewriter.create<emitc::VerbatimOp>(op.getLoc(), "set_mask_norm();");
+          rewriter.create<emitc::VerbatimOp>(op.getLoc(),
+                                             "set_vector_mask(-1, -1);");
+        }
+      }
+    }
+
+    if (kernelKindMacro) {
+      Block &lastBlock = emitcFunc.getBody().back();
+      rewriter.setInsertionPoint(lastBlock.getTerminator());
+      std::string endMacro = "#endif // " + kernelKindMacro->str() + "\n";
+      rewriter.create<emitc::VerbatimOp>(op.getLoc(), endMacro);
     }
 
     rewriter.eraseOp(op);
