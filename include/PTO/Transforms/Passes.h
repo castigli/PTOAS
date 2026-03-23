@@ -35,8 +35,6 @@ enum class PTOArch {
   A5,
 };
 
-std::unique_ptr<Pass> createPTOHighDimLoweringPass();
-std::unique_ptr<Pass> createPTOVFloopGatherPass();
 std::unique_ptr<Pass> createLoweringSyncToPipePass();
 std::unique_ptr<Pass> createPTOLowerFrontendPipeOpsPass();
 std::unique_ptr<Pass> createPTOResolveReservedBuffersPass();
@@ -62,11 +60,8 @@ std::unique_ptr<Pass> createInferPTOMemScopePass();
 std::unique_ptr<Pass>
 createPlanMemoryPass(const PlanMemoryOptions &planMemoryOption = {});
 
-std::unique_ptr<Pass> createPTOInsertCVMovPass();
-std::unique_ptr<Pass> createPTOConvertToDPSPass();
 std::unique_ptr<Pass> createPTORemoveRedundantBarrierPass();
 std::unique_ptr<Pass> createPTOViewToMemrefPass();
-std::unique_ptr<mlir::Pass> createPTOInsertLoadStoreForMixCVPass();
 std::unique_ptr<Pass> createInferPTOLayoutPass();
 // Declare register function
 void registerPTOPasses();
