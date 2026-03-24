@@ -6625,7 +6625,8 @@ generated IR. The detailed design document is:
 ##### `pto.reserve_buffer` - Reserve Local Consumer FIFO Buffer
 
 **Summary:** Declares a local reserved FIFO buffer region for the consumer side
-of one frontend logical pipe.
+of one frontend logical pipe. The valid way to write this op depends on
+whether the active PTOAS compilation flow enables local address planning.
 
 **Syntax:**
 
@@ -6635,6 +6636,18 @@ of one frontend logical pipe.
   size = 8192,
   location = #pto.address_space<vec>,
   auto = true
+} -> i32
+```
+
+When the address is already fixed in the input IR:
+
+```mlir
+%buf = pto.reserve_buffer {
+  name = "c2v_fifo",
+  size = 8192,
+  location = #pto.address_space<vec>,
+  auto = false,
+  base = 4096
 } -> i32
 ```
 
@@ -6651,8 +6664,17 @@ of one frontend logical pipe.
 **Constraints & Verification:**
 
 - At most one `pto.reserve_buffer` is expected in one function
-- `auto = false` requires explicit `base`
 - `location` must be a supported local address space
+- Op-level verification requires:
+  - `auto = false` must provide `base`
+  - `auto = true` must not provide `base`
+- Pipeline compatibility requires:
+  - if the active compilation flow enables local address planning: write
+    `auto = true` and omit `base`; `PlanMemory` assigns the address and
+    `pto-resolve-reserved-buffers` materializes it
+  - if the active compilation flow skips local address planning: write
+    `auto = false` with explicit `base`; `pto-resolve-reserved-buffers` only
+    propagates the pre-resolved address
 
 ##### `pto.import_reserved_buffer` - Import Peer Reserved FIFO Buffer
 
@@ -6679,6 +6701,11 @@ function's reserved buffer declaration.
 
 - At most one `pto.import_reserved_buffer` is expected in one function
 - `peer_func` must contain a matching `pto.reserve_buffer`
+- The imported address is resolved by `pto-resolve-reserved-buffers`
+  - from the peer `reserve_buffer.base` filled by `PlanMemory` when the active
+    compilation flow enables local address planning
+  - from the peer's explicit `base` when the active compilation flow skips
+    local address planning
 
 ##### `pto.aic_initialize_pipe` - Frontend Cube Pipe Initialization
 

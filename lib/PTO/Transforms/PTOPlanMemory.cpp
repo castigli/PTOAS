@@ -211,19 +211,6 @@ static LogicalResult assignAutoReserveBufferBase(
   return success();
 }
 
-static LogicalResult verifyManualReserveBufferMode(func::FuncOp funcOp) {
-  LogicalResult result = success();
-  funcOp.walk([&](memref::AllocOp allocOp) {
-    auto memorySpaceAttr = GetBufferSpaceAttr(allocOp.getResult());
-    if (!isLocalBuffer(memorySpaceAttr))
-      return WalkResult::advance();
-    result = allocOp.emitOpError("cannot use pto.reserve_buffer with auto = "
-                                 "false when local memref.alloc "
-                                 "still requires PlanMemory allocation");
-    return WalkResult::interrupt();
-  });
-  return result;
-}
 
 // bool isReusableCastOp(pto::VCastOp &castOp, Value output, Value input) {
 //   auto rank = dyn_cast<MemRefType>(output.getType()).getRank();
@@ -2169,12 +2156,10 @@ void PlanMemoryPass::runOnOperation() {
     }
     if (this->memMode == MemPlanMode::LOCAL_MEM_PLAN &&
         reservePlan.mode == ReserveBufferMode::Manual) {
-      // Manual mode means the function's local addresses are already fixed.
-      // Reject any remaining local allocs that would still need PlanMemory.
-      if (failed(verifyManualReserveBufferMode(funcOp))) {
-        return signalPassFailure();
-      }
-      continue;
+      reservePlan.reserveOp.emitOpError(
+          "pto.reserve_buffer with explicit 'base' (auto = false) is not "
+          "supported in PlanMemory; use --pto-level=level3 or set auto = true");
+      return signalPassFailure();
     }
 
     MemLivenessAnalysis memLiveness(funcOp, this->memMode);

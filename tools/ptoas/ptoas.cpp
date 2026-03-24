@@ -848,8 +848,8 @@ int main(int argc, char **argv) {
     planMemoryOption.enableGlobalReuse = false;
     planMemoryOption.enablePrintMemoryAllocatedSize = false;
     pm.addPass(pto::createPlanMemoryPass(planMemoryOption));
-    pm.addPass(pto::createPTOResolveReservedBuffersPass());
   }
+  pm.addPass(pto::createPTOResolveReservedBuffersPass());
 
   // Conditionally add Sync pass based on flag.
   if (enableInsertSync)
