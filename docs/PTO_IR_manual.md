@@ -246,6 +246,26 @@ Global tensor layout inference for [`tensor_view` (Section 2.3)](#23-ptotensor_v
 
 ## 4. Operations Reference
 
+In addition to the `pto.*` operations documented below, PTOAS also accepts a limited set of commonly used third-party MLIR dialect operations as part of the input IR and lowering pipeline.
+
+- **`func`**
+  - `func.func`
+  - `func.return`
+  - `func.call`
+- **`arith`**
+  - constants and casts such as `arith.constant`, `arith.constant_index`, `arith.index_cast`, `arith.index_castui`, `arith.bitcast`, `arith.extf`, `arith.truncf`, `arith.extsi`, `arith.extui`, `arith.trunci`, `arith.sitofp`, `arith.uitofp`, `arith.fptosi`, and `arith.fptoui`
+  - integer and floating-point arithmetic such as `arith.addi`, `arith.subi`, `arith.muli`, `arith.divsi`, `arith.divui`, `arith.remsi`, `arith.remui`, `arith.addf`, `arith.subf`, `arith.mulf`, `arith.divf`, `arith.remf`, and `arith.negf`
+  - bitwise and shift operations such as `arith.andi`, `arith.ori`, `arith.xori`, `arith.shli`, `arith.shrsi`, and `arith.shrui`
+  - comparisons and selection such as `arith.cmpi`, `arith.cmpf`, and `arith.select`
+  - selected extended and min/max operations such as `arith.addui_extended`, `arith.mulsi_extended`, `arith.mului_extended`, `arith.ceildivsi`, `arith.ceildivui`, `arith.floordivsi`, `arith.maxsi`, `arith.minsi`, `arith.maxui`, `arith.minui`, `arith.maximumf`, `arith.minimumf`, `arith.maxnumf`, and `arith.minnumf`
+- **`scf`**
+  - `scf.for`
+  - `scf.if`
+  - `scf.yield`
+  - PTOAS also handles several structured-control-flow forms by lowering them through `cf`, including `scf.execute_region`, `scf.while`, `scf.index_switch`, and `scf.condition`
+
+NOTE: These third-party ops are supported only to the extent required by PTOAS front-end construction, analysis, and lowering. PTOAS does not imply full support for every operation in these dialects.
+
 ### 4.1 Pointer & View Operations
 
 ##### `pto.addptr` - Add Element Offset to Pointer
