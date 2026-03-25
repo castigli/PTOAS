@@ -76,50 +76,68 @@ ls $PTO_ISA_ROOT/tests/common
 
 ## 3. 单个 case 的 compile-only
 
-### 3.1 使用 ptoas 生成 `.cpp`
+### 3.1 A3 示例
 
 ```bash
-./build/tools/ptoas/ptoas test/basic/example.pto -o /tmp/example-pto.cpp
+mkdir -p /tmp/ptoas_compile_only_inputs/Addc
+./build/tools/ptoas/ptoas \
+  test/samples/Addc/addc.pto \
+  -o /tmp/ptoas_compile_only_inputs/Addc/addc-pto.cpp
 ```
 
-如果是 A5 目标，生成时要显式指定：
-
-```bash
-./build/tools/ptoas/ptoas test/basic/example.pto --pto-arch a5 -o /tmp/example_a5-pto.cpp
-```
-
-### 3.2 生成验证工程
+### 3.2 A3 示例生成验证工程并执行编译
 
 ```bash
 python3 test/npu_validation/scripts/generate_testcase.py \
-  --input /tmp/example-pto.cpp \
-  --testcase example \
+  --input /tmp/ptoas_compile_only_inputs/Addc/addc-pto.cpp \
+  --testcase addc \
   --output-root /tmp/ptoas_compile_only \
   --run-mode npu \
   --soc-version Ascend910
+
+cd /tmp/ptoas_compile_only/Addc/addc
+cmake -S . -B build \
+  -DSOC_VERSION=Ascend910 \
+  -DPTO_ISA_ROOT=$PTO_ISA_ROOT
+cmake --build build --parallel
+```
+
+### 3.3 A5 示例
+
+以下示例假定本地 `CANN` 与 `pto-isa` 的 A5 版本已经对齐。
+
+```bash
+mkdir -p /tmp/ptoas_compile_only_inputs/Sync
+./build/tools/ptoas/ptoas \
+  test/samples/Sync/test_a5_buf_sync.pto \
+  --pto-arch a5 \
+  -o /tmp/ptoas_compile_only_inputs/Sync/test_a5_buf_sync-pto.cpp
+
+python3 test/npu_validation/scripts/generate_testcase.py \
+  --input /tmp/ptoas_compile_only_inputs/Sync/test_a5_buf_sync-pto.cpp \
+  --testcase test_a5_buf_sync \
+  --output-root /tmp/ptoas_compile_only_a5 \
+  --run-mode npu \
+  --soc-version Ascend950
+
+cd /tmp/ptoas_compile_only_a5/Sync/test_a5_buf_sync
+cmake -S . -B build \
+  -DSOC_VERSION=Ascend950 \
+  -DPTO_ISA_ROOT=$PTO_ISA_ROOT
+cmake --build build --parallel
 ```
 
 生成后目录类似：
 
 ```text
 /tmp/ptoas_compile_only/
-└── <sample_name>/
-    └── example/
+└── Addc/
+    └── addc/
         ├── CMakeLists.txt
-        ├── example_kernel.cpp
+        ├── addc_kernel.cpp
         ├── launch.cpp
         ├── main.cpp
         └── ...
-```
-
-### 3.3 执行编译验证
-
-```bash
-cd /tmp/ptoas_compile_only/<sample_name>/example
-cmake -S . -B build \
-  -DSOC_VERSION=Ascend910 \
-  -DPTO_ISA_ROOT=$PTO_ISA_ROOT
-cmake --build build --parallel
 ```
 
 这里不会访问 `/dev/davinci*`，因此无卡环境也可以完成。
@@ -146,10 +164,24 @@ cmake --build build --parallel
 如果你要复用 CI 的样例生成链路，可以先执行：
 
 ```bash
+export PAYLOAD_ROOT=/tmp/ptoas_payload
+rm -rf "$PAYLOAD_ROOT"
+mkdir -p "$PAYLOAD_ROOT/test/samples"
+mkdir -p "$PAYLOAD_ROOT/test/npu_validation/scripts"
+mkdir -p "$PAYLOAD_ROOT/test/npu_validation/templates"
+
+cp test/npu_validation/scripts/generate_testcase.py \
+  "$PAYLOAD_ROOT/test/npu_validation/scripts/"
+cp test/npu_validation/scripts/run_remote_npu_validation.sh \
+  "$PAYLOAD_ROOT/test/npu_validation/scripts/"
+cp test/npu_validation/templates/* \
+  "$PAYLOAD_ROOT/test/npu_validation/templates/"
+chmod +x "$PAYLOAD_ROOT/test/npu_validation/scripts/run_remote_npu_validation.sh"
+
 export PTOAS_BIN=$PWD/build/tools/ptoas/ptoas
 export PTOBC_BIN=$PWD/build/tools/ptobc/ptobc
 export PYTHON_BIN=/usr/bin/python3
-export PTOAS_OUT_DIR=/tmp/ptoas_payload/test/samples
+export PTOAS_OUT_DIR="$PAYLOAD_ROOT/test/samples"
 export PYTHONPATH="$LLVM_BUILD_DIR/tools/mlir/python_packages/mlir_core:$PTO_INSTALL_DIR:${PYTHONPATH:-}"
 export LD_LIBRARY_PATH="$LLVM_BUILD_DIR/lib:$PTO_INSTALL_DIR/lib:${LD_LIBRARY_PATH:-}"
 
@@ -158,21 +190,25 @@ bash test/samples/runop.sh --enablebc all
 
 ### 4.2 批量执行 compile-only
 
-如果当前目录已经准备好 `test/samples/**/*.cpp`，可以执行：
+完成样例生成后，需要切换到 payload 根目录执行脚本，使其扫描
+`$PAYLOAD_ROOT/test/samples/**/*.cpp`，与 CI 的目录布局保持一致：
 
 ```bash
+cd "$PAYLOAD_ROOT"
 export STAGE=build
 export RUN_MODE=npu
 export SOC_VERSION=Ascend910
 export PTO_ISA_REPO=https://gitcode.com/cann/pto-isa.git
 export PTO_ISA_COMMIT=<与 CI 对齐的 commit>
 
-bash test/npu_validation/scripts/run_remote_npu_validation.sh
+bash ./test/npu_validation/scripts/run_remote_npu_validation.sh
 ```
 
 如果本地已经有 vendored 的 `pto-isa/` 目录，也可以不走网络 clone，脚本会优先使用本地目录。
 
 ### 4.3 指定测试用例
+
+以下命令默认继续在 `$PAYLOAD_ROOT` 目录下执行。
 
 ```bash
 export STAGE=build
