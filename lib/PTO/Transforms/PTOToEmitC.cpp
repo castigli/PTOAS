@@ -5742,7 +5742,8 @@ struct PTOFillPadExpandToEmitC
 };
 //===----------------------------------------------------------------------===//
 // pto.tgather lowering
-// - Index form: TGATHER(dst, src0, indices)
+// - Index form  : TGATHER(dst, src0, indices, tmp)
+// - Compare form: TGATHER<DstT, SrcT, CDstT, TmpT, CmpMode::GT, 7>(dst, src0, kValue, cdst, tmp)
 // - Mask form : TGATHER<dstTileTok, srcTileTok, pto::MaskPattern::Pxxxx>(dst, src0)
 //===----------------------------------------------------------------------===//
 
@@ -5763,29 +5764,67 @@ struct PTOGatherToEmitC : public OpConversionPattern<pto::TGatherOp> {
     Value dst  = peelUnrealized(adaptor.getDst());
     Value src0 = peelUnrealized(adaptor.getSrc());
 
-    // Case 1: index-based TGATHER(dst, src0, indices)
-    if (Value idx = adaptor.getIndices()) {
-      idx = peelUnrealized(idx);
-
-      rewriter.create<emitc::CallOpaqueOp>(
-          loc, TypeRange{}, "TGATHER",
-          /*args=*/ArrayAttr{}, /*templateArgs=*/ArrayAttr{},
-          /*operands=*/ValueRange{dst, src0, idx});
-
-      rewriter.eraseOp(op);
-      return success();
-    }
-
-    // Case 2: mask-pattern TGATHER<DstT, SrcT, MaskPattern::P0101>(dst, src0)
-    auto mp = op.getMaskPatternAttr();
-    if (!mp)
-      return rewriter.notifyMatchFailure(op, "expected maskPattern when indices is absent");
-
     auto getOpaqueTok = [&](Value v, StringRef name) -> FailureOr<std::string> {
       if (auto ot = v.getType().dyn_cast<emitc::OpaqueType>())
         return ot.getValue().str();
       return rewriter.notifyMatchFailure(op, (name + " must be emitc::OpaqueType (tile)").str());
     };
+
+    // Case 1: index-based TGATHER(dst, src0, indices, tmp)
+    if (Value idx = adaptor.getIndices()) {
+      idx = peelUnrealized(idx);
+      Value tmp = peelUnrealized(adaptor.getTmp());
+
+      rewriter.create<emitc::CallOpaqueOp>(
+          loc, TypeRange{}, "TGATHER",
+          /*args=*/ArrayAttr{}, /*templateArgs=*/ArrayAttr{},
+          /*operands=*/ValueRange{dst, src0, idx, tmp});
+
+      rewriter.eraseOp(op);
+      return success();
+    }
+
+    // Case 2: compare-based TGATHER<DstT, SrcT, CDstT, TmpT, CmpMode::GT, offset>(...)
+    if (Value cdst = adaptor.getCdst()) {
+      cdst = peelUnrealized(cdst);
+      Value tmp = peelUnrealized(adaptor.getTmp());
+      Value kValue = peelUnrealized(adaptor.getKValue());
+
+      auto dstTokOr = getOpaqueTok(dst, "dst");
+      auto srcTokOr = getOpaqueTok(src0, "src0");
+      auto cdstTokOr = getOpaqueTok(cdst, "cdst");
+      auto tmpTokOr = getOpaqueTok(tmp, "tmp");
+      if (failed(dstTokOr) || failed(srcTokOr) || failed(cdstTokOr) || failed(tmpTokOr))
+        return failure();
+
+      auto cmpAttr = op.getCmpModeAttr();
+      std::string cmpTok = cmpAttr ? cmpModeTok(cmpAttr) : "CmpMode::EQ";
+      int64_t offset = 0;
+      if (auto offsetAttr = op.getOffsetAttr())
+        offset = offsetAttr.getInt();
+
+      auto targs = rewriter.getArrayAttr({
+          emitc::OpaqueAttr::get(ctx, *dstTokOr),
+          emitc::OpaqueAttr::get(ctx, *srcTokOr),
+          emitc::OpaqueAttr::get(ctx, *cdstTokOr),
+          emitc::OpaqueAttr::get(ctx, *tmpTokOr),
+          emitc::OpaqueAttr::get(ctx, cmpTok),
+          emitc::OpaqueAttr::get(ctx, std::to_string(offset)),
+      });
+
+      rewriter.create<emitc::CallOpaqueOp>(
+          loc, TypeRange{}, "TGATHER",
+          /*args=*/ArrayAttr{}, /*templateArgs=*/targs,
+          /*operands=*/ValueRange{dst, src0, kValue, cdst, tmp});
+
+      rewriter.eraseOp(op);
+      return success();
+    }
+
+    // Case 3: mask-pattern TGATHER<DstT, SrcT, MaskPattern::P0101>(dst, src0)
+    auto mp = op.getMaskPatternAttr();
+    if (!mp)
+      return rewriter.notifyMatchFailure(op, "expected maskPattern, indices, or cdst on tgather");
 
     auto dstTokOr = getOpaqueTok(dst, "dst");
     auto srcTokOr = getOpaqueTok(src0, "src0");
@@ -7004,7 +7043,7 @@ struct PTOShrSConstToEmitC : public OpConversionPattern<pto::TShrSOp> {
 };
 
 //===----------------------------------------------------------------------===//
-// PTOConvert.cpp  (add lowering + patterns.add for TSORT32 DPS/memref op)
+// PTOConvert.cpp  (TSORT32 DPS/memref op: ins(src, idx[, tmp]) outs(dst))
 //===----------------------------------------------------------------------===//
 
 struct PTOSORT32SToEmitC : public OpConversionPattern<pto::TSort32Op> {

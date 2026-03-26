@@ -2292,8 +2292,13 @@ struct PTOViewToMemrefPass
 
         Value src = op.getSrc();
         Value dst = op.getDst();
+        Value cdst = op.getCdst();
         Value indices = op.getIndices();
+        Value tmp = op.getTmp();
+        Value kValue = op.getKValue();
         auto maskPattern = op.getMaskPatternAttr();
+        auto cmpMode = op.getCmpModeAttr();
+        auto offset = op.getOffsetAttr();
 
         auto srcTy = dyn_cast<MemRefType>(src.getType());
         auto dstTy = dyn_cast<MemRefType>(dst.getType());
@@ -2304,36 +2309,73 @@ struct PTOViewToMemrefPass
           return;
         }
 
-        if (indices) {
-          auto indicesTy = dyn_cast<MemRefType>(indices.getType());
-          if (!indicesTy) {
-            op.emitError("indices must be memref yet");
-            signalPassFailure();
-            return;
-          }
-
+        if (maskPattern) {
           rewriter.replaceOpWithNewOp<pto::TGatherOp>(
               op,
               TypeRange{},
               src,
               dst,
-              indices,
-              /*maskPattern=*/pto::MaskPatternAttr());
-        } else {
-          if (!maskPattern) {
-            op.emitError("expects maskPattern when indices is absent");
-            signalPassFailure();
-            return;
-          }
-
-          rewriter.replaceOpWithNewOp<pto::TGatherOp>(
-              op,
-              TypeRange{},
-              src,
-              dst,
+              /*cdst=*/Value(),
               /*indices=*/Value(),
-              /*maskPattern=*/maskPattern);
+              /*tmp=*/Value(),
+              /*kValue=*/Value(),
+              /*maskPattern=*/maskPattern,
+              /*cmpMode=*/pto::CmpModeAttr(),
+              /*offset=*/IntegerAttr());
+          continue;
         }
+
+        if (cdst || kValue) {
+          auto cdstTy = dyn_cast<MemRefType>(cdst.getType());
+          auto tmpTy = dyn_cast<MemRefType>(tmp.getType());
+          if (!cdstTy || !tmpTy) {
+            op.emitError("compare-form tgather expects cdst/tmp to be memref yet");
+            signalPassFailure();
+            return;
+          }
+
+          rewriter.replaceOpWithNewOp<pto::TGatherOp>(
+              op,
+              TypeRange{},
+              src,
+              dst,
+              cdst,
+              /*indices=*/Value(),
+              tmp,
+              kValue,
+              /*maskPattern=*/pto::MaskPatternAttr(),
+              cmpMode,
+              offset);
+          continue;
+        }
+
+        if (indices || tmp) {
+          auto indicesTy = dyn_cast<MemRefType>(indices.getType());
+          auto tmpTy = dyn_cast<MemRefType>(tmp.getType());
+          if (!indicesTy || !tmpTy) {
+            op.emitError("index-form tgather expects indices/tmp to be memref yet");
+            signalPassFailure();
+            return;
+          }
+
+          rewriter.replaceOpWithNewOp<pto::TGatherOp>(
+              op,
+              TypeRange{},
+              src,
+              dst,
+              /*cdst=*/Value(),
+              indices,
+              tmp,
+              /*kValue=*/Value(),
+              /*maskPattern=*/pto::MaskPatternAttr(),
+              /*cmpMode=*/pto::CmpModeAttr(),
+              /*offset=*/IntegerAttr());
+          continue;
+        }
+
+        op.emitError("expects tgather to be in mask, index+tmp, or compare+tmp form");
+        signalPassFailure();
+        return;
       }
 
       SmallVector<mlir::pto::TGatherBOp, 8> gatherbops;
