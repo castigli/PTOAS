@@ -5093,12 +5093,12 @@ struct PTOTCIToEmitC : public OpConversionPattern<pto::TCIOp> {
     auto *ctx = rewriter.getContext();
 
     Value dst = peelUnrealized(adaptor.getDst());
-    Value S   = peelUnrealized(adaptor.getS());
+    Value S = peelUnrealized(adaptor.getOperands()[0]);
 
     // The TCI scalar template parameter should follow the original PTO IR
     // scalar type, not the converted EmitC value type.
     std::string scalarTok = "int32_t";
-    if (auto it = dyn_cast<IntegerType>(op.getS().getType())) {
+    if (auto it = dyn_cast<IntegerType>(op->getOperand(0).getType())) {
       scalarTok = (it.getWidth() == 16) ? "int16_t" : "int32_t";
     }
 

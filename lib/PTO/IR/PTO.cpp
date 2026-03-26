@@ -2478,7 +2478,7 @@ LogicalResult pto::TCIOp::verify() {
   if (bw != 16 && bw != 32)
     return emitOpError("expects dst element type to be i16/i32");
 
-  auto sTy = getS().getType().dyn_cast<IntegerType>();
+  auto sTy = getOperand(0).getType().dyn_cast<IntegerType>();
   if (!sTy)
     return emitOpError("expects S to be integer");
 

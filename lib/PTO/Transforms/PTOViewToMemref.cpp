@@ -1,11 +1,13 @@
-/**
- * PTOViewToMemref.cpp
- * * 功能：将 PTO Dialect 的高层 Tile 操作降级为标准的 MemRef 操作。
- * 核心机制：
- * 1. 类型转换：!pto.tile_buf -> memref<..., offset: ?>
- * 2. 元数据保留：使用 pto.bind_tile 将 TileConfig 绑定到 SSA Value 上。
- * 3. 动态回溯：计算算子通过 lookupConfig 回溯 SSA 链条获取硬件配置。
- */
+//===- PTOViewToMemref.cpp ------------------------------------------------===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+//
+// Lower PTO tile/view operations to memref-based IR while preserving tile
+// metadata through binding ops and SSA backtracking.
 
 #include "PTO/IR/PTO.h"
 #include "PTO/Transforms/Passes.h"
@@ -512,9 +514,6 @@ struct PTOViewToMemrefPass
   void runOnOperation() override {
     ModuleOp mod = getOperation();
     MLIRContext *ctx = &getContext();
-
-    // Debug output before pass
-    // dumpPretty(mod.getOperation(), llvm::errs());
 
     for (auto func : mod.getOps<func::FuncOp>()) {
       if (func.isExternal()) continue;
@@ -1702,7 +1701,7 @@ struct PTOViewToMemrefPass
         IRRewriter rewriter(ctx);
         rewriter.setInsertionPoint(op);
 
-        Value s= op.getS();
+        Value s = op->getOperand(0);
         Value dst = op.getDst();
         bool descending = op.getDescending();
 
