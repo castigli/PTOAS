@@ -6811,6 +6811,13 @@ function's reserved buffer declaration.
 **Syntax:**
 
 ```mlir
+// A2/A3 (with GM slot buffer):
+pto.aic_initialize_pipe {dir_mask = 1, slot_size = 1024}
+  (gm_slot_buffer = %gm_buf : !pto.ptr<f32>,
+   c2v_consumer_buf = %c2v_import : i32,
+   v2c_consumer_buf = %c0_i32 : i32)
+
+// A5 (without GM slot buffer):
 pto.aic_initialize_pipe {dir_mask = 1, slot_size = 1024}
   (c2v_consumer_buf = %c2v_import : i32,
    v2c_consumer_buf = %c0_i32 : i32)
@@ -6820,7 +6827,7 @@ pto.aic_initialize_pipe {dir_mask = 1, slot_size = 1024}
 
 - `dir_mask`: communication direction encoding
 - `slot_size`: logical slot size in bytes
-- `gm_slot_buffer`: optional GM slot-buffer operand
+- `gm_slot_buffer`: optional GM pointer (`!pto.ptr<T>`), required on A2/A3, omitted on A5
 - `c2v_consumer_buf`: C2V consumer local base address
 - `v2c_consumer_buf`: V2C consumer local base address
 
@@ -6838,6 +6845,13 @@ pto.aic_initialize_pipe {dir_mask = 1, slot_size = 1024}
 **Syntax:**
 
 ```mlir
+// A2/A3 (with GM slot buffer):
+pto.aiv_initialize_pipe {dir_mask = 1, slot_size = 1024}
+  (gm_slot_buffer = %gm_buf : !pto.ptr<f32>,
+   c2v_consumer_buf = %c2v_local : i32,
+   v2c_consumer_buf = %c0_i32 : i32)
+
+// A5 (without GM slot buffer):
 pto.aiv_initialize_pipe {dir_mask = 1, slot_size = 1024}
   (c2v_consumer_buf = %c2v_local : i32,
    v2c_consumer_buf = %c0_i32 : i32)

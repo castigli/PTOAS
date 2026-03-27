@@ -61,7 +61,7 @@ pto.aic_initialize_pipe(
 |---|---|---|
 | `DIR_MASK` | 编译期整数常量 | `1`、`2` 或 `3` |
 | `SLOT_SIZE` | 编译期整数常量 | 单 slot 字节数，定义为切分前完整 tile 字节数 |
-| `GM_SLOT_BUFFER` | GM 地址或空值 | A2/A3 路径使用，A5 路径为空 |
+| `GM_SLOT_BUFFER` | `!pto.ptr<T>` 或空值 | A2/A3 路径使用的 GM 指针，A5 路径为空 |
 | `C2V_CONSUMER_BUF` | `i32` | C2V 方向 consumer 的 local slot buffer 基址 |
 | `V2C_CONSUMER_BUF` | `i32` | V2C 方向 consumer 的 local slot buffer 基址 |
 

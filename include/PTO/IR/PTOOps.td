@@ -1184,7 +1184,7 @@ def AicInitializePipeOp : PTO_Op<"aic_initialize_pipe"> {
   let arguments = (ins
       I8Attr:$dir_mask,
       I32Attr:$slot_size,
-      Optional<I32>:$gm_slot_buffer,
+      Optional<PtrType>:$gm_slot_buffer,
       I32:$c2v_consumer_buf,
       I32:$v2c_consumer_buf
   );
@@ -1210,7 +1210,7 @@ def AivInitializePipeOp : PTO_Op<"aiv_initialize_pipe"> {
   let arguments = (ins
       I8Attr:$dir_mask,
       I32Attr:$slot_size,
-      Optional<I32>:$gm_slot_buffer,
+      Optional<PtrType>:$gm_slot_buffer,
       I32:$c2v_consumer_buf,
       I32:$v2c_consumer_buf
   );
