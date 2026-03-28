@@ -113,14 +113,14 @@ if [[ -z "${ASCEND_HOME_PATH:-}" ]]; then
 fi
 log "ASCEND_HOME_PATH=${ASCEND_HOME_PATH}"
 
-# Auto-detect SOC_VERSION from hardware when not explicitly set.
-# The default "Ascend910" is ambiguous (could be A1/A3/A5).
-# npu-smi provides the real chip name (e.g. Ascend910B1, Ascend910B3).
-if [[ "${SOC_VERSION}" == "Ascend910" ]] && command -v npu-smi &>/dev/null; then
-  _chip="$(timeout 5 npu-smi info -l 2>/dev/null | grep -i 'Chip Name' | head -1 | sed 's/.*: *//' | tr -d ' ' || true)"
-  if [[ -n "${_chip}" ]]; then
-    log "Auto-detected SOC_VERSION=${_chip} from npu-smi (was default Ascend910)"
-    SOC_VERSION="${_chip}"
+# Detect the real board chip name for validation-only decisions.
+# Keep SOC_VERSION unchanged so generate_testcase.py continues to choose the
+# established compiler arch for Ascend910 board runs.
+_board_chip=""
+if command -v npu-smi &>/dev/null; then
+  _board_chip="$(timeout 5 npu-smi info -l 2>/dev/null | grep -i 'Chip Name' | head -1 | sed 's/.*: *//' | tr -d ' ' || true)"
+  if [[ -n "${_board_chip}" ]]; then
+    log "Detected board chip from npu-smi: ${_board_chip} (compile SOC_VERSION stays ${SOC_VERSION})"
   fi
 fi
 
@@ -147,6 +147,10 @@ fi
 # This is separate from SOC_VERSION/SIM_SOC_VERSION used for compilation
 # to avoid changing the compiler arch (dav-c220 vs dav-c310).
 export PTOAS_BOARD_IS_A3=0
+if [[ "$(printf '%s' "${_board_chip}" | tr '[:upper:]' '[:lower:]')" == *910b* ]]; then
+  export PTOAS_BOARD_IS_A3=1
+  log "Detected A3 board from npu-smi chip name: ${_board_chip}"
+fi
 for _sim_dir in "${ASCEND_HOME_PATH}/aarch64-linux/simulator" \
                 "${ASCEND_HOME_PATH}/simulator" \
                 "${ASCEND_HOME_PATH}/tools/simulator"; do
