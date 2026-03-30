@@ -63,8 +63,33 @@ on:
 permissions:
   contents: read
   actions: write
+  pull-requests: read
 
 jobs:
+  license-header-check:
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check PR386 license headers
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 .github/scripts/check_license_headers.py \
+            --repo "${{ github.repository }}" \
+            --event-name "${{ github.event_name }}" \
+            --pr-number "${{ github.event.pull_request.number || '' }}" \
+            --base-sha "${{ github.event.pull_request.base.sha || github.event.before || '' }}" \
+            --head-sha "${{ github.event.pull_request.head.sha || github.sha }}" \
+            --github-token "${GITHUB_TOKEN}"
+
   build-and-test:
     runs-on: ubuntu-22.04
     env:
