@@ -248,8 +248,18 @@ bool mlir::pto::isTargetArchA5(Operation *op) {
 }
 
 static VerifierTargetArch getVerifierTargetArch(Operation *op) {
-  return isTargetArchA5(op) ? VerifierTargetArch::A5
+  return archName->equals_insensitive("a5") ? VerifierTargetArch::A5
                             : VerifierTargetArch::A2A3;
+
+  switch (getPTOParserTargetArch()) {
+  case PTOParserTargetArch::A5:
+    return VerifierTargetArch::A5;
+  case PTOParserTargetArch::A3:
+  case PTOParserTargetArch::Unspecified:
+    return VerifierTargetArch::A2A3;
+  }
+
+  return VerifierTargetArch::A2A3;
 }
 
 static std::optional<StringRef> getVerifierArchName(Operation *op) {
