@@ -42,7 +42,6 @@ done
 PTOAS_BIN="${PTO_SOURCE_DIR}/build/tools/ptoas/ptoas"
 PTOAS_DEPS_DIR="${PTOAS_DIST_DIR}/lib"
 UNRESOLVED_NON_SYSTEM_COUNT=0
-NON_PORTABLE_DEP_COUNT=0
 
 if [ ! -f "$PTOAS_BIN" ]; then
   echo "Error: ptoas binary not found at $PTOAS_BIN" >&2
@@ -142,30 +141,55 @@ collect_dylibs() {
   done < <(otool -L "$bin" | awk 'NR>1 {print $1}')
 }
 
-validate_portable_deps() {
-  local target dep
-  while IFS= read -r target; do
-    while IFS= read -r dep; do
-      [ -n "$dep" ] || continue
-      case "$dep" in
-        @loader_path/*|@rpath/*|@executable_path/*|/usr/lib/*|/System/Library/*)
-          ;;
-        *)
-          echo "ERROR: non-portable dependency in ${target} -> ${dep}" >&2
-          NON_PORTABLE_DEP_COUNT=$((NON_PORTABLE_DEP_COUNT + 1))
-          ;;
-      esac
-    done < <(otool -L "$target" | awk 'NR>1 {print $1}')
-  done < <(find "${PTOAS_DIST_DIR}/bin" "${PTOAS_DEPS_DIR}" -type f \( -name 'ptoas' -o -name '*.dylib' \))
-}
-
 echo "Collecting dylib dependencies..."
 collect_dylibs "${PTOAS_DIST_DIR}/bin/ptoas"
 
 echo "Validating packaged dependency install names..."
-validate_portable_deps
-if [ "${NON_PORTABLE_DEP_COUNT}" -ne 0 ]; then
-  echo "Error: found ${NON_PORTABLE_DEP_COUNT} non-portable dependency install names" >&2
+if ! python3 - "${PTOAS_DIST_DIR}" <<'PY'
+import os
+import subprocess
+import sys
+
+root = sys.argv[1]
+allowed_prefixes = (
+    "@loader_path/",
+    "@rpath/",
+    "@executable_path/",
+    "/usr/lib/",
+    "/System/Library/",
+)
+
+bad = []
+for base, _, files in os.walk(root):
+    for name in files:
+        if name != "ptoas" and not name.endswith(".dylib"):
+            continue
+        path = os.path.join(base, name)
+        try:
+            output = subprocess.check_output(
+                ["otool", "-L", path],
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            print(f"ERROR: failed to inspect {path}: {exc.output.strip()}",
+                  file=sys.stderr)
+            sys.exit(2)
+
+        for line in output.splitlines()[1:]:
+            dep = line.strip().split(" ", 1)[0]
+            if dep.startswith(allowed_prefixes):
+                continue
+            bad.append((path, dep))
+
+for path, dep in bad:
+    print(f"ERROR: non-portable dependency in {path} -> {dep}", file=sys.stderr)
+
+print(f"portable dependency scan checked {root} ({len(bad)} offending deps)")
+sys.exit(1 if bad else 0)
+PY
+then
+  echo "Error: found non-portable dependency install names" >&2
   exit 1
 fi
 
@@ -211,6 +235,5 @@ DYLIB_COUNT=$(find "${PTOAS_DEPS_DIR}" -name "*.dylib" 2>/dev/null | wc -l)
 echo "=== Collected .dylib dependencies (${DYLIB_COUNT} files) ==="
 du -sh "${PTOAS_DEPS_DIR}/"
 echo "=== Unresolved non-system deps: ${UNRESOLVED_NON_SYSTEM_COUNT} ==="
-echo "=== Non-portable deps after rewrite: ${NON_PORTABLE_DEP_COUNT} ==="
 echo ""
 echo "Distribution created at: ${PTOAS_DIST_DIR}"
