@@ -822,6 +822,14 @@ PY
       fi
     fi
 
+    if [[ "$base" == "tcvt" ]]; then
+      if ! grep -Fq "TCVT(" "$cpp"; then
+        echo -e "${A}(${base}.py)\tFAIL\tmissing TCVT() lowering for pto.tcvt"
+        overall=1
+        continue
+      fi
+    fi
+
 	    # Regression guard for Issue #190:
 	    # Infer layout for a 2D column-vector view (16 x 1) should prefer DN.
 	    if [[ "$base" == "tensor_view_infer_layout_dn" ]]; then
