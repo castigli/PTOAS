@@ -289,19 +289,22 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
 
       - name: Update CMake base version
+        id: bump
         run: |
-          python3 .github/scripts/update_ptoas_base_version.py \
-            --version "${GITHUB_REF_NAME}"
+          next_base_version="$(python3 .github/scripts/update_ptoas_base_version.py \
+            --version "${GITHUB_REF_NAME}" \
+            --next)"
+          echo "next_base_version=${next_base_version}" >> "$GITHUB_OUTPUT"
 
       - name: Commit version bump
         run: |
           if git diff --quiet -- CMakeLists.txt; then
-            echo "CMakeLists.txt already matches released version."
+            echo "CMakeLists.txt already matches the next base version."
             exit 0
           fi
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add CMakeLists.txt
-          git commit -m "chore(release): bump base version to ${GITHUB_REF_NAME}"
+          git commit -m "chore(release): bump base version to v${{ steps.bump.outputs.next_base_version }}"
           git push origin HEAD:${{ github.event.repository.default_branch }}
