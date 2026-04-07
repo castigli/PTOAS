@@ -1111,6 +1111,16 @@ def generate_testcase(
     for p in data_ptrs:
         inferred = inferred_counts.get(p["name"])
         ptr_elem_counts[p["name"]] = int(inferred) if inferred and int(inferred) > 0 else logical_elem_count
+    if testcase == "rmsnorm_incore_0":
+        # This repro kernel partitions a [16, 5120] ND view with a row offset.
+        # Board validation runs it as a single-block case, so keep bf16
+        # input/output buffers large enough for the full 16x5120 window.
+        required_elems = 16 * 5120
+        for p in data_ptrs:
+            if p["host_type"] != "uint16_t":
+                continue
+            cur = int(ptr_elem_counts.get(p["name"], logical_elem_count))
+            ptr_elem_counts[p["name"]] = max(cur, required_elems)
 
     templates_root = Path(__file__).resolve().parents[1] / "templates"
     template = (templates_root / "main_template.cpp").read_text(encoding="utf-8")
@@ -1141,6 +1151,24 @@ def generate_testcase(
         if p["kind"] != "scalar":
             continue
         t = p["host_type"]
+        if testcase == "rmsnorm_incore_0" and t in {
+            "int8_t",
+            "uint8_t",
+            "int16_t",
+            "uint16_t",
+            "int32_t",
+            "uint32_t",
+            "int64_t",
+            "uint64_t",
+            "int",
+            "unsigned",
+            "size_t",
+        }:
+            # rmsnorm_incore_0 uses this scalar as row offset (%arg3).
+            # Keep it at 0 for single-block validation to avoid shifted windows.
+            value = "0"
+            param_decls_lines.append(f"    {t} {p['name']} = {value};")
+            continue
         # Some PTO-ISA APIs use small POD structs as scalar parameters.
         # Example: pto::MrgSortExecutedNumList (used by TMRGSORT multi-list variants).
         if t.endswith("MrgSortExecutedNumList"):
