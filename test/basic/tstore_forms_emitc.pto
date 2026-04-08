@@ -1,0 +1,61 @@
+// RUN: ptoas --pto-arch=a3 %s 2>&1 | FileCheck %s --check-prefix=A3
+
+module {
+  func.func @tstore_forms(%arg0: !pto.ptr<f16>, %arg1: !pto.ptr<f16>) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c32 = arith.constant 32 : index
+    %pre = arith.constant 7 : i64
+
+    %tv0 = pto.make_tensor_view %arg0, shape = [%c32, %c32], strides = [%c32, %c1] : !pto.tensor_view<?x?xf16>
+    %tv1 = pto.make_tensor_view %arg1, shape = [%c32, %c32], strides = [%c32, %c1] : !pto.tensor_view<?x?xf16>
+    %dst0 = pto.partition_view %tv0, offsets = [%c0, %c0], sizes = [%c32, %c32] : !pto.tensor_view<?x?xf16> -> !pto.partition_tensor_view<32x32xf16>
+    %dst1 = pto.partition_view %tv1, offsets = [%c0, %c0], sizes = [%c32, %c32] : !pto.tensor_view<?x?xf16> -> !pto.partition_tensor_view<32x32xf16>
+
+    %vec = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f16, rows=32, cols=32, v_row=32, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %acc = pto.alloc_tile : !pto.tile_buf<loc=acc, dtype=i32, rows=32, cols=32, v_row=32, v_col=32, blayout=col_major, slayout=row_major, fractal=1024, pad=0>
+
+    // 1) TSTORE(dst, src)
+    pto.tstore ins(%vec : !pto.tile_buf<loc=vec, dtype=f16, rows=32, cols=32, v_row=32, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+               outs(%dst0 : !pto.partition_tensor_view<32x32xf16>)
+
+    // 2) TSTORE<STPhase::Final>(dst, src)
+    pto.tstore ins(%vec : !pto.tile_buf<loc=vec, dtype=f16, rows=32, cols=32, v_row=32, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+               outs(%dst0 : !pto.partition_tensor_view<32x32xf16>) {stPhase = #pto<st_phase final>}
+
+    // 3) TSTORE<TileData, GlobalData, AtomicType::AtomicAdd>(dst, src)
+    pto.tstore ins(%vec : !pto.tile_buf<loc=vec, dtype=f16, rows=32, cols=32, v_row=32, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+               outs(%dst0 : !pto.partition_tensor_view<32x32xf16>) {atomicType = #pto<atomic_type atomic_add>}
+
+    // 4) TSTORE<STPhase::Final, TileData, GlobalData, AtomicType::AtomicAdd>(dst, src)
+    pto.tstore ins(%vec : !pto.tile_buf<loc=vec, dtype=f16, rows=32, cols=32, v_row=32, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+               outs(%dst0 : !pto.partition_tensor_view<32x32xf16>) {stPhase = #pto<st_phase final>, atomicType = #pto<atomic_type atomic_add>}
+
+    // 5) TSTORE<TileData, GlobalData, AtomicType::AtomicAdd, ReluPreMode::NormalRelu>(dst, src)
+    pto.tstore ins(%acc : !pto.tile_buf<loc=acc, dtype=i32, rows=32, cols=32, v_row=32, v_col=32, blayout=col_major, slayout=row_major, fractal=1024, pad=0>)
+               outs(%dst1 : !pto.partition_tensor_view<32x32xf16>) {atomicType = #pto<atomic_type atomic_add>, reluPreMode = #pto<relu_pre_mode normal_relu>}
+
+    // 6) TSTORE<STPhase::Final, TileData, GlobalData, AtomicType::AtomicAdd, ReluPreMode::NormalRelu>(dst, src)
+    pto.tstore ins(%acc : !pto.tile_buf<loc=acc, dtype=i32, rows=32, cols=32, v_row=32, v_col=32, blayout=col_major, slayout=row_major, fractal=1024, pad=0>)
+               outs(%dst1 : !pto.partition_tensor_view<32x32xf16>) {stPhase = #pto<st_phase final>, atomicType = #pto<atomic_type atomic_add>, reluPreMode = #pto<relu_pre_mode normal_relu>}
+
+    // 7) TSTORE<TileData, GlobalData, AtomicType::AtomicAdd, ReluPreMode::NormalRelu>(dst, src, preQuantScalar)
+    pto.tstore ins(%acc : !pto.tile_buf<loc=acc, dtype=i32, rows=32, cols=32, v_row=32, v_col=32, blayout=col_major, slayout=row_major, fractal=1024, pad=0>, %pre : i64)
+               outs(%dst1 : !pto.partition_tensor_view<32x32xf16>) {atomicType = #pto<atomic_type atomic_add>, reluPreMode = #pto<relu_pre_mode normal_relu>}
+
+    // 8) TSTORE<STPhase::Final, TileData, GlobalData, AtomicType::AtomicAdd, ReluPreMode::NormalRelu>(dst, src, preQuantScalar)
+    pto.tstore ins(%acc : !pto.tile_buf<loc=acc, dtype=i32, rows=32, cols=32, v_row=32, v_col=32, blayout=col_major, slayout=row_major, fractal=1024, pad=0>, %pre : i64)
+               outs(%dst1 : !pto.partition_tensor_view<32x32xf16>) {stPhase = #pto<st_phase final>, atomicType = #pto<atomic_type atomic_add>, reluPreMode = #pto<relu_pre_mode normal_relu>}
+
+    return
+  }
+}
+
+// A3: TSTORE([[DST0:v[0-9]+]], [[VEC:v[0-9]+]]);
+// A3: TSTORE<STPhase::Final>([[DST0]], [[VEC]]);
+// A3: TSTORE<{{.*}}AtomicType::AtomicAdd>([[DST0]], [[VEC]]);
+// A3: TSTORE<STPhase::Final, {{.*}}AtomicType::AtomicAdd>([[DST0]], [[VEC]]);
+// A3: TSTORE<{{.*}}AtomicType::AtomicAdd, ReluPreMode::NormalRelu>([[DST1:v[0-9]+]], [[ACC:v[0-9]+]]);
+// A3: TSTORE<STPhase::Final, {{.*}}AtomicType::AtomicAdd, ReluPreMode::NormalRelu>([[DST1]], [[ACC]]);
+// A3: TSTORE<{{.*}}AtomicType::AtomicAdd, ReluPreMode::NormalRelu>([[DST1]], [[ACC]], [[PRE:v[0-9]+]]);
+// A3: TSTORE<STPhase::Final, {{.*}}AtomicType::AtomicAdd, ReluPreMode::NormalRelu>([[DST1]], [[ACC]], [[PRE]]);

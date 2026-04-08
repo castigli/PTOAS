@@ -1,0 +1,53 @@
+// RUN: ptoas --pto-arch a5 %s | FileCheck %s
+
+module attributes {"pto.device-spec" = "Ascend950"} {
+  func.func @tmov_forms() {
+    %src = pto.alloc_tile : !pto.tile_buf<loc=acc, dtype=f32, rows=32, cols=32, v_row=32, v_col=32, blayout=col_major, slayout=row_major, fractal=512, pad=0>
+    %fp = pto.alloc_tile : !pto.tile_buf<loc=scaling, dtype=f16, rows=1, cols=32, v_row=1, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %dst_mat = pto.alloc_tile : !pto.tile_buf<loc=mat, dtype=f32, rows=32, cols=32, v_row=32, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %dst_vec = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=32, cols=32, v_row=32, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %dst_mat_q = pto.alloc_tile : !pto.tile_buf<loc=mat, dtype=i8, rows=32, cols=32, v_row=32, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %dst_vec_q = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=i8, rows=32, cols=32, v_row=32, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %pre = arith.constant 7 : i64
+
+    pto.tmov ins(%src : !pto.tile_buf<loc=acc, dtype=f32, rows=32, cols=32, v_row=32, v_col=32, blayout=col_major, slayout=row_major, fractal=512, pad=0>)
+             outs(%dst_mat : !pto.tile_buf<loc=mat, dtype=f32, rows=32, cols=32, v_row=32, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+             {reluPreMode = #pto<relu_pre_mode normal_relu>}
+
+    "pto.tmov"(%src, %dst_mat_q, %pre) <{operandSegmentSizes = array<i32: 1, 1, 0, 1>,
+                                          reluPreMode = #pto<relu_pre_mode normal_relu>}> :
+        (!pto.tile_buf<loc=acc, dtype=f32, rows=32, cols=32, v_row=32, v_col=32, blayout=col_major, slayout=row_major, fractal=512, pad=0>,
+         !pto.tile_buf<loc=mat, dtype=i8, rows=32, cols=32, v_row=32, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>, i64) -> ()
+
+    pto.tmov ins(%src : !pto.tile_buf<loc=acc, dtype=f32, rows=32, cols=32, v_row=32, v_col=32, blayout=col_major, slayout=row_major, fractal=512, pad=0>)
+             outs(%dst_vec : !pto.tile_buf<loc=vec, dtype=f32, rows=32, cols=32, v_row=32, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+             {accToVecMode = #pto.acc_to_vec_mode<dual_mode_split_m>,
+              reluPreMode = #pto<relu_pre_mode normal_relu>}
+
+    "pto.tmov"(%src, %dst_vec_q, %pre) <{operandSegmentSizes = array<i32: 1, 1, 0, 1>,
+                                          accToVecMode = #pto.acc_to_vec_mode<single_mode_vec1>,
+                                          reluPreMode = #pto<relu_pre_mode normal_relu>}> :
+        (!pto.tile_buf<loc=acc, dtype=f32, rows=32, cols=32, v_row=32, v_col=32, blayout=col_major, slayout=row_major, fractal=512, pad=0>,
+         !pto.tile_buf<loc=vec, dtype=i8, rows=32, cols=32, v_row=32, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>, i64) -> ()
+
+    pto.tmov ins(%src : !pto.tile_buf<loc=acc, dtype=f32, rows=32, cols=32, v_row=32, v_col=32, blayout=col_major, slayout=row_major, fractal=512, pad=0>,
+                 %fp : !pto.tile_buf<loc=scaling, dtype=f16, rows=1, cols=32, v_row=1, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+             outs(%dst_mat_q : !pto.tile_buf<loc=mat, dtype=i8, rows=32, cols=32, v_row=32, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+             {reluPreMode = #pto<relu_pre_mode normal_relu>}
+
+    pto.tmov ins(%src : !pto.tile_buf<loc=acc, dtype=f32, rows=32, cols=32, v_row=32, v_col=32, blayout=col_major, slayout=row_major, fractal=512, pad=0>,
+                 %fp : !pto.tile_buf<loc=scaling, dtype=f16, rows=1, cols=32, v_row=1, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+             outs(%dst_vec_q : !pto.tile_buf<loc=vec, dtype=i8, rows=32, cols=32, v_row=32, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+             {accToVecMode = #pto.acc_to_vec_mode<single_mode_vec0>,
+              reluPreMode = #pto<relu_pre_mode normal_relu>}
+    return
+  }
+}
+
+// CHECK-LABEL: __global__ AICORE void tmov_forms(
+// CHECK: TMOV<{{.*}}ReluPreMode::NormalRelu>([[DST_MAT:[^,]+]], [[SRC:[^)]+]]);
+// CHECK: TMOV<{{.*}}ReluPreMode::NormalRelu>([[DST_MAT_Q:[^,]+]], [[SRC]], [[PRE:[^)]+]]);
+// CHECK: TMOV<{{.*}}pto::AccToVecMode::DualModeSplitM, ReluPreMode::NormalRelu>([[DST_VEC:[^,]+]], [[SRC]]);
+// CHECK: TMOV<{{.*}}pto::AccToVecMode::SingleModeVec1, ReluPreMode::NormalRelu>([[DST_VEC_Q:[^,]+]], [[SRC]], [[PRE]]);
+// CHECK: TMOV_FP<{{.*}}ReluPreMode::NormalRelu>([[DST_MAT_Q]], [[SRC]], [[FP:[^)]+]]);
+// CHECK: TMOV<{{.*}}pto::AccToVecMode::SingleModeVec0, ReluPreMode::NormalRelu>([[DST_VEC_Q]], [[SRC]], [[FP]]);

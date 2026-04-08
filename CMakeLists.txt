@@ -7,11 +7,32 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 
 cmake_minimum_required(VERSION 3.20.0)
-project(ptoas VERSION 0.21)
+project(ptoas VERSION 0.24)
 
 set(PTOAS_RELEASE_VERSION_OVERRIDE ""
     CACHE STRING "Override the version printed by ptoas --version")
+set(PTOAS_EXACT_GIT_TAG_VERSION "")
+if(EXISTS "${PROJECT_SOURCE_DIR}/.git")
+  find_package(Git QUIET)
+  if(GIT_FOUND)
+    execute_process(
+      COMMAND "${GIT_EXECUTABLE}" -C "${PROJECT_SOURCE_DIR}"
+              describe --tags --exact-match --match "v[0-9]*.[0-9]*"
+      RESULT_VARIABLE PTOAS_GIT_DESCRIBE_RESULT
+      OUTPUT_VARIABLE PTOAS_EXACT_GIT_TAG
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET)
+    if(PTOAS_GIT_DESCRIBE_RESULT EQUAL 0
+       AND PTOAS_EXACT_GIT_TAG MATCHES "^v([0-9]+\\.[0-9]+)$")
+      set(PTOAS_EXACT_GIT_TAG_VERSION "${CMAKE_MATCH_1}")
+    endif()
+  endif()
+endif()
+
 set(PTOAS_CLI_VERSION "${PROJECT_VERSION}")
+if(PTOAS_EXACT_GIT_TAG_VERSION)
+  set(PTOAS_CLI_VERSION "${PTOAS_EXACT_GIT_TAG_VERSION}")
+endif()
 if(PTOAS_RELEASE_VERSION_OVERRIDE)
   set(PTOAS_CLI_VERSION "${PTOAS_RELEASE_VERSION_OVERRIDE}")
 endif()

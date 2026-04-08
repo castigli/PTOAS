@@ -46,7 +46,7 @@ on:
         description: "pto-isa ref (commit/tag/branch; empty = repo-pinned weekly commit)"
         type: string
         # NOTE: Pin a known-good GitCode commit for deterministic runs.
-        default: 893e4b00a826231e776539512b5b17f82fc11838
+        default: 662d7f2a916d6bbde3109ce4a16ed5c28f5d900a
       remote_host:
         description: "SSH host/IP for the NPU machine"
         type: string
@@ -261,7 +261,7 @@ jobs:
       # Temporary CI gate: skip cases that still error/flap on the remote NPU.
       # Update this list as we fix the underlying issues.
       DEFAULT_SKIP_CASES: >-
-        mix_kernel,vadd_validshape,vadd_validshape_dynamic,print,storefp
+        mix_kernel,vadd_validshape,vadd_validshape_dynamic,print,storefp,Gemvmx
     steps:
       - name: Resolve validation parameters
         shell: bash
@@ -273,7 +273,7 @@ jobs:
           SKIP_CASES: ${{ github.event.inputs.skip_cases || '' }}
           RUN_ONLY_CASES: ${{ github.event.inputs.run_only_cases || '' }}
           PTO_ISA_REPO: ${{ github.event.inputs.pto_isa_repo || 'https://gitcode.com/cann/pto-isa.git' }}
-          PTO_ISA_COMMIT: ${{ github.event.inputs.pto_isa_commit || '893e4b00a826231e776539512b5b17f82fc11838' }}
+          PTO_ISA_COMMIT: ${{ github.event.inputs.pto_isa_commit || '662d7f2a916d6bbde3109ce4a16ed5c28f5d900a' }}
           REMOTE_HOST: ${{ github.event.inputs.remote_host || '101.245.68.6' }}
           REMOTE_USER: ${{ github.event.inputs.remote_user || 'zhongxuan' }}
           REMOTE_PORT: ${{ github.event.inputs.remote_port || '22' }}

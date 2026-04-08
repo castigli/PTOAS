@@ -370,6 +370,52 @@ def PTO_RoundModeAttr : EnumAttr<PTO_Dialect, PTO_RoundModeEnum, "round_mode"> {
   let summary = "rounding mode attribute";
 }
 //===----------------------------------------------------------------------===//
+// TStore template controls
+//===----------------------------------------------------------------------===//
+
+def PTO_STPhaseEnum : PTO_I32Enum<
+  "STPhase", "PTO TSTORE store phase", [
+    I32EnumAttrCase<"Unspecified", 0, "unspecified">,
+    I32EnumAttrCase<"Partial", 2, "partial">,
+    I32EnumAttrCase<"Final", 3, "final">
+  ]>;
+
+def PTO_STPhaseAttr : EnumAttr<PTO_Dialect, PTO_STPhaseEnum, "st_phase"> {
+  let summary = "TSTORE phase attribute";
+}
+
+def PTO_AtomicTypeEnum : PTO_I32Enum<
+  "AtomicType", "PTO TSTORE atomic mode", [
+    I32EnumAttrCase<"AtomicNone", 0, "atomic_none">,
+    I32EnumAttrCase<"AtomicAdd", 1, "atomic_add">
+  ]>;
+
+def PTO_AtomicTypeAttr : EnumAttr<PTO_Dialect, PTO_AtomicTypeEnum, "atomic_type"> {
+  let summary = "TSTORE atomic type attribute";
+}
+
+def PTO_ReluPreModeEnum : PTO_I32Enum<
+  "ReluPreMode", "PTO TSTORE relu pre mode", [
+    I32EnumAttrCase<"NoRelu", 0, "no_relu">,
+    I32EnumAttrCase<"NormalRelu", 1, "normal_relu">
+  ]>;
+
+def PTO_ReluPreModeAttr : EnumAttr<PTO_Dialect, PTO_ReluPreModeEnum, "relu_pre_mode"> {
+  let summary = "TSTORE relu pre mode attribute";
+}
+
+def PTO_AccToVecMode_Enum : PTO_I32Enum<"AccToVecMode", "TMOV acc-to-vec mode", [
+  I32EnumAttrCase<"SingleModeVec0", 0, "single_mode_vec0">,
+  I32EnumAttrCase<"SingleModeVec1", 1, "single_mode_vec1">,
+  I32EnumAttrCase<"DualModeSplitM", 2, "dual_mode_split_m">,
+  I32EnumAttrCase<"DualModeSplitN", 3, "dual_mode_split_n">
+  ]>;
+
+def PTO_AccToVecModeAttr : PTO_Attr<"AccToVecMode", "acc_to_vec_mode"> {
+  let parameters = (ins EnumParameter<PTO_AccToVecMode_Enum>:$value);
+  let assemblyFormat = "`<` params `>`";
+}
+//===----------------------------------------------------------------------===//
 // MaskPattern
 //===----------------------------------------------------------------------===//
 
@@ -425,6 +471,17 @@ def PTO_PadValueAttr : PTO_Attr<"PadValue", "pad_value"> {
   let assemblyFormat = "`<` params `>`";
 }
 
+def PTO_CompactMode_Enum : PTO_I32Enum<"CompactMode", "Tile compact mode", [
+  I32EnumAttrCase<"Null", 0, "null">,
+  I32EnumAttrCase<"Normal", 1, "normal">,
+  I32EnumAttrCase<"RowPlusOne", 2, "row_plus_one">
+  ]>;
+
+def PTO_CompactModeAttr : PTO_Attr<"CompactMode", "compact_mode"> {
+  let parameters = (ins EnumParameter<PTO_CompactMode_Enum>:$value);
+  let assemblyFormat = "`<` params `>`";
+}
+
 // ---------- tile_buf_config (NO b_fractal / s_fractal) ----------
 def TileBufConfigAttr : AttrDef<PTO_Dialect, "TileBufConfig"> {
   let mnemonic = "tile_buf_config";
@@ -432,7 +489,8 @@ def TileBufConfigAttr : AttrDef<PTO_Dialect, "TileBufConfig"> {
     "BLayoutAttr":$bLayout,
     "SLayoutAttr":$sLayout,
     "mlir::IntegerAttr":$sFractalSize, // i32
-    "PadValueAttr":$pad
+    "PadValueAttr":$pad,
+    "CompactModeAttr":$compactMode
   );
 
   let hasCustomAssemblyFormat = 1;
@@ -442,7 +500,8 @@ def TileBufConfigAttr : AttrDef<PTO_Dialect, "TileBufConfig"> {
       "BLayoutAttr":$bLayout,
       "SLayoutAttr":$sLayout,
       "mlir::IntegerAttr":$sFractalSize,
-      "PadValueAttr":$pad
+      "PadValueAttr":$pad,
+      "CompactModeAttr":$compactMode
     )>
   ];
 
@@ -454,7 +513,8 @@ def TileBufConfigAttr : AttrDef<PTO_Dialect, "TileBufConfig"> {
                                 mlir::Attribute bLayout,
                                 mlir::Attribute sLayout,
                                 mlir::IntegerAttr sFractalSize,
-                                mlir::Attribute pad);
+                                mlir::Attribute pad,
+                                mlir::Attribute compactMode);
   }];
 }
 

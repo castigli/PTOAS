@@ -26,7 +26,7 @@ def parse_args() -> argparse.Namespace:
         "--mode",
         choices=("dev", "release"),
         default="dev",
-        help="release mode increments the minor component by 1 (for example, 0.7 -> 0.8 and 0.10 -> 0.11).",
+        help="Both dev and release modes use the base version from CMakeLists.txt; release mode exists to validate release tags against that version.",
     )
     parser.add_argument(
         "--check-tag",
@@ -44,14 +44,6 @@ def read_base_version(cmake_file: pathlib.Path) -> str:
         )
     return match.group(1)
 
-
-def bump_version(base_version: str) -> str:
-    major_str, minor_str = base_version.split(".")
-    major = int(major_str)
-    minor = int(minor_str) + 1
-    return f"{major}.{minor}"
-
-
 def normalize_tag(tag: str) -> str:
     return tag[1:] if tag.startswith("v") else tag
 
@@ -60,7 +52,7 @@ def main() -> int:
     args = parse_args()
     cmake_file = pathlib.Path(args.cmake_file)
     base_version = read_base_version(cmake_file)
-    version = bump_version(base_version) if args.mode == "release" else base_version
+    version = base_version
 
     if args.check_tag is not None:
         normalized_tag = normalize_tag(args.check_tag.strip())

@@ -248,7 +248,6 @@ process_one_dir() {
         continue
       fi
     fi
-
     # Inter-core sync regression samples are arch-specific.
     if [[ "$base" == "test_intercore_sync_a5" && "$(printf '%s' "$target_arch" | tr '[:upper:]' '[:lower:]')" != "a5" ]]; then
       echo -e "${A}(${base}.py)\tSKIP\trequires --pto-arch=a5"
@@ -263,6 +262,10 @@ process_one_dir() {
       continue
     fi
     if [[ "$base" == "test_intercore_sync_a5_ptoisa_vec" && "$(printf '%s' "$target_arch" | tr '[:upper:]' '[:lower:]')" != "a5" ]]; then
+      echo -e "${A}(${base}.py)\tSKIP\trequires --pto-arch=a5"
+      continue
+    fi
+    if [[ "$base" == "gemvmx" && "$(printf '%s' "$target_arch" | tr '[:upper:]' '[:lower:]')" != "a5" ]]; then
       echo -e "${A}(${base}.py)\tSKIP\trequires --pto-arch=a5"
       continue
     fi
@@ -843,6 +846,35 @@ PY
       fi
     fi
 
+    if [[ "$base" == "fillpad_inplace" ]]; then
+      if ! grep -Fq "TFILLPAD_INPLACE(" "$cpp"; then
+        echo -e "${A}(${base}.py)\tFAIL\tmissing TFILLPAD_INPLACE() lowering for aliased pto.tfillpad"
+        overall=1
+        continue
+      fi
+      if grep -Fq "TFILLPAD_EXPAND(" "$cpp"; then
+        echo -e "${A}(${base}.py)\tFAIL\tpto.tfillpad alias path should not lower via TFILLPAD_EXPAND()"
+        overall=1
+        continue
+      fi
+    fi
+
+    if [[ "$base" == "extract_fp" ]]; then
+      if ! grep -Fq "TEXTRACT_FP(" "$cpp"; then
+        echo -e "${A}(${base}.py)\tFAIL\tmissing TEXTRACT_FP() lowering for pto.textract_fp"
+        overall=1
+        continue
+      fi
+    fi
+
+    if [[ "$base" == "tinsert_fp" ]]; then
+      if ! grep -Fq "TINSERT_FP(" "$cpp"; then
+        echo -e "${A}(${base}.py)\tFAIL\tmissing TINSERT_FP() lowering for pto.tinsert_fp"
+        overall=1
+        continue
+      fi
+    fi
+
 	    # Regression guard for Issue #190:
 	    # Infer layout for a 2D column-vector view (16 x 1) should prefer DN.
 	    if [[ "$base" == "tensor_view_infer_layout_dn" ]]; then
@@ -856,7 +888,7 @@ PY
     # Regression guard for row-reduction kernels:
     # (32 x 1) row-major outputs are minor-2D ambiguous; layout must align with
     # row-major tiles (ND), otherwise pto-isa can hit layout/tile static_assert.
-    if [[ "$base" == "rowmin" || "$base" == "rowsum" || "$base" == "rowmax" ]]; then
+    if [[ "$base" == "rowmin" || "$base" == "rowsum" || "$base" == "rowmax" || "$base" == "rowprod" ]]; then
       if ! grep -Eq "pto::Shape<1, 1, 1, 32, 1>.*pto::Layout::ND" "$cpp"; then
         echo -e "${A}(${base}.py)\tFAIL\texpected pto::Layout::ND for shape (32 x 1) GlobalTensor"
         overall=1

@@ -148,11 +148,15 @@ struct MemrefCopyOpLowering : public OpRewritePattern<memref::CopyOp> {
     Value dst = copyOp.getTarget();
     bool convertToStore = isFromFunctionArg(dst);
     if (convertToStore) {
-      rewriter.replaceOpWithNewOp<pto::TStoreOp>(copyOp, TypeRange(), src, dst);
+      rewriter.replaceOpWithNewOp<pto::TStoreOp>(copyOp, TypeRange(), src, dst,
+                                                 Value{});
       return success();
     }
 
-    rewriter.replaceOpWithNewOp<pto::TMovOp>(copyOp, TypeRange(), src, dst);
+    rewriter.replaceOpWithNewOp<pto::TMovOp>(
+        copyOp, TypeRange(), src, dst, Value{}, Value{}, pto::AccToVecModeAttr{},
+        pto::ReluPreModeAttr::get(rewriter.getContext(),
+                                  pto::ReluPreMode::NoRelu));
     return success();
   }
 };
@@ -169,7 +173,8 @@ struct BufferizeMaterializeOpLowering
     bool convertToStore = isFromFunctionArg(dst);
     if (convertToStore) {
       rewriter.replaceOpWithNewOp<pto::TStoreOp>(bufMIDOp, TypeRange(),
-                                                 bufMIDOp.getSource(), dst);
+                                                 bufMIDOp.getSource(), dst,
+                                                 Value{});
       return success();
     }
     return failure();

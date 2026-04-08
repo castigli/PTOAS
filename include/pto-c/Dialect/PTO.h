@@ -28,6 +28,12 @@ bool mlirPTOTypeIsAPtrType(MlirType type);
 MlirType mlirPTOPtrTypeGet(MlirContext ctx, MlirType elementType);
 MlirType mlirPTOPtrTypeGetElementType(MlirType type);
 
+// ---- !pto.async_session / !pto.async_event ----
+bool mlirPTOTypeIsAAsyncSessionType(MlirType type);
+MlirType mlirPTOAsyncSessionTypeGet(MlirContext ctx);
+bool mlirPTOTypeIsAAsyncEventType(MlirType type);
+MlirType mlirPTOAsyncEventTypeGet(MlirContext ctx);
+
 // ---- #pto.address_space<...> ----
 bool mlirPTOAttrIsAAddressSpaceAttr(MlirAttribute attr);
 
@@ -83,6 +89,15 @@ MLIR_CAPI_EXPORTED int32_t mlirPTOSLayoutAttrGetValue(MlirAttribute attr);
 MLIR_CAPI_EXPORTED bool mlirPTOAttrIsAPadValueAttr(MlirAttribute attr);
 MLIR_CAPI_EXPORTED MlirAttribute mlirPTOPadValueAttrGet(MlirContext ctx, int32_t value);
 MLIR_CAPI_EXPORTED int32_t mlirPTOPadValueAttrGetValue(MlirAttribute attr);
+MLIR_CAPI_EXPORTED bool mlirPTOAttrIsACompactModeAttr(MlirAttribute attr);
+MLIR_CAPI_EXPORTED MlirAttribute mlirPTOCompactModeAttrGet(MlirContext ctx, int32_t value);
+MLIR_CAPI_EXPORTED int32_t mlirPTOCompactModeAttrGetValue(MlirAttribute attr);
+MLIR_CAPI_EXPORTED bool mlirPTOAttrIsAAccToVecModeAttr(MlirAttribute attr);
+MLIR_CAPI_EXPORTED MlirAttribute mlirPTOAccToVecModeAttrGet(MlirContext ctx, int32_t value);
+MLIR_CAPI_EXPORTED int32_t mlirPTOAccToVecModeAttrGetValue(MlirAttribute attr);
+MLIR_CAPI_EXPORTED bool mlirPTOAttrIsAReluPreModeAttr(MlirAttribute attr);
+MLIR_CAPI_EXPORTED MlirAttribute mlirPTOReluPreModeAttrGet(MlirContext ctx, int32_t value);
+MLIR_CAPI_EXPORTED int32_t mlirPTOReluPreModeAttrGetValue(MlirAttribute attr);
 MLIR_CAPI_EXPORTED MlirAttribute mlirPTORoundModeAttrGet(MlirContext ctx, int32_t value);
 MLIR_CAPI_EXPORTED bool mlirPTOAttrIsARoundModeAttr(MlirAttribute attr);
 MLIR_CAPI_EXPORTED int32_t mlirPTORoundModeAttrGetValue(MlirAttribute attr);
@@ -148,6 +163,11 @@ MLIR_CAPI_EXPORTED MlirAttribute mlirPTOTileBufConfigAttrGet(
     MlirContext ctx,
     MlirAttribute bLayout, MlirAttribute sLayout,
     MlirAttribute sFractalSize, MlirAttribute pad);
+MLIR_CAPI_EXPORTED MlirAttribute mlirPTOTileBufConfigAttrGetWithCompactMode(
+    MlirContext ctx,
+    MlirAttribute bLayout, MlirAttribute sLayout,
+    MlirAttribute sFractalSize, MlirAttribute pad,
+    MlirAttribute compactMode);
 MLIR_CAPI_EXPORTED MlirType mlirPTOTileBufTypeGetWithValidShape(
     MlirContext ctx, intptr_t rank, const int64_t *shape, MlirType elementType,
     MlirAttribute memorySpace, intptr_t validRank, const int64_t *validShape);

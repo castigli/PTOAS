@@ -232,6 +232,16 @@ while IFS= read -r -d '' cpp; do
   testcase="${testcase%-pto}"
   testcase="${testcase%_pto}"
 
+  # AsyncComm smoke sample issues async remote DMA against plain local buffers.
+  # In board-runtime STAGE=run this can trigger invalid MPU access on single-rank
+  # execution, so skip it in runtime stage.
+  if [[ "${STAGE}" == "run" && "${testcase}" == "async_comm" ]]; then
+    skip_count=$((skip_count + 1))
+    printf "%s\tSKIP\t%s\truntime skip: async_comm\n" "${testcase}" "${STAGE}" >> "${RESULTS_TSV}"
+    log "SKIP: ${testcase} (runtime skip)"
+    continue
+  fi
+
   if [[ -n "${RUN_ONLY_CASES_NORM}" ]] && ! list_contains "${RUN_ONLY_CASES_NORM}" "${testcase}"; then
     continue
   fi
@@ -240,6 +250,21 @@ while IFS= read -r -d '' cpp; do
     printf "%s\tSKIP\t%s\tlisted in SKIP_CASES\n" "${testcase}" "${STAGE}" >> "${RESULTS_TSV}"
     log "SKIP: ${testcase} (SKIP_CASES)"
     continue
+  fi
+  if [[ "${testcase}" == "gemvmx" ]]; then
+    soc_lc="$(printf '%s' "${SOC_VERSION:-}" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$soc_lc" != *"a5"* && "$soc_lc" != *"950"* ]]; then
+      skip_count=$((skip_count + 1))
+      printf "%s\tSKIP\t%s\trequires A5 (set SOC_VERSION to A5/950)\n" "${testcase}" "${STAGE}" >> "${RESULTS_TSV}"
+      log "SKIP: ${testcase} (requires A5 SOC_VERSION)"
+      continue
+    fi
+    if [[ "${PTOAS_BOARD_IS_A3:-0}" == "1" ]]; then
+      skip_count=$((skip_count + 1))
+      printf "%s\tSKIP\t%s\trequires A5 board\n" "${testcase}" "${STAGE}" >> "${RESULTS_TSV}"
+      log "SKIP: ${testcase} (requires A5 board)"
+      continue
+    fi
   fi
 
   echo

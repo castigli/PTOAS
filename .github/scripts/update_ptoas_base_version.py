@@ -44,6 +44,11 @@ def parse_args() -> argparse.Namespace:
         default=".",
         help="Repository root used when scanning git tags.",
     )
+    parser.add_argument(
+        "--next",
+        action="store_true",
+        help="Advance the resolved version by one minor step (for example, 0.23 -> 0.24).",
+    )
     return parser.parse_args()
 
 
@@ -54,6 +59,13 @@ def normalize_version(version: str) -> str:
     if not re.fullmatch(r"[0-9]+\.[0-9]+", normalized):
         raise ValueError(f"invalid PTOAS version '{version}'")
     return normalized
+
+
+def bump_version(version: str) -> str:
+    major_str, minor_str = version.split(".")
+    major = int(major_str)
+    minor = int(minor_str) + 1
+    return f"{major}.{minor}"
 
 
 def read_base_version(cmake_file: pathlib.Path) -> str:
@@ -125,6 +137,8 @@ def main() -> int:
                 f"keeping current base version {version}",
                 file=sys.stderr,
             )
+    if args.next:
+        version = bump_version(version)
 
     update_base_version(cmake_file, version)
     print(version)
