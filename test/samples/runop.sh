@@ -19,7 +19,7 @@ PYTHON_BIN="${PYTHON_BIN:-}"
 PTOAS_OUT_DIR="${PTOAS_OUT_DIR:-}"
 PTOAS_ENABLE_INSERT_SYNC="${PTOAS_ENABLE_INSERT_SYNC:-1}"
 PTOAS_FLAGS="${PTOAS_FLAGS:-}"
-PTO_PTO_DIRS="${PTO_PTO_DIRS:-Sync Qwen3Scope2}"
+PTO_PTO_DIRS="${PTO_PTO_DIRS:-Sync Qwen3Tilelet}"
 ENABLE_BC=0
 
 usage() {
@@ -36,7 +36,7 @@ Env:
   PTOAS_OUT_DIR  # where generated *.mlir/*.cpp go (optional; defaults to a temp dir)
   PTOAS_FLAGS  # extra flags passed to ptoas (e.g. --enable-insert-sync)
   PTOAS_ENABLE_INSERT_SYNC  # 1 to append --enable-insert-sync to PTOAS_FLAGS (default: 1)
-  PTO_PTO_DIRS  # space-separated dirs to run .pto directly (default: Sync Qwen3Scope2)
+  PTO_PTO_DIRS  # space-separated dirs to run .pto directly (default: Sync Qwen3Tilelet)
 
 Flags:
   --enablebc  # enable: python -> .pto -> ptobc -> .pto -> ptoas
@@ -153,10 +153,10 @@ process_one_dir() {
   if [[ "${ENABLE_BC}" == "1" ]]; then
     use_ptobc_roundtrip=1
   fi
-  # Qwen3 scope2 kernels currently serve as direct ptoas compile-regression
+  # Qwen3 tilelet kernels currently serve as direct ptoas compile-regression
   # coverage. They require A5/level3 lowering, but are not expected to
   # roundtrip through ptobc yet.
-  if [[ "$A" == "Qwen3Scope2" ]]; then
+  if [[ "$A" == "Qwen3Tilelet" ]]; then
     use_ptobc_roundtrip=0
   fi
   local -a ptoas_flags=()
@@ -190,7 +190,7 @@ process_one_dir() {
       fi
     done
   fi
-  if [[ "$A" == "Qwen3Scope2" && $has_pto_arch_override -eq 0 ]]; then
+  if [[ "$A" == "Qwen3Tilelet" && $has_pto_arch_override -eq 0 ]]; then
     ptoas_flags+=(--pto-arch a5 --pto-level=level3)
     target_arch="a5"
   fi
@@ -907,6 +907,13 @@ PY
       ptobc_file="${out_subdir}/${base}.ptobc"
       decoded_pto="${out_subdir}/${base}-roundtrip.pto"
       cpp="${out_subdir}/${base}.cpp"
+      if [[ "$A" == "Qwen3Tilelet" ]]; then
+        cpp="${out_subdir}/${base}-pto.cpp"
+      fi
+      if [[ "$A" == "Qwen3Tilelet" && "$(printf '%s' "$target_arch" | tr '[:upper:]' '[:lower:]')" != "a5" ]]; then
+        echo -e "${A}(${base}.pto)\tSKIP\trequires --pto-arch=a5"
+        continue
+      fi
       local sample_use_ptobc_roundtrip="$use_ptobc_roundtrip"
 
       # TODO(ptobc): decode of this regression currently fails with
