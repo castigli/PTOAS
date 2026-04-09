@@ -1484,6 +1484,95 @@ LogicalResult TLoadOp::verify() {
   return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
 }
 
+LogicalResult TPrefetchOp::verify() {
+  Type srcTy = getSrc().getType();
+  Type dstTy = getDst().getType();
+
+  Type srcElem;
+  Type dstElem;
+
+  if (auto srcPart = dyn_cast<pto::PartitionTensorViewType>(srcTy)) {
+    auto srcShape = srcPart.getShape();
+    for (unsigned i = 0; i < srcShape.size(); ++i) {
+      if (srcShape[i] != ShapedType::kDynamic && srcShape[i] <= 0)
+        return emitOpError() << "expects src shape[" << i << "] to be positive";
+    }
+    srcElem = srcPart.getElementType();
+  } else if (auto srcMr = dyn_cast<MemRefType>(srcTy)) {
+    if (!srcMr.hasRank())
+      return emitOpError("expects src memref to be ranked");
+    for (int64_t dim : srcMr.getShape()) {
+      if (dim != ShapedType::kDynamic && dim <= 0)
+        return emitOpError("expects src memref shape to be positive");
+    }
+    srcElem = srcMr.getElementType();
+  } else {
+    return emitOpError("expects src to be !pto.partition_tensor_view or memref");
+  }
+
+  if (auto dstTile = dyn_cast<pto::TileBufType>(dstTy)) {
+    if (failed(verifyTileBufCommon(*this, dstTile, "dst")))
+      return failure();
+    auto dstValid = dstTile.getValidShape();
+    for (unsigned i = 0; i < dstValid.size(); ++i) {
+      if (dstValid[i] != ShapedType::kDynamic && dstValid[i] <= 0)
+        return emitOpError() << "expects dst valid_shape[" << i << "] to be positive";
+    }
+    auto dstSpace = getPTOMemorySpaceEnum(dstTile);
+    if (!dstSpace || (*dstSpace != pto::AddressSpace::VEC &&
+                      *dstSpace != pto::AddressSpace::MAT))
+      return emitOpError("expects dst to use loc=vec or loc=mat");
+    dstElem = dstTile.getElementType();
+  } else if (auto dstMr = dyn_cast<MemRefType>(dstTy)) {
+    auto dstSpace = getPTOMemorySpaceEnum(dstMr);
+    if (!dstSpace || (*dstSpace != pto::AddressSpace::VEC &&
+                      *dstSpace != pto::AddressSpace::MAT))
+      return emitOpError("expects dst memref to use loc=vec or loc=mat");
+    if (!dstMr.hasRank())
+      return emitOpError("expects dst memref to be ranked");
+    dstElem = dstMr.getElementType();
+  } else {
+    return emitOpError("expects dst to be !pto.tile_buf or memref");
+  }
+
+  if (getElemByteSize(srcElem) != getElemByteSize(dstElem))
+    return emitOpError("expects src and dst element types to have the same element size");
+
+  return success();
+}
+
+LogicalResult TPackOp::verify() {
+  if (shouldBypassDecodedMemrefVerifier(getOperation()))
+    return success();
+
+  auto verifyA2A3 = [&]() -> LogicalResult {
+    return emitOpError("tpack is only supported on A5 targets");
+  };
+
+  auto verifyA5 = [&]() -> LogicalResult {
+    if (failed(verifyVecTileCommonA5(*this, getSrc().getType(), "src")) ||
+        failed(verifyVecTileCommonA5(*this, getDst().getType(), "dst")))
+      return failure();
+
+    auto srcTy = cast<pto::TileBufType>(getSrc().getType());
+    auto dstTy = cast<pto::TileBufType>(getDst().getType());
+
+    if (srcTy.getValidShape() != dstTy.getValidShape())
+      return emitOpError("expects src and dst to have the same valid_shape");
+
+    unsigned srcBytes = getElemByteSize(srcTy.getElementType());
+    unsigned dstBytes = getElemByteSize(dstTy.getElementType());
+    if (!((srcBytes == 4 && dstBytes == 2) ||
+          (srcBytes == 4 && dstBytes == 1) ||
+          (srcBytes == 2 && dstBytes == 1)))
+      return emitOpError("expects A5 tpack element-size pair to be 4->2, 4->1, or 2->1 bytes");
+
+    return success();
+  };
+
+  return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
+}
+
 LogicalResult mlir::pto::SetFFTsOp::verify() {
   auto mr = llvm::dyn_cast<mlir::MemRefType>(getFfts().getType());
   if (!mr)
@@ -2841,6 +2930,42 @@ LogicalResult pto::TCIOp::verify() {
 
   return success();
 }
+
+LogicalResult pto::TTriOp::verify() {
+  if (shouldBypassDecodedMemrefVerifier(getOperation()))
+    return success();
+
+  Type dstTy = getDst().getType();
+  if (failed(verifyVecTileCommon(*this, dstTy, "dst")))
+    return failure();
+
+  auto diagonalTy = getDiagonal().getType().dyn_cast<IntegerType>();
+  if (!diagonalTy)
+    return emitOpError("expects diagonal to be an integer operand");
+
+  int32_t upperOrLower = getUpperOrLower();
+  if (upperOrLower != 0 && upperOrLower != 1)
+    return emitOpError("expects upperOrLower to be 0 (lower) or 1 (upper)");
+
+  Type elemTy = getElemTy(dstTy);
+  return dispatchVerifierByArch(
+      getOperation(),
+      [&]() -> LogicalResult {
+        if (!isSupportedVecElemType(elemTy, /*allowBf16=*/false,
+                                    /*allowInt8=*/false))
+          return emitOpError()
+                 << "expects A2/A3 dst element type to be f16/f32/i16/i32/u16/u32";
+        return success();
+      },
+      [&]() -> LogicalResult {
+        if (!isSupportedVecElemType(elemTy, /*allowBf16=*/true,
+                                    /*allowInt8=*/true))
+          return emitOpError()
+                 << "expects A5 dst element type to be f16/f32/bf16/i8/i16/i32/u8/u16/u32";
+        return success();
+      });
+}
+
 LogicalResult pto::TCmpOp::verify() {
   auto verifyA2A3 = [&]() -> LogicalResult {
     Type t0 = getSrc0().getType();
@@ -8948,6 +9073,18 @@ void TLoadOp::getEffects(SmallVectorImpl<SideEffects::EffectInstance<MemoryEffec
   addEffect(effects, &getDstMutable(), MemoryEffects::Write::get());
 }
 
+void TPrefetchOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>> &effects) {
+  addEffect(effects, &getSrcMutable(), MemoryEffects::Read::get());
+  addEffect(effects, &getDstMutable(), MemoryEffects::Write::get());
+}
+
+void TPackOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>> &effects) {
+  addEffect(effects, &getSrcMutable(), MemoryEffects::Read::get());
+  addEffect(effects, &getDstMutable(), MemoryEffects::Write::get());
+}
+
 // === TAbsOp ===
 // Read: src, Write: dst
 void TAbsOp::getEffects(
@@ -9064,6 +9201,12 @@ PTO_DEFINE_UNARY_EFFECTS(TAndSOp, getSrcMutable(), getDstMutable())
 
 // TCI: Write(dst) (generates sequence)
 void TCIOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>> &effects) {
+  PTO_ADD_WRITE(getDstMutable());
+}
+
+// TTRI: Write(dst) (generates triangular mask)
+void TTriOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>> &effects) {
   PTO_ADD_WRITE(getDstMutable());
 }

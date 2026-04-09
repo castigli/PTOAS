@@ -489,6 +489,42 @@ def TLoadOp  : PTO_TOp<"tload", [
   }];
 }
 
+def TPrefetchOp : PTO_TOp<"tprefetch", [
+  PTO_DpsInitOpInterface,
+  OpPipeInterface,
+  DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
+]> {
+  let summary = "Prefetch global data into a local tile buffer.";
+  let description = [{
+    Prefetches data from a global partition view into a temporary local tile
+    buffer. Unlike most PTO intrinsics, TPREFETCH does not carry implicit
+    TSYNC(wait_events...) semantics in PTO-ISA.
+
+    DPS form:
+      pto.tprefetch ins(%src) outs(%dst)
+  }];
+
+  let arguments = (ins
+    PTODpsType:$src,
+    PTODpsType:$dst
+  );
+
+  let results = (outs);
+
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `ins` `(` $src `:` qualified(type($src)) `)`
+    `outs` `(` $dst `:` qualified(type($dst)) `)`
+    attr-dict
+  }];
+
+  let extraClassDeclaration = [{
+    ::mlir::pto::PIPE getPipe() { return ::mlir::pto::PIPE::PIPE_MTE2; }
+    ::mlir::MutableOperandRange getDpsInitsMutable() { return getDstMutable(); }
+  }];
+}
+
 def TStoreOp: PTO_TOp<"tstore", [
   PTO_DpsInitOpInterface,
   OpPipeInterface,
@@ -553,6 +589,34 @@ def TStoreOp: PTO_TOp<"tstore", [
         return ::mlir::pto::PIPE::PIPE_FIX;
       return ::mlir::pto::PIPE::PIPE_MTE3;
     }
+    ::mlir::MutableOperandRange getDpsInitsMutable() { return getDstMutable(); }
+  }];
+}
+
+def TPackOp : PTO_TOp<"tpack", [
+  PTO_DpsInitOpInterface,
+  OpPipeInterface,
+  DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
+]> {
+  let summary = "Pack a wider vec tile into a narrower vec tile (A5).";
+
+  let arguments = (ins
+    PTODpsType:$src,
+    PTODpsType:$dst
+  );
+
+  let results = (outs);
+
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `ins` `(` $src `:` qualified(type($src)) `)`
+    `outs` `(` $dst `:` qualified(type($dst)) `)`
+    attr-dict
+  }];
+
+  let extraClassDeclaration = [{
+    ::mlir::pto::PIPE getPipe() { return ::mlir::pto::PIPE::PIPE_V; }
     ::mlir::MutableOperandRange getDpsInitsMutable() { return getDstMutable(); }
   }];
 }
@@ -2487,6 +2551,35 @@ def TCIOp : PTO_TOp<"tci", [
     `ins` `(` $S 
     attr-dict
     `:` type($S) `)`
+    `outs` `(` $dst `:` qualified(type($dst) ) `)`
+  }];
+
+  let hasVerifier = 1;
+
+  let extraClassDeclaration = [{
+    ::mlir::pto::PIPE getPipe() { return ::mlir::pto::PIPE::PIPE_V; }
+    ::mlir::MutableOperandRange getDpsInitsMutable() { return getDstMutable(); }
+  }];
+}
+
+def TTriOp : PTO_TOp<"ttri", [
+  PTO_DpsInitOpInterface,
+  OpPipeInterface,
+  DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
+]> {
+  let summary = "Generate a lower/upper triangular mask tile";
+
+  let arguments = (ins
+    AnyInteger:$diagonal,
+    PTODpsType:$dst,
+    DefaultValuedAttr<I32Attr, "0">:$upperOrLower
+  );
+  let results = (outs);
+
+  let assemblyFormat = [{
+    `ins` `(` $diagonal
+    attr-dict
+    `:` type($diagonal) `)`
     `outs` `(` $dst `:` qualified(type($dst) ) `)`
   }];
 

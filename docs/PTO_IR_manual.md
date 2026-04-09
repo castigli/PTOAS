@@ -707,6 +707,103 @@ pto.tload ins(%pv : !pto.partition_tensor_view<16x16xf16>)
 
 ---
 
+##### `pto.tprefetch` - Prefetch Partition View into Tile
+
+**Summary:** Prefetches a GM-backed partition view into a temporary local tile buffer. This maps to PTO-ISA `TPREFETCH(dst, src)` and, unlike most PTO intrinsics, does not add implicit wait-event synchronization in the C++ wrapper.
+
+**Semantics:**
+
+```
+TPREFETCH(dst, src)
+```
+
+The detailed caching / hint behavior is target-defined by PTO-ISA. In PTOAS the
+op is modeled as writing the prefetched data into `dst`.
+
+**Arguments:**
+
+| Name | Type | Description |
+|------|------|-------------|
+| `src` | `pto.partition_tensor_view` or lowered GM memref | Source global view |
+| `dst` | `pto.tile_buf` or lowered local memref | Destination local tile |
+
+**Results:** None. Writes into `dst` via DPS pattern.
+
+**Constraints & Verification:**
+
+- `src` must be a partition view before lowering, or the corresponding lowered ranked memref form after `PTOViewToMemref`.
+- `dst` must be a tile buffer before lowering, or the corresponding lowered ranked memref form after `PTOViewToMemref`.
+- `dst` must use `loc=vec` or `loc=mat`.
+- Static source extents and static destination valid extents must be positive when known.
+- `src` and `dst` element types must have the same element size in bytes.
+
+**Hardware Mapping:**
+
+- Executes on the **DMA pipeline** (`PIPE_MTE2`, GM -> local tile)
+
+**Basic Example:**
+
+```mlir
+pto.tprefetch ins(%pv : !pto.partition_tensor_view<16x16xf16>)
+              outs(%tb : !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=16,
+                    v_row=16, v_col=16, blayout=row_major, slayout=none_box,
+                    fractal=512, pad=0>)
+```
+
+---
+
+##### `pto.tpack` - Pack a Wider Vec Tile into a Narrower Vec Tile
+
+**Summary:** A5-only vector packing operation that narrows a source VEC tile into
+a destination VEC tile of the same valid shape.
+
+**Semantics:**
+
+```
+TPACK(dst, src)
+```
+
+Supported packing directions follow PTO-ISA:
+- `b32 -> b16`
+- `b32 -> b8`
+- `b16 -> b8`
+
+**Arguments:**
+
+| Name | Type | Description |
+|------|------|-------------|
+| `src` | `pto.tile_buf` | Source VEC tile with wider element type |
+| `dst` | `pto.tile_buf` | Destination VEC tile with narrower element type |
+
+**Results:** None. Writes into `dst` via DPS pattern.
+
+**Constraints & Verification:**
+
+- `pto.tpack` is only supported on **A5** targets.
+- `src` and `dst` must both be VEC tiles (`loc=vec`) with row-major layout.
+- `src` and `dst` must have the same `valid_shape`.
+- Supported element-size pairs are exactly:
+  - `4 -> 2` bytes
+  - `4 -> 1` bytes
+  - `2 -> 1` bytes
+
+**Hardware Mapping:**
+
+- Executes on the **Vector pipeline** (`PIPE_V`)
+
+**Basic Example:**
+
+```mlir
+pto.tpack ins(%src : !pto.tile_buf<loc=vec, dtype=i32, rows=128, cols=128,
+              v_row=128, v_col=128, blayout=row_major, slayout=none_box,
+              fractal=512, pad=0>)
+          outs(%dst : !pto.tile_buf<loc=vec, dtype=i16, rows=128, cols=128,
+               v_row=128, v_col=128, blayout=row_major, slayout=none_box,
+               fractal=512, pad=0>)
+```
+
+---
+
 ##### `pto.tstore` - Store Tile to Partition View
 
 **Summary:** Stores a 2-D tile buffer back to a 2-D partition view. Supports phase/atomic/relu/pre-quant controls that lower to the corresponding `TSTORE` template overload family.
@@ -3322,6 +3419,72 @@ pto.tsqrt ins(%a : !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=16,
           outs(%c : !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=16,
               v_row=16, v_col=16, blayout=row_major, slayout=none_box,
               fractal=512, pad=0>)
+```
+
+---
+
+##### `pto.ttri` - Fill Triangular Tile Region
+
+**Summary:** Fills a VEC tile using the PTO-ISA `TTRI` triangular pattern.
+
+**Semantics:**
+
+```
+TTRI(dst, diagonal)
+```
+
+`upperOrLower=0` selects the lower-triangular form and `upperOrLower=1`
+selects the upper-triangular form. The exact per-element fill pattern follows
+the target PTO-ISA implementation.
+
+**Arguments:**
+
+| Name | Type | Description |
+|------|------|-------------|
+| `diagonal` | integer SSA value | Runtime diagonal selector |
+| `dst` | `pto.tile_buf` | Destination vector tile |
+
+**Attributes:**
+
+| Name | Type | Description |
+|------|------|-------------|
+| `upperOrLower` | `I32Attr` (default: `0`) | `0` for lower triangular, `1` for upper triangular |
+
+**Results:** None. Writes into `dst` via DPS pattern.
+
+**Assembly Format:**
+
+```mlir
+pto.ttri ins(%diag {upperOrLower = 1 : i32} : i32)
+         outs(%dst : !pto.tile_buf<...>)
+```
+
+**Constraints & Verification:**
+
+- `dst` must be a VEC tile (`loc=vec`) whose valid shape stays within the static tile shape.
+- `dst` must use `blayout=row_major`.
+- `diagonal` must have an integer type.
+- `upperOrLower` must be either `0` or `1`.
+- Supported element types:
+  - A2/A3: `f16`, `f32`, `i16`, `i32`, `u16`, `u32`
+  - A5: `f16`, `f32`, `bf16`, `i8`, `i16`, `i32`, `u8`, `u16`, `u32`
+
+**Hardware Mapping:**
+
+- Executes on the **Vector pipeline** (`PIPE_V`)
+
+**Basic Example:**
+
+```mlir
+pto.ttri ins(%diag : i32)
+         outs(%lower : !pto.tile_buf<loc=vec, dtype=i32, rows=32, cols=32,
+               v_row=32, v_col=32, blayout=row_major, slayout=none_box,
+               fractal=512, pad=0>)
+
+pto.ttri ins(%diag {upperOrLower = 1 : i32} : i32)
+         outs(%upper : !pto.tile_buf<loc=vec, dtype=i32, rows=32, cols=32,
+               v_row=32, v_col=32, blayout=row_major, slayout=none_box,
+               fractal=512, pad=0>)
 ```
 
 ---
