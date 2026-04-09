@@ -6,7 +6,6 @@
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
-
 import os
 import re
 import sys
@@ -154,7 +153,11 @@ def float_values(generator, count: int, *, style: str) -> np.ndarray:
 
 def int_values(generator, count: int, dtype: np.dtype, *, style: str) -> np.ndarray:
     dtype = np.dtype(dtype)
-    if dtype == np.dtype(np.int16):
+    if dtype == np.dtype(np.int8):
+        if style != 'bitwise':
+            raise ValueError(f'unsupported int8 style: {style}')
+        values = generator.integers(-128, 128, size=count, dtype=np.int32)
+    elif dtype == np.dtype(np.int16):
         if style != 'bitwise':
             raise ValueError(f'unsupported int16 style: {style}')
         values = generator.integers(-256, 256, size=count, dtype=np.int32)

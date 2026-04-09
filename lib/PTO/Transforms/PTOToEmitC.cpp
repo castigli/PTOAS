@@ -6955,6 +6955,44 @@ struct PTOQuantToEmitC : public OpConversionPattern<pto::TQuantOp> {
     return success();
   }
 };
+struct PTODequantToEmitC : public OpConversionPattern<pto::TDequantOp> {
+  using OpConversionPattern<pto::TDequantOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(pto::TDequantOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto *ctx = rewriter.getContext();
+
+    Value dst    = peelUnrealized(adaptor.getDst());
+    Value src    = peelUnrealized(adaptor.getSrc());
+    Value scale  = peelUnrealized(adaptor.getScale());
+    Value offset = peelUnrealized(adaptor.getOffset());
+
+    // TDEQUANT<DstTile, SrcTile, ParaTile>(dst, src, scale, offset)
+    ArrayAttr templateArgs;
+    auto dstOT   = dst.getType().dyn_cast<emitc::OpaqueType>();
+    auto srcOT   = src.getType().dyn_cast<emitc::OpaqueType>();
+    auto scaleOT = scale.getType().dyn_cast<emitc::OpaqueType>();
+    if (dstOT && srcOT && scaleOT) {
+      templateArgs = rewriter.getArrayAttr({
+          emitc::OpaqueAttr::get(ctx, dstOT.getValue().str()),
+          emitc::OpaqueAttr::get(ctx, srcOT.getValue().str()),
+          emitc::OpaqueAttr::get(ctx, scaleOT.getValue().str()),
+      });
+    } else {
+      templateArgs = ArrayAttr{};
+    }
+
+    rewriter.create<emitc::CallOpaqueOp>(
+        loc, TypeRange{}, "TDEQUANT",
+        /*args=*/ArrayAttr{}, /*templateArgs=*/templateArgs,
+        /*operands=*/SmallVector<Value>{dst, src, scale, offset});
+
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 //===----------------------------------------------------------------------===//
 // PTOConvert.cpp  (add lowering + patterns.add for TMRGSORT DPS/memref op)
 //===----------------------------------------------------------------------===//
@@ -6977,8 +7015,8 @@ struct PTOMrgSortToEmitC : public OpConversionPattern<pto::TMrgSortOp> {
           ArrayAttr{}, ArrayAttr{}, operands);
     } else if (op.isFormat2()) {
       // pto-isa API:
-      //   TMRGSORT<DstTile, TmpTile, Src0, Src1, Src2, Src3, exhausted>(
-      //       dst, executedNumList, tmp, src0, src1, src2, src3);
+      //   TMRGSORT<DstTile, TmpTile, Src0, Src1[, Src2[, Src3]], exhausted>(
+      //       dst, executedNumList, tmp, src0, src1[, src2[, src3]]);
       auto *ctx = rewriter.getContext();
 
       Value dst = peelUnrealized(adaptor.getDsts()[0]);
@@ -6986,17 +7024,17 @@ struct PTOMrgSortToEmitC : public OpConversionPattern<pto::TMrgSortOp> {
       Value excuted = peelUnrealized(adaptor.getExcuted());
 
       SmallVector<Value, 4> srcs;
-      srcs.reserve(4);
+      srcs.reserve(adaptor.getSrcs().size());
       for (Value v : adaptor.getSrcs())
         srcs.push_back(peelUnrealized(v));
 
       auto dstOT = dst.getType().dyn_cast<emitc::OpaqueType>();
       auto tmpOT = tmp.getType().dyn_cast<emitc::OpaqueType>();
-      if (!dstOT || !tmpOT || srcs.size() != 4)
-        return op.emitOpError("format2 expects (dst,tmp) tilebufs and exactly 4 srcs");
+      if (!dstOT || !tmpOT || srcs.size() < 2 || srcs.size() > 4)
+        return op.emitOpError("format2 expects (dst,tmp) tilebufs and 2 to 4 srcs");
 
       SmallVector<Attribute, 8> targs;
-      targs.reserve(7);
+      targs.reserve(2 + srcs.size() + 1);
       targs.push_back(emitc::OpaqueAttr::get(ctx, dstOT.getValue().str()));
       targs.push_back(emitc::OpaqueAttr::get(ctx, tmpOT.getValue().str()));
       for (Value v : srcs) {
@@ -9486,6 +9524,7 @@ static void populatePTOToEmitCPatterns(RewritePatternSet &patterns,
   patterns.add<PTOGatherbToEmitC>(typeConverter, ctx);
   patterns.add<PTOMovFPToEmitC>(typeConverter, ctx);
   patterns.add<PTOQuantToEmitC>(typeConverter, ctx);
+  patterns.add<PTODequantToEmitC>(typeConverter, ctx);
   patterns.add<PTOOrsToEmitC>(typeConverter, ctx);
   patterns.add<PTOLogToEmitC>(typeConverter, ctx);
   patterns.add<FuncToEmitC>(typeConverter, ctx);
