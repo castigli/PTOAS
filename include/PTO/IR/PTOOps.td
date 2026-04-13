@@ -2166,7 +2166,8 @@ def MGatherOp : PTO_TOp<"mgather", [
   let arguments = (ins
     PTODpsType:$mem,
     PTODpsType:$idx,
-    PTODpsType:$dst);
+    PTODpsType:$dst,
+    DefaultValuedAttr<PTO_GatherOOBAttr, "::mlir::pto::GatherOOB::Undefined">:$gatherOob);
 
   let results = (outs);
 
@@ -2319,7 +2320,9 @@ def MScatterOp : PTO_TOp<"mscatter", [
   let arguments = (ins
     PTODpsType:$src,
     PTODpsType:$idx,
-    PTODpsType:$mem               // outs target
+    PTODpsType:$mem,               // outs target
+    DefaultValuedAttr<PTO_ScatterAtomicOpAttr, "::mlir::pto::ScatterAtomicOp::None">:$scatterAtomicOp,
+    DefaultValuedAttr<PTO_ScatterOOBAttr, "::mlir::pto::ScatterOOB::Undefined">:$scatterOob
   );
 
   let results = (outs);

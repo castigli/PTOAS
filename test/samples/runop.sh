@@ -298,6 +298,10 @@ process_one_dir() {
     if [[ "$base" == "test_intercore_sync_a3_missing_setffts" && "$(printf '%s' "$target_arch" | tr '[:upper:]' '[:lower:]')" == "a3" ]]; then
       expect_fail=1
     fi
+    if [[ ("$base" == "mgather" || "$base" == "mscatter") && \
+          "$(printf '%s' "$target_arch" | tr '[:upper:]' '[:lower:]')" == "a3" ]]; then
+      expect_fail=1
+    fi
     mlir="${out_subdir}/${base}-pto-ir.pto"
     cpp="${out_subdir}/${base}-pto.cpp"
 
@@ -345,6 +349,14 @@ process_one_dir() {
         if [[ "$base" == "test_intercore_sync_a3_missing_setffts" ]]; then
           if ! grep -Eq "A3 inter-core sync requires explicit .*pto.set_ffts" "${ptoas_log}"; then
             echo -e "${A}(${base}.py)\tFAIL\texpected missing-set_ffts diagnostic not found"
+            overall=1
+            continue
+          fi
+        fi
+        if [[ ("$base" == "mgather" || "$base" == "mscatter") && \
+              "$(printf '%s' "$target_arch" | tr '[:upper:]' '[:lower:]')" == "a3" ]]; then
+          if ! grep -Eq "pto\\.m(gather|scatter) is only supported on A5 targets" "${ptoas_log}"; then
+            echo -e "${A}(${base}.py)\tFAIL\texpected A5-only diagnostic not found"
             overall=1
             continue
           fi

@@ -2152,6 +2152,107 @@ static bool isSupportedVecElemType(Type ty, bool allowBf16,
   return false;
 }
 
+static bool isSupportedMGatherMScatterIndexElemType(Type ty) {
+  auto it = dyn_cast<IntegerType>(ty);
+  if (!it || it.getWidth() != 32)
+    return false;
+  return it.isSignless();
+}
+
+static bool isSupportedMGatherMScatterPayloadElemType(Operation *op, Type ty) {
+  if (isSupportedVecElemType(ty, /*allowBf16=*/true, /*allowInt8=*/true))
+    return true;
+  if (!isTargetArchA5(op))
+    return false;
+  return ty.isFloat8E4M3() || ty.isFloat8E4M3FN() || ty.isFloat8E4M3FNUZ() ||
+         ty.isFloat8E4M3B11FNUZ() || ty.isFloat8E5M2() || ty.isFloat8E5M2FNUZ();
+}
+
+static bool isSupportedMScatterAtomicPayloadElemType(Type ty,
+                                                     pto::ScatterAtomicOp atomic) {
+  auto intTy = dyn_cast<IntegerType>(ty);
+  switch (atomic) {
+  case pto::ScatterAtomicOp::None:
+    return true;
+  case pto::ScatterAtomicOp::Add:
+    return ty.isF16() || ty.isF32() ||
+           (intTy && intTy.getWidth() == 32 && intTy.isSignless());
+  case pto::ScatterAtomicOp::Max:
+  case pto::ScatterAtomicOp::Min:
+    return ty.isF32() ||
+           (intTy && intTy.getWidth() == 32 && intTy.isSignless());
+  }
+  llvm_unreachable("unknown ScatterAtomicOp");
+}
+
+static LogicalResult verifyMGatherMScatterMemOperand(Operation *op,
+                                                     Value memValue,
+                                                     Type dataElemTy,
+                                                     StringRef dataOperandLabel) {
+  Type memTy = memValue.getType();
+  Type memElem = getElemTy(memTy);
+  if (!memElem || memElem != dataElemTy)
+    return op->emitOpError() << "expects mem element type to match "
+                             << dataOperandLabel << " element type";
+
+  if (isa<pto::PartitionTensorViewType>(memTy)) {
+    if (auto layout = getLogicalViewLayout(memValue)) {
+      if (*layout != pto::Layout::ND)
+        return op->emitOpError(
+            "expects mem partition view to use ND logical layout when layout "
+            "can be inferred");
+    }
+    return success();
+  }
+
+  if (auto mr = dyn_cast<MemRefType>(memTy)) {
+    auto as = getPTOMemorySpaceEnum(mr);
+    if (!as || (*as != pto::AddressSpace::GM &&
+                 *as != pto::AddressSpace::Zero))
+      return op->emitOpError(
+          "expects mem memref to use GM or zero address space");
+    if (mr.getRank() == 5) {
+      auto shape = mr.getShape();
+      bool allStatic = true;
+      for (int64_t d : shape)
+        if (d == ShapedType::kDynamic)
+          allStatic = false;
+      if (allStatic && (shape[0] != 1 || shape[1] != 1 || shape[2] != 1))
+        return op->emitOpError(
+            "expects rank-5 GM memref leading dimensions to be [1,1,1,...] "
+            "(GlobalTensor table shape)");
+    }
+    return success();
+  }
+
+  return op->emitOpError(
+      "expects mem to be !pto.partition_tensor_view or a GM/ZERO memref");
+}
+
+static LogicalResult verifyMGatherMScatterTileShape(Operation *op, Type dataTy,
+                                                    Type idxTy,
+                                                    StringRef dataName) {
+  auto dataShape = getShapeVec(dataTy);
+  auto idxShape = getShapeVec(idxTy);
+  if (dataShape.size() != 2 || idxShape.size() != 2)
+    return op->emitOpError() << "expects " << dataName
+                             << " and idx to be rank-2";
+
+  if (dataShape[0] != ShapedType::kDynamic &&
+      idxShape[0] != ShapedType::kDynamic && dataShape[0] != idxShape[0])
+    return op->emitOpError() << "expects " << dataName
+                             << " and idx static row dimensions to match";
+
+  int64_t dataCols = dataShape[1];
+  int64_t idxCols = idxShape[1];
+  if (idxCols != ShapedType::kDynamic && dataCols != ShapedType::kDynamic &&
+      idxCols != 1 && idxCols != dataCols)
+    return op->emitOpError() << "expects idx cols to be 1 or equal to "
+                             << dataName << " cols";
+
+  return success();
+}
+
 static LogicalResult verifyTileBufCommon(Operation *op, Type ty, StringRef name) {
   auto tb = dyn_cast<pto::TileBufType>(ty);
   if (tb) {
@@ -5528,13 +5629,54 @@ LogicalResult TGetScaleAddrOp::verify() {
 LogicalResult MScatterOp::verify() {
   if (shouldBypassDecodedMemrefVerifier(getOperation()))
     return success();
-  int64_t srcrank = getPTOTypeRank(getSrc().getType());
-  int64_t memrank = getPTOTypeRank(getMem().getType());
-  int64_t idxrank = getPTOTypeRank(getIdx().getType());
-  
-  if (memrank == -1 || idxrank == -1 || srcrank == -1) {
-    return emitOpError("src, idx, mem does not support PTO type");
+
+  if (!isTargetArchA5(getOperation()))
+    return emitOpError("pto.mscatter is only supported on A5 targets");
+
+  Type srcTy = getSrc().getType();
+  Type idxTy = getIdx().getType();
+  Type memTy = getMem().getType();
+
+  if (getPTOTypeRank(srcTy) == -1 || getPTOTypeRank(idxTy) == -1 ||
+      getPTOTypeRank(memTy) == -1)
+    return emitOpError("expects src, idx, and mem to use supported PTO shapes");
+
+  if (failed(verifyNDStyleVecTile(*this, srcTy, "src")) ||
+      failed(verifyNDStyleVecTile(*this, idxTy, "idx")))
+    return failure();
+
+  Type srcElem = getElemTy(srcTy);
+  Type idxElem = getElemTy(idxTy);
+  if (!srcElem || !idxElem)
+    return emitOpError("failed to resolve element types for src or idx");
+
+  if (!isSupportedMGatherMScatterPayloadElemType(getOperation(), srcElem))
+    return emitOpError(
+        "expects src element type to be i8/ui8/i16/ui16/i32/ui32/f16/bf16/f32 "
+        "(and on A5 targets also float8_e4m3/float8_e5m2 family types)");
+
+  if (!isSupportedMGatherMScatterIndexElemType(idxElem))
+    return emitOpError("expects idx element type to be signless i32");
+
+  if (failed(verifyMGatherMScatterMemOperand(getOperation(), getMem(), srcElem,
+                                             "src")))
+    return failure();
+
+  if (getScatterAtomicOp() != pto::ScatterAtomicOp::None ||
+      getScatterOob() != pto::ScatterOOB::Undefined) {
+    if (!isTargetArchA5(getOperation()))
+      return emitOpError(
+          "expects non-default scatterAtomicOp/scatterOob only on A5 targets");
   }
+
+  if (!isSupportedMScatterAtomicPayloadElemType(srcElem, getScatterAtomicOp()))
+    return emitOpError(
+        "expects scatterAtomicOp-compatible src element type: add supports "
+        "i32/ui32/f16/f32, max/min support signless i32/f32");
+
+  if (failed(verifyMGatherMScatterTileShape(getOperation(), srcTy, idxTy, "src")))
+    return failure();
+
   return success();
 }
 
@@ -5542,13 +5684,46 @@ LogicalResult MScatterOp::verify() {
 LogicalResult MGatherOp::verify() {
   if (shouldBypassDecodedMemrefVerifier(getOperation()))
     return success();
-  int64_t memrank = getPTOTypeRank(getMem().getType());
-  int64_t idxrank = getPTOTypeRank(getIdx().getType());
-  int64_t dstrank = getPTOTypeRank(getDst().getType());
 
-  if (memrank == -1 || idxrank == -1 || memrank == -1) {
-    return emitOpError("mem, idx and dst does not support PTO type");
-  }
+  if (!isTargetArchA5(getOperation()))
+    return emitOpError("pto.mgather is only supported on A5 targets");
+
+  Type memTy = getMem().getType();
+  Type idxTy = getIdx().getType();
+  Type dstTy = getDst().getType();
+
+  if (getPTOTypeRank(memTy) == -1 || getPTOTypeRank(idxTy) == -1 ||
+      getPTOTypeRank(dstTy) == -1)
+    return emitOpError("expects mem, idx, and dst to use supported PTO shapes");
+
+  if (failed(verifyNDStyleVecTile(*this, dstTy, "dst")) ||
+      failed(verifyNDStyleVecTile(*this, idxTy, "idx")))
+    return failure();
+
+  Type dstElem = getElemTy(dstTy);
+  Type idxElem = getElemTy(idxTy);
+  if (!dstElem || !idxElem)
+    return emitOpError("failed to resolve element types for dst or idx");
+
+  if (!isSupportedMGatherMScatterPayloadElemType(getOperation(), dstElem))
+    return emitOpError(
+        "expects dst element type to be i8/ui8/i16/ui16/i32/ui32/f16/bf16/f32 "
+        "(and on A5 targets also float8_e4m3/float8_e5m2 family types)");
+
+  if (!isSupportedMGatherMScatterIndexElemType(idxElem))
+    return emitOpError("expects idx element type to be signless i32");
+
+  if (failed(verifyMGatherMScatterMemOperand(getOperation(), getMem(), dstElem,
+                                             "dst")))
+    return failure();
+
+  if (getGatherOob() != pto::GatherOOB::Undefined &&
+      !isTargetArchA5(getOperation()))
+    return emitOpError(
+        "expects non-default gatherOob only on A5 targets");
+
+  if (failed(verifyMGatherMScatterTileShape(getOperation(), dstTy, idxTy, "dst")))
+    return failure();
 
   return success();
 }

@@ -99,6 +99,14 @@ static Value peelUnrealized(Value v) {
   return v;
 }
 
+static Value buildGlobalTensorFromMemref(ConversionPatternRewriter &rewriter,
+                                         Location loc, Value basePtr,
+                                         MemRefType mrTy, Operation *anchor);
+
+static Value maybeWrapGlobalMemrefAsGlobalTensor(
+    ConversionPatternRewriter &rewriter, Location loc, Value loweredValue,
+    Type originalType, Operation *anchor);
+
 static std::optional<mlir::pto::Layout> getLayoutAttrFromOp(Operation *op) {
   if (!op)
     return std::nullopt;
@@ -2344,8 +2352,7 @@ struct ArithTruncIToEmitC : public OpConversionPattern<arith::TruncIOp> {
 	  }
 	};
 //===----------------------------------------------------------------------===//
-// pto.mgather lowering -> MGATHER(dst, mem, idx)
-// %dst = pto.mgather %mem, %idx : memref<...>, memref<...> -> memref<...>
+// pto.mgather lowering -> MGATHER(dst, src, indexes)  (pto-isa)
 //===----------------------------------------------------------------------===//
 
 struct PTOMGatherToMGATHER : public OpConversionPattern<pto::MGatherOp> {
@@ -2353,17 +2360,39 @@ struct PTOMGatherToMGATHER : public OpConversionPattern<pto::MGatherOp> {
 
   LogicalResult matchAndRewrite(pto::MGatherOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
+    auto *ctx = rewriter.getContext();
     Value mem = peelUnrealized(adaptor.getMem());
+    Value idx = peelUnrealized(adaptor.getIdx());
     Value dst = peelUnrealized(adaptor.getDst());
 
-    // pto-isa currently has no NPU implementation for MGATHER/MSCATTER.
-    // Fallback to a smoke-friendly lowering to keep compile/run coverage.
-    rewriter.create<emitc::CallOpaqueOp>(
-        op.getLoc(), TypeRange{}, "TLOAD",
-        ArrayAttr{}, ArrayAttr{},
-        ValueRange{dst, mem});
+    Value memArg = maybeWrapGlobalMemrefAsGlobalTensor(
+        rewriter, op.getLoc(), mem, op.getMem().getType(), op.getOperation());
 
-     if (op->getNumResults() == 0) {
+    ArrayAttr templateArgs;
+    if (op.getGatherOob() != pto::GatherOOB::Undefined) {
+      auto gatherOobTok = [&](pto::GatherOOB mode) -> StringRef {
+        switch (mode) {
+        case pto::GatherOOB::Undefined:
+          return "pto::GatherOOB::Undefined";
+        case pto::GatherOOB::Clamp:
+          return "pto::GatherOOB::Clamp";
+        case pto::GatherOOB::Wrap:
+          return "pto::GatherOOB::Wrap";
+        case pto::GatherOOB::Zero:
+          return "pto::GatherOOB::Zero";
+        }
+        llvm_unreachable("unknown GatherOOB");
+      };
+      templateArgs = rewriter.getArrayAttr(
+          {emitc::OpaqueAttr::get(ctx, gatherOobTok(op.getGatherOob()))});
+    }
+
+    rewriter.create<emitc::CallOpaqueOp>(
+        op.getLoc(), TypeRange{}, "MGATHER",
+        ArrayAttr{}, templateArgs,
+        ValueRange{dst, memArg, idx});
+
+    if (op->getNumResults() == 0) {
       rewriter.eraseOp(op);
     } else {
       rewriter.replaceOp(op, dst);
@@ -3257,6 +3286,28 @@ static Value buildGlobalTensorFromMemref(ConversionPatternRewriter &rewriter,
       loc, gtType, gtTypeName, ArrayAttr{}, ArrayAttr{}, ValueRange(gtArgs));
 
   return gtInst.getResult(0);
+}
+
+static Value maybeWrapGlobalMemrefAsGlobalTensor(
+    ConversionPatternRewriter &rewriter, Location loc, Value loweredValue,
+    Type originalType, Operation *anchor) {
+  auto mrTy = dyn_cast<MemRefType>(originalType);
+  if (!mrTy)
+    return loweredValue;
+
+  bool isGlobal = true;
+  if (auto asAttr =
+          dyn_cast_or_null<pto::AddressSpaceAttr>(mrTy.getMemorySpace())) {
+    auto as = asAttr.getAddressSpace();
+    isGlobal = (as == pto::AddressSpace::GM || as == pto::AddressSpace::Zero);
+  }
+  if (!isGlobal)
+    return loweredValue;
+
+  if (Value gt =
+          buildGlobalTensorFromMemref(rewriter, loc, loweredValue, mrTy, anchor))
+    return gt;
+  return loweredValue;
 }
 
 static Value castToGMBytePointer(ConversionPatternRewriter &rewriter,
@@ -4774,15 +4825,57 @@ struct PTOMScatterToMSCATTER : public OpConversionPattern<pto::MScatterOp> {
 
   LogicalResult matchAndRewrite(pto::MScatterOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
+    auto *ctx = rewriter.getContext();
     Value src = peelUnrealized(adaptor.getSrc());
+    Value idx = peelUnrealized(adaptor.getIdx());
     Value mem = peelUnrealized(adaptor.getMem());
 
-    // pto-isa currently has no NPU implementation for MGATHER/MSCATTER.
-    // Fallback to a smoke-friendly lowering to keep compile/run coverage.
+    Value memArg = maybeWrapGlobalMemrefAsGlobalTensor(
+        rewriter, op.getLoc(), mem, op.getMem().getType(), op.getOperation());
+
+    auto scatterAtomicTok = [&](pto::ScatterAtomicOp atomic) -> StringRef {
+      switch (atomic) {
+      case pto::ScatterAtomicOp::None:
+        return "pto::ScatterAtomicOp::None";
+      case pto::ScatterAtomicOp::Add:
+        return "pto::ScatterAtomicOp::Add";
+      case pto::ScatterAtomicOp::Max:
+        return "pto::ScatterAtomicOp::Max";
+      case pto::ScatterAtomicOp::Min:
+        return "pto::ScatterAtomicOp::Min";
+      }
+      llvm_unreachable("unknown ScatterAtomicOp");
+    };
+    auto scatterOobTok = [&](pto::ScatterOOB mode) -> StringRef {
+      switch (mode) {
+      case pto::ScatterOOB::Undefined:
+        return "pto::ScatterOOB::Undefined";
+      case pto::ScatterOOB::Skip:
+        return "pto::ScatterOOB::Skip";
+      case pto::ScatterOOB::Clamp:
+        return "pto::ScatterOOB::Clamp";
+      case pto::ScatterOOB::Wrap:
+        return "pto::ScatterOOB::Wrap";
+      }
+      llvm_unreachable("unknown ScatterOOB");
+    };
+
+    SmallVector<Attribute, 2> templateArgVec;
+    if (op.getScatterAtomicOp() != pto::ScatterAtomicOp::None ||
+        op.getScatterOob() != pto::ScatterOOB::Undefined) {
+      templateArgVec.push_back(
+          emitc::OpaqueAttr::get(ctx, scatterAtomicTok(op.getScatterAtomicOp())));
+      if (op.getScatterOob() != pto::ScatterOOB::Undefined)
+        templateArgVec.push_back(
+            emitc::OpaqueAttr::get(ctx, scatterOobTok(op.getScatterOob())));
+    }
+    ArrayAttr templateArgs =
+        templateArgVec.empty() ? ArrayAttr{} : rewriter.getArrayAttr(templateArgVec);
+
     rewriter.create<emitc::CallOpaqueOp>(
-        op.getLoc(), TypeRange{}, "TSTORE",
-        ArrayAttr{}, ArrayAttr{},
-        ValueRange{mem, src});
+        op.getLoc(), TypeRange{}, "MSCATTER",
+        ArrayAttr{}, templateArgs,
+        ValueRange{memArg, src, idx});
 
     rewriter.eraseOp(op);
     return success();

@@ -6489,7 +6489,7 @@ pto.tscatter ins(%src, %idx : !pto.tile_buf<...>, !pto.tile_buf<...>)
 
 ##### `pto.mgather` - Gather-Load from Global Memory
 
-**Summary:** Loads elements from global memory into a tile using per-element indices.
+**Summary:** Loads elements from a global table into a VEC tile using per-element indices. Supports an optional A5-only out-of-bounds mode that lowers to the corresponding `MGATHER<...>` template overload.
 
 **Semantics:**
 
@@ -6499,18 +6499,34 @@ dst[i, j] = mem[idx[i, j]]
 
 **Arguments:**
 
-| Name | Type | Description |
-|------|------|-------------|
-| `mem` | `AnyMemRef/pto.tile_buf` | Source memory |
-| `idx` | `pto.tile_buf` | Index tile |
-| `dst` | `pto.tile_buf` | Destination tile |
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `mem` | `!pto.partition_tensor_view<...>` / GM memref | `NA` | Global source table |
+| `idx` | `pto.tile_buf` | `NA` | Index tile |
+| `dst` | `pto.tile_buf` | `NA` | Destination VEC tile |
+| `gatherOob` | `#pto<gather_oob ...>` | `undefined` | A5-only out-of-bounds mode (`undefined/clamp/wrap/zero`) |
 
 **Results:** None. Writes into `dst` via DPS pattern.
 
 **Constraints & Verification:**
 
-- Index interpretation is target-defined. The CPU simulator treats indices as linear element indices into `src.data()`.
-- No bounds checks are enforced on `indexes` by the CPU simulator.
+- **Types (data and indices)**  
+  - `mem` and `dst` must have the **same element type**. Supported element types: `i8`/`i16`/`i32`/`f16`/`bf16`/`f32`. On **A5** targets, `float8_e4m3` / `float8_e5m2` family element types are also supported.
+  - `idx` element type must be signless `i32`.
+
+- **Tile / memory roles**  
+  - `dst` and `idx` must be `loc=vec`, `blayout=row_major`, `slayout=none_box`.
+  - `mem` must denote a GlobalTensor in GM memory.
+  - `mem` must use `ND` layout when layout can be inferred.
+
+- **Shape**  
+  - `dst row == idx row`.
+  - `idx column == 1` or `idx column == dst column`.
+  - If `mem` is a rank-5 static GM memref, it must satisfy `<1, 1, 1, Rows, RowWidth>`.
+
+- **Out-of-bounds mode**
+  - Default `gatherOob = undefined` lowers to the default `MGATHER(dst, mem, idx)` overload.
+  - Non-default `gatherOob` values are only supported on **A5** and lower to `MGATHER<GatherOOB::...>(dst, mem, idx)`.
 
 **Hardware Mapping:**
 
@@ -6521,13 +6537,17 @@ dst[i, j] = mem[idx[i, j]]
 ```mlir
 pto.mgather ins(%mem, %idx : memref<...>, !pto.tile_buf<...>)
            outs(%dst : !pto.tile_buf<...>)
+
+pto.mgather ins(%mem, %idx : memref<...>, !pto.tile_buf<...>)
+           outs(%dst : !pto.tile_buf<...>)
+           {gatherOob = #pto<gather_oob zero>}
 ```
 
 ---
 
 ##### `pto.mscatter` - Scatter-Store to Global Memory
 
-**Summary:** Stores elements from a tile into global memory using per-element indices.
+**Summary:** Stores elements from a VEC tile into a global table using per-element indices. Supports optional A5-only atomic and out-of-bounds modes that lower to the corresponding `MSCATTER<...>` template overload family.
 
 **Semantics:**
 
@@ -6537,18 +6557,41 @@ mem[idx[i, j]] = src[i, j]
 
 **Arguments:**
 
-| Name | Type | Description |
-|------|------|-------------|
-| `src` | `pto.tile_buf` | Source tile |
-| `idx` | `pto.tile_buf` | Index tile |
-| `mem` | `AnyMemRef/pto.tile_buf` | Destination memory |
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `src` | `pto.tile_buf` | `NA` | Source VEC tile |
+| `idx` | `pto.tile_buf` | `NA` | Index tile |
+| `mem` | `!pto.partition_tensor_view<...>` / GM memref | `NA` | Global destination table |
+| `scatterAtomicOp` | `#pto<scatter_atomic_op ...>` | `none` | A5-only atomic mode (`none/add/max/min`) |
+| `scatterOob` | `#pto<scatter_oob ...>` | `undefined` | A5-only out-of-bounds mode (`undefined/skip/clamp/wrap`) |
 
 **Results:** None. Writes into `mem` via DPS pattern.
 
 **Constraints & Verification:**
 
-- Index interpretation is target-defined. The CPU simulator treats indices as linear element indices into `dst.data()`.
-- No bounds checks are enforced on `indexes` by the CPU simulator.
+- **Types (data and indices)**  
+  - `src` and `mem` must have the **same element type**. Supported element types: `i8`/`i16`/`i32`/`f16`/`bf16`/`f32`. On **A5** targets, `float8_e4m3` / `float8_e5m2` family element types are also supported.
+  - `idx` element type must be signless `i32`.
+
+- **Tile / memory roles**  
+  - `src` and `idx` must be `loc=vec`, `blayout=row_major`, `slayout=none_box`.
+  - `mem` must denote a GlobalTensor in GM memory.
+  - `mem` must use `ND` layout when layout can be inferred.
+
+- **Shape**  
+  - `src row == idx row`.
+  - `idx column == 1` or `idx column == src column`.
+  - If `mem` is a rank-5 static GM memref, it must satisfy `<1, 1, 1, Rows, RowWidth>`.
+
+- **Atomic modes**  
+  - Default `scatterAtomicOp = none` lowers to the default `MSCATTER(mem, src, idx)` overload.
+  - Non-default `scatterAtomicOp` values are only supported on **A5**.
+  - `add` requires `i32`/`f16`/`f32`.
+  - `max`/`min` require signless `i32` or `f32`.
+
+- **Out-of-bounds modes**
+  - Default `scatterOob = undefined` lowers to the 1-template-parameter `MSCATTER<Atomic>(mem, src, idx)` form when only atomic is specified, or to the default overload when both attrs are default.
+  - Non-default `scatterOob` values are only supported on **A5** and lower to `MSCATTER<ScatterAtomicOp::..., ScatterOOB::...>(mem, src, idx)`.
 
 **Hardware Mapping:**
 
@@ -6559,6 +6602,15 @@ mem[idx[i, j]] = src[i, j]
 ```mlir
 pto.mscatter ins(%src, %idx : !pto.tile_buf<...>, !pto.tile_buf<...>)
             outs(%mem : memref<...>)
+
+pto.mscatter ins(%src, %idx : !pto.tile_buf<...>, !pto.tile_buf<...>)
+            outs(%mem : memref<...>)
+            {scatterAtomicOp = #pto<scatter_atomic_op add>}
+
+pto.mscatter ins(%src, %idx : !pto.tile_buf<...>, !pto.tile_buf<...>)
+            outs(%mem : memref<...>)
+            {scatterAtomicOp = #pto<scatter_atomic_op add>,
+             scatterOob = #pto<scatter_oob skip>}
 ```
 
 ---
