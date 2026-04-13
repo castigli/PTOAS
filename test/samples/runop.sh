@@ -155,7 +155,8 @@ process_one_dir() {
   fi
   # Qwen3 tilelet kernels currently serve as direct ptoas compile-regression
   # coverage. Default them to A5/level3 lowering when the caller does not
-  # provide an explicit arch, but let A3/A5 callers override PTOAS_FLAGS.
+  # provide an explicit arch, and skip them entirely when the caller forces an
+  # A3 lowering path because the samples use A5-only matmul tile layouts.
   if [[ "$A" == "Qwen3Tilelet" ]]; then
     use_ptobc_roundtrip=0
   fi
@@ -219,6 +220,17 @@ process_one_dir() {
   fi
   if [[ ! -d "$dir" ]]; then
     echo -e "${A}\tSKIP\tMissing dir: $dir"
+    return 0
+  fi
+  if [[ "$A" == "Qwen3Tilelet" && "$(printf '%s' "$target_arch" | tr '[:upper:]' '[:lower:]')" != "a5" ]]; then
+    local qwen_case
+    for qwen_case in "$dir"/*.pto; do
+      [[ -f "$qwen_case" ]] || continue
+      case "$qwen_case" in
+        *-pto-ir.pto) continue ;;
+      esac
+      echo -e "${A}($(basename "$qwen_case"))\tSKIP\trequires --pto-arch=a5"
+    done
     return 0
   fi
 
