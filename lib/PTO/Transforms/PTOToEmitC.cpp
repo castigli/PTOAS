@@ -9123,11 +9123,24 @@ struct PTOBindTileToEmitC : public OpConversionPattern<pto::BindTileOp> {
     };
 
     if (op.getSource().getDefiningOp<pto::DeclareTileMemRefOp>()) {
+      auto hasFollowingSetValidShape = [&]() {
+        for (Operation *user : op->getUsers()) {
+          auto setValidShape = dyn_cast<pto::SetValidShapeOp>(user);
+          if (!setValidShape)
+            continue;
+          if (setValidShape.getSource() != op.getResult())
+            continue;
+          return true;
+        }
+        return false;
+      };
+
       FailureOr<TileBuildSpec> tileSpec = buildTileSpec();
       if (failed(tileSpec))
         return failure();
       TileBuildSpec declSpec = *tileSpec;
-      if (op->hasAttr(kForceDynamicValidShapeAttrName)) {
+      if (op->hasAttr(kForceDynamicValidShapeAttrName) &&
+          hasFollowingSetValidShape()) {
         declSpec.useConstructor = false;
         declSpec.constructorArgs.clear();
       }
