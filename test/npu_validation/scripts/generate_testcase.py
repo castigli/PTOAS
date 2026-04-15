@@ -906,9 +906,8 @@ def _infer_aicore_arch(kernel_text: str, soc_version: str) -> str:
     #
     # IMPORTANT: the default arch depends on the Ascend SoC.
     has_mix_macros = "__DAV_CUBE__" in kernel_text and "__DAV_VEC__" in kernel_text
-    has_flag_sync = "set_flag(" in kernel_text or "wait_flag(" in kernel_text
     has_intra_block_sync = "set_intra_block(" in kernel_text or "wait_intra_block(" in kernel_text
-    has_mixed_section_sync = has_mix_macros and (has_flag_sync or has_intra_block_sync)
+    has_mixed_section_sync = has_mix_macros and has_intra_block_sync
     cube_markers = (
         "TileType::Mat",
         "TileType::Left",
@@ -1405,9 +1404,10 @@ def generate_testcase(
     has_packed_pred_mask = re.search(r"\bTCMPS?\s*\(", raw_kernel_for_analysis) is not None
     has_dav_cube = "__DAV_CUBE__" in raw_kernel
     has_dav_vec = "__DAV_VEC__" in raw_kernel
-    has_flag_sync = "set_flag(" in raw_kernel or "wait_flag(" in raw_kernel
     has_intra_block_sync = "set_intra_block(" in raw_kernel or "wait_intra_block(" in raw_kernel
-    has_mixed_section_sync = has_dav_cube and has_dav_vec and (has_flag_sync or has_intra_block_sync)
+    has_mixed_section_sync = has_dav_cube and has_dav_vec and has_intra_block_sync
+    has_cube_only_section = has_dav_cube and not has_dav_vec
+    has_vec_only_section = has_dav_vec and not has_dav_cube
 
     is_mixed_kernel = kernel_info["kind"] == "mixed"
 
@@ -1430,9 +1430,26 @@ def generate_testcase(
                 aicore_arch = "dav-c310"
             else:
                 aicore_arch = "dav-c220"
+        elif has_cube_only_section:
+            # A cube-only section must keep the cube arch. Building it as vec
+            # while forcing `__DAV_CUBE__` makes AIC pipe synchronization fail
+            # legality checks on A5.
+            sv = (soc_version or "").lower()
+            if "950" in sv or "a5" in sv or "910b" in sv:
+                aicore_arch = "dav-c310-cube"
+            else:
+                aicore_arch = "dav-c220-cube"
+        elif has_vec_only_section:
+            sv = (soc_version or "").lower()
+            if "950" in sv or "a5" in sv:
+                aicore_arch = "dav-c310-vec"
+            elif "910b" in sv:
+                aicore_arch = "dav-c310-vec"
+            else:
+                aicore_arch = "dav-c220-vec"
         elif has_dav_cube or has_dav_vec:
-            # Single-section kernels can still be built with vec arch while
-            # forcing the needed DAV macro.
+            # Generic multi-section kernels without mixed-kernel sync keep the
+            # historical vec-arch + forced-macro path.
             sv = (soc_version or "").lower()
             if "950" in sv or "a5" in sv:
                 aicore_arch = "dav-c310-vec"
