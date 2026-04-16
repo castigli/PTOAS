@@ -214,82 +214,96 @@ static LogicalResult lowerFrontendDataOps(func::FuncOp funcOp,
       frontendOps.push_back(op);
   });
 
-  auto requireDominatingFrontendInit = [&](Operation *op) -> LogicalResult {
-    if (!handles.anchorOp)
-      return op->emitOpError(
-          "requires a frontend initialize_pipe op in the same function");
-    if (!dom.dominates(handles.anchorOp, op)) {
-      return op->emitOpError(
-          "requires a dominating frontend initialize_pipe op");
+  for (Operation *op : frontendOps) {
+    if (!handles.anchorOp) {
+      op->emitOpError("requires a frontend initialize_pipe op in the same function");
+      return failure();
     }
-    return success();
-  };
+    if (!dom.dominates(handles.anchorOp, op)) {
+      op->emitOpError(
+          "requires a dominating frontend initialize_pipe op");
+      return failure();
+    }
 
-  auto getRequiredPipe = [&](Operation *op) -> FailureOr<Value> {
-    if (isa<TPushToAivOp, TPopFromAicOp, TFreeFromAicOp>(op)) {
+    rewriter.setInsertionPoint(op);
+
+    if (auto push = dyn_cast<TPushToAivOp>(op)) {
       if (!handles.c2vPipe) {
         op->emitOpError(
             "requires the dominating initialize_pipe op to enable C2V");
         return failure();
       }
-      return handles.c2vPipe;
+      rewriter.replaceOpWithNewOp<TPushOp>(push, push.getTile(), handles.c2vPipe,
+                                           push.getSplitAttr());
+      continue;
     }
 
+    if (auto push = dyn_cast<TPushToAicOp>(op)) {
+      if (!handles.v2cPipe) {
+        op->emitOpError(
+            "requires the dominating initialize_pipe op to enable V2C");
+        return failure();
+      }
+      rewriter.replaceOpWithNewOp<TPushOp>(push, push.getTile(), handles.v2cPipe,
+                                           push.getSplitAttr());
+      continue;
+    }
+
+    if (auto pop = dyn_cast<TPopFromAicOp>(op)) {
+      if (!handles.c2vPipe) {
+        op->emitOpError(
+            "requires the dominating initialize_pipe op to enable C2V");
+        return failure();
+      }
+      auto decl = rewriter.create<DeclareTileOp>(pop.getLoc(),
+                                                 pop.getTile().getType());
+      if (pop.getValidRow() && pop.getValidCol()) {
+        rewriter.create<SetValidShapeOp>(pop.getLoc(), decl.getTile(),
+                                         pop.getValidRow(), pop.getValidCol());
+      }
+      rewriter.create<TPopOp>(pop.getLoc(), decl.getTile(), handles.c2vPipe,
+                              pop.getSplitAttr());
+      rewriter.replaceOp(pop, decl.getTile());
+      continue;
+    }
+
+    if (auto pop = dyn_cast<TPopFromAivOp>(op)) {
+      if (!handles.v2cPipe) {
+        op->emitOpError(
+            "requires the dominating initialize_pipe op to enable V2C");
+        return failure();
+      }
+      auto decl = rewriter.create<DeclareTileOp>(pop.getLoc(),
+                                                 pop.getTile().getType());
+      if (pop.getValidRow() && pop.getValidCol()) {
+        rewriter.create<SetValidShapeOp>(pop.getLoc(), decl.getTile(),
+                                         pop.getValidRow(), pop.getValidCol());
+      }
+      rewriter.create<TPopOp>(pop.getLoc(), decl.getTile(), handles.v2cPipe,
+                              pop.getSplitAttr());
+      rewriter.replaceOp(pop, decl.getTile());
+      continue;
+    }
+
+    if (auto free = dyn_cast<TFreeFromAicOp>(op)) {
+      if (!handles.c2vPipe) {
+        op->emitOpError(
+            "requires the dominating initialize_pipe op to enable C2V");
+        return failure();
+      }
+      rewriter.replaceOpWithNewOp<TFreeOp>(free, handles.c2vPipe,
+                                           free.getSplitAttr());
+      continue;
+    }
+
+    auto free = cast<TFreeFromAivOp>(op);
     if (!handles.v2cPipe) {
       op->emitOpError(
           "requires the dominating initialize_pipe op to enable V2C");
       return failure();
     }
-    return handles.v2cPipe;
-  };
-
-  auto lowerFrontendDataOp = [&](Operation *op) -> LogicalResult {
-    if (failed(requireDominatingFrontendInit(op)))
-      return failure();
-    auto pipeOr = getRequiredPipe(op);
-    if (failed(pipeOr))
-      return failure();
-
-    Value pipe = *pipeOr;
-    rewriter.setInsertionPoint(op);
-    if (auto push = dyn_cast<TPushToAivOp>(op)) {
-      rewriter.replaceOpWithNewOp<TPushOp>(push, push.getTile(), pipe,
-                                           push.getSplitAttr());
-      return success();
-    }
-    if (auto push = dyn_cast<TPushToAicOp>(op)) {
-      rewriter.replaceOpWithNewOp<TPushOp>(push, push.getTile(), pipe,
-                                           push.getSplitAttr());
-      return success();
-    }
-    if (auto pop = dyn_cast<TPopFromAicOp>(op)) {
-      auto decl = rewriter.create<DeclareTileOp>(pop.getLoc(),
-                                                 pop.getTile().getType());
-      rewriter.create<TPopOp>(pop.getLoc(), decl.getTile(), pipe,
-                              pop.getSplitAttr());
-      rewriter.replaceOp(pop, decl.getTile());
-      return success();
-    }
-    if (auto pop = dyn_cast<TPopFromAivOp>(op)) {
-      auto decl = rewriter.create<DeclareTileOp>(pop.getLoc(),
-                                                 pop.getTile().getType());
-      rewriter.create<TPopOp>(pop.getLoc(), decl.getTile(), pipe,
-                              pop.getSplitAttr());
-      rewriter.replaceOp(pop, decl.getTile());
-      return success();
-    }
-    if (auto free = dyn_cast<TFreeFromAicOp>(op)) {
-      rewriter.replaceOpWithNewOp<TFreeOp>(free, pipe, free.getSplitAttr());
-      return success();
-    }
-    auto free = cast<TFreeFromAivOp>(op);
-    rewriter.replaceOpWithNewOp<TFreeOp>(free, pipe, free.getSplitAttr());
-    return success();
-  };
-
-  for (Operation *op : frontendOps) {
-    if (failed(lowerFrontendDataOp(op)))
-      return failure();
+    rewriter.replaceOpWithNewOp<TFreeOp>(free, handles.v2cPipe,
+                                         free.getSplitAttr());
   }
 
   return success();
