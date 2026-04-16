@@ -3789,8 +3789,9 @@ Reduce along rows or columns of a tile. All execute on the **Vector pipeline** (
 
 | Op | Semantics |
 |----|----------|
-| `pto.trowsum` | `dst[i,0] = sum_j src[i,j]` |
-| `pto.trowmax` | `dst[i,0] = max_j src[i,j]` |
+| `pto.trowsum` | `dst[i,0] = sum_j src[i,j]` (requires tmp) |
+| `pto.trowprod` | `dst[i,0] = prod_j src[i,j]` (requires tmp) |
+| `pto.trowmax` | `dst[i,0] = max_j src[i,j]` (requires tmp) |
 | `pto.trowargmax` | `dst[i,0] = argmax_j src[i,j]` (requires tmp) |
 | `pto.trowmin` | `dst[i,0] = min_j src[i,j]` (requires tmp) |
 | `pto.trowargmin` | `dst[i,0] = argmin_j src[i,j]` (requires tmp) |
@@ -3839,7 +3840,7 @@ pto.trowsum ins(<src> : <src_type>) outs(<dst> : <dst_type>)
   - Tile layout of `dst`:
     - **Recommended**: a DN-style 1D column vector tile (`cols=1`, `blayout=col_major`)
     - **Legacy**: an ND-style 2D tile with `valid column == 1`
-  - Data types: `f16` or `f32`.
+  - Data types: `i16`, `i32`, `f16`, or `f32`.
   - Element type consistency: `src_type == dst_type`.
   - Valid checks:
     - `src valid column != 0` and `src valid row != 0`.
@@ -3850,7 +3851,7 @@ pto.trowsum ins(<src> : <src_type>) outs(<dst> : <dst_type>)
   - Tile layout of `dst`:
     - **Recommended**: a DN-style 1D column vector tile (`cols=1`, `blayout=col_major`)
     - **Legacy**: an ND-style 2D tile with `valid column == 1`
-  - Data types: `f16` or `f32`.
+  - Data types: `i16`, `i32`, `f16`, or `f32`.
   - Element type consistency: `src_type == dst_type`.
   - Valid checks:
     - `src valid column != 0` and `src valid row != 0`.
@@ -3909,7 +3910,7 @@ pto.trowmax ins(<src> : <src_type>) outs(<dst> : <dst_type>)
   - Tile layout of `dst`:
     - **Recommended**: a DN-style 1D column vector tile (`cols=1`, `blayout=col_major`)
     - **Legacy**: an ND-style 2D tile with `valid column == 1`
-  - Data types: `f16` or `f32`.
+  - Data types: `i16`, `i32`, `f16`, or `f32`.
   - Element type consistency: `src_type == dst_type`.
   - Runtime valid checks:
     - `src valid column != 0` and `src valid row != 0`.
@@ -3920,7 +3921,7 @@ pto.trowmax ins(<src> : <src_type>) outs(<dst> : <dst_type>)
   - Tile layout of `dst`:
     - **Recommended**: a DN-style 1D column vector tile (`cols=1`, `blayout=col_major`)
     - **Legacy**: an ND-style 2D tile with `valid column == 1`
-  - Data types: `f16` or `f32`.
+  - Data types: `i16`, `i32`, `f16`, or `f32`.
   - Element type consistency: `src_type == dst_type`.
   - Runtime valid checks:
     - `src valid column != 0` and `src valid row != 0`.
@@ -3981,7 +3982,7 @@ pto.trowargmax ins(<src>, <tmp> : <src_type>, <tmp_type>)
   - `dst` must use `slayout=none_box` and either:
     - a DN-style column vector tile (`blayout=col_major`, `cols=1`), or
     - a legacy ND-style tile with `valid column == 1`.
-  - `src` element type must be `f16` or `f32`.
+  - `src` element type must be `i16`, `i32`, `f16`, or `f32`.
   - `dst` element type must be `i32` or `ui32`.
   - Runtime valid checks:
     - `src valid row != 0` and `src valid column != 0`
@@ -4049,7 +4050,7 @@ pto.trowmin ins(<src>, <tmp> : <src_type>, <tmp_type>)
   - Tile layout of `dst`:
     - **Recommended**: a DN-style 1D column vector tile (`cols=1`, `blayout=col_major`)
     - **Legacy**: an ND-style 2D tile with `valid column == 1`
-  - Data types: `f16` or `f32`.
+  - Data types: `i16`, `i32`, `f16`, or `f32`.
   - Element type consistency: `src_type == dst_type`.
   - Runtime valid checks:
     - `src valid column != 0` and `src valid row != 0`.
@@ -4060,7 +4061,7 @@ pto.trowmin ins(<src>, <tmp> : <src_type>, <tmp_type>)
   - Tile layout of `dst`:
     - **Recommended**: a DN-style 1D column vector tile (`cols=1`, `blayout=col_major`)
     - **Legacy**: an ND-style 2D tile with `valid column == 1`
-  - Data types: `f16` or `f32`.
+  - Data types: `i16`, `i32`, `f16`, or `f32`.
   - Element type consistency: `src_type == dst_type`.
   - Runtime valid checks:
     - `src valid column != 0` and `src valid row != 0`.
@@ -4124,7 +4125,7 @@ pto.trowargmin ins(<src>, <tmp> : <src_type>, <tmp_type>)
   - `dst` must use `slayout=none_box` and either:
     - a DN-style column vector tile (`blayout=col_major`, `cols=1`), or
     - a legacy ND-style tile with `valid column == 1`.
-  - `src` element type must be `f16` or `f32`.
+  - `src` element type must be `i16`, `i32`, `f16`, or `f32`.
   - `dst` element type must be `i32` or `ui32`.
   - Runtime valid checks:
     - `src valid row != 0` and `src valid column != 0`
@@ -4150,6 +4151,72 @@ pto.trowargmin ins(%src, %tmp : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=
                outs(%dst : !pto.tile_buf<loc=vec, dtype=i32, rows=16, cols=1,
                    v_row=16, v_col=1, blayout=col_major, slayout=none_box,
                    fractal=512, pad=0>)
+```
+
+---
+
+##### `pto.trowprod` - Row-wise Product Reduction
+
+**Summary:** Reduces each row by multiplying across columns. Requires a temporary buffer.
+
+**Semantics:**
+
+```
+For each row i:
+    dst[i, 0] = product over j of src[i, j]
+```
+
+**Arguments:**
+
+| Name | Type | Description |
+|------|------|-------------|
+| `src` | `pto.tile_buf` | Source tile buffer |
+| `tmp` | `pto.tile_buf` | Temporary buffer with the same shape/type as `src` |
+| `dst` | `pto.tile_buf` | Destination tile buffer (column vector) |
+
+**Results:** None. Writes into `dst` via DPS pattern.
+
+**Assembly Format:**
+
+```
+pto.trowprod ins(<src>, <tmp> : <src_type>, <tmp_type>)
+             outs(<dst> : <dst_type>)
+```
+
+**Constraints & Verification:**
+
+- **Implementation checks (A2A3)**
+  - `src`, `tmp`, and `dst` must use `loc=vec`.
+  - `src` must use ND-style tile layout (`blayout=row_major`, `slayout=none_box`).
+  - `tmp` must have the same shape, valid shape, and element type as `src`.
+  - `dst` must use `slayout=none_box` and either:
+    - a DN-style column vector tile (`blayout=col_major`, `cols=1`), or
+    - a legacy ND-style tile with `valid column == 1`.
+  - `src`/`tmp`/`dst` element type must be `i16`, `i32`, `f16`, or `f32`.
+  - Runtime valid checks:
+    - `src valid row != 0` and `src valid column != 0`
+    - `src valid row == dst valid row`
+    - `dst valid column == 1`
+- **Implementation checks (A5)**
+  - Same constraints as A2/A3.
+
+**Hardware Mapping:**
+
+- Executes on the **Vector pipeline** (`PIPE_V`)
+- Operates on data in the **VEC (UB)** memory space
+
+**Basic Example:**
+
+```mlir
+pto.trowprod ins(%src, %tmp : !pto.tile_buf<loc=vec, dtype=i16, rows=16, cols=16,
+                 v_row=16, v_col=16, blayout=row_major, slayout=none_box,
+                 fractal=512, pad=0>,
+                 !pto.tile_buf<loc=vec, dtype=i16, rows=16, cols=16,
+                 v_row=16, v_col=16, blayout=row_major, slayout=none_box,
+                 fractal=512, pad=0>)
+             outs(%dst : !pto.tile_buf<loc=vec, dtype=i16, rows=16, cols=1,
+                 v_row=16, v_col=1, blayout=col_major, slayout=none_box,
+                 fractal=512, pad=0>)
 ```
 
 ---
@@ -4539,15 +4606,28 @@ Broadcast values across rows or columns. All execute on the **Vector pipeline** 
 | `pto.trowexpand` | Broadcast `src[i,0]` across row `i` |
 | `pto.tcolexpand` | Broadcast `src[0,j]` across column `j` |
 | `pto.tcolexpandmul` | `dst[i,j] = src0[i,j] * src1[0,j]` |
+| `pto.tcolexpandadd` | `dst[i,j] = src0[i,j] + src1[0,j]` |
 | `pto.tcolexpanddiv` | `dst[i,j] = src0[i,j] / src1[0,j]` |
 | `pto.tcolexpandsub` | `dst[i,j] = src0[i,j] - src1[0,j]` |
+| `pto.tcolexpandexpdif` | `dst[i,j] = exp(src0[i,j] - src1[0,j])` |
 | `pto.tcolexpandmax` | `dst[i,j] = max(src0[i,j], src1[0,j])` |
 | `pto.tcolexpandmin` | `dst[i,j] = min(src0[i,j], src1[0,j])` |
 | `pto.trowexpandmul` | `dst[i,j] = src0[i,j] * src1[i,0]` |
 | `pto.trowexpanddiv` | `dst[i,j] = src0[i,j] / src1[i,0]` |
 | `pto.trowexpandsub` | `dst[i,j] = src0[i,j] - src1[i,0]` |
 | `pto.trowexpandadd` | `dst[i,j] = src0[i,j] + src1[i,0]` |
+| `pto.trowexpandexpdif` | `dst[i,j] = exp(src0[i,j] - src1[i,0])` |
+| `pto.trowexpandmax` | `dst[i,j] = max(src0[i,j], src1[i,0])` |
+| `pto.trowexpandmin` | `dst[i,j] = min(src0[i,j], src1[i,0])` |
 | `pto.texpands` | Broadcast scalar to all elements of dst |
+
+For `pto.trowexpandadd/trowexpandsub/trowexpandmul/trowexpandmax/trowexpandmin`
+and `pto.tcolexpandadd/tcolexpandsub/tcolexpandmul/tcolexpandmax/tcolexpandmin`,
+element-type constraints are:
+- A2/A3: `i16`, `i32`, `f16`, `f32`
+- A5: `i8`, `i16`, `i32`, `f16`, `f32`
+
+`pto.trowexpandexpdif` and `pto.tcolexpandexpdif` remain floating-point only (`f16`/`f32`).
 
 ---
 
@@ -4689,7 +4769,10 @@ pto.tcolexpandmul ins(<src0>, <src1> : <src0_type>, <src1_type>)
 **Constraints & Verification:**
 
 - **Implementation checks**:
-  - `src0`, `src1`, `dst` must share the same element type and the type must be `f16` or `f32`.
+  - `src0`, `src1`, `dst` must share the same element type.
+  - Element type:
+    - A2/A3: `i16`, `i32`, `f16`, `f32`
+    - A5: `i8`, `i16`, `i32`, `f16`, `f32`
   - `src0` and `dst` must have the same shape and the same `valid_shape`.
   - `src0`, `src1`, `dst` must use row-major layout (`blayout=row_major`).
   - `src1 valid_shape[1]` must equal `dst valid_shape[1]`.
@@ -4745,7 +4828,8 @@ pto.tcolexpanddiv ins(<src0>, <src1> : <src0_type>, <src1_type>)
 **Constraints & Verification:**
 
 - **Implementation checks**:
-  - `src0`, `src1`, `dst` must share the same element type and the type must be `f16` or `f32`.
+  - `src0`, `src1`, `dst` must share the same element type.
+  - The shared element type must be `f16` or `f32`.
   - `src0` and `dst` must have the same shape and the same `valid_shape`.
   - `src0`, `src1`, `dst` must use row-major layout (`blayout=row_major`).
   - `src1 valid_shape[1]` must equal `dst valid_shape[1]` (one scalar per destination column).
@@ -4802,7 +4886,10 @@ pto.tcolexpandsub ins(<src0>, <src1> : <src0_type>, <src1_type>)
 **Constraints & Verification:**
 
 - **Implementation checks**:
-  - `src0`, `src1`, `dst` must share the same element type and the type must be `f16` or `f32`.
+  - `src0`, `src1`, `dst` must share the same element type.
+  - Element type:
+    - A2/A3: `i16`, `i32`, `f16`, `f32`
+    - A5: `i8`, `i16`, `i32`, `f16`, `f32`
   - `src0` and `dst` must have the same shape and the same `valid_shape`.
   - `src0`, `src1`, `dst` must use row-major layout (`blayout=row_major`).
   - `src1 valid_shape[1]` must equal `dst valid_shape[1]` (one scalar per destination column).
@@ -4859,7 +4946,10 @@ pto.tcolexpandmax ins(<src0>, <src1> : <src0_type>, <src1_type>)
 **Constraints & Verification:**
 
 - **Implementation checks**:
-  - `src0`, `src1`, `dst` must share the same element type and the type must be `f16` or `f32`.
+  - `src0`, `src1`, `dst` must share the same element type.
+  - Element type:
+    - A2/A3: `i16`, `i32`, `f16`, `f32`
+    - A5: `i8`, `i16`, `i32`, `f16`, `f32`
   - `src0` and `dst` must have the same shape and the same `valid_shape`.
   - `src0`, `src1`, `dst` must use row-major layout (`blayout=row_major`).
   - `src1 valid_shape[1]` must equal `dst valid_shape[1]`.
@@ -4916,7 +5006,10 @@ pto.tcolexpandmin ins(<src0>, <src1> : <src0_type>, <src1_type>)
 **Constraints & Verification:**
 
 - **Implementation checks**:
-  - `src0`, `src1`, `dst` must share the same element type and the type must be `f16` or `f32`.
+  - `src0`, `src1`, `dst` must share the same element type.
+  - Element type:
+    - A2/A3: `i16`, `i32`, `f16`, `f32`
+    - A5: `i8`, `i16`, `i32`, `f16`, `f32`
   - `src0` and `dst` must have the same shape and the same `valid_shape`.
   - `src0`, `src1`, `dst` must use row-major layout (`blayout=row_major`).
   - `src1 valid_shape[1]` must equal `dst valid_shape[1]`.
@@ -4975,7 +5068,7 @@ pto.trowexpandmul ins(<src0>, <src1>[, <tmp>] : <src0_type>, <src1_type>[, <tmp_
 
 - **Implementation checks**:
   - `dst`, `src0`, and `src1` must have the same element type.
-  - The shared element type must be one of: `f16`, `f32`.
+  - The shared element type must be `f16` or `f32`.
   - `dst` must use row-major layout (`blayout=row_major`).
  
 **Hardware Mapping:**
@@ -5035,7 +5128,7 @@ pto.trowexpanddiv ins(<src0>, <src1>[, <tmp>] : <src0_type>, <src1_type>[, <tmp_
 
 - **Implementation checks**:
   - `dst`, `src0`, and `src1` must have the same element type.
-  - The shared element type must be one of: `f16`, `f32`.
+  - The shared element type must be `f16` or `f32`.
   - `dst` must use row-major layout (`blayout=row_major`).
 
 **Hardware Mapping:**
@@ -5095,7 +5188,9 @@ pto.trowexpandsub ins(<src0>, <src1>[, <tmp>] : <src0_type>, <src1_type>[, <tmp_
 
 - **Implementation checks**:
   - `dst`, `src0`, and `src1` must have the same element type.
-  - The shared element type must be one of: `f16`, `f32`.
+  - Element type:
+    - A2/A3: `i16`, `i32`, `f16`, `f32`
+    - A5: `i8`, `i16`, `i32`, `f16`, `f32`
   - `dst` must use row-major layout (`blayout=row_major`).
 
 **Hardware Mapping:**
@@ -5154,7 +5249,9 @@ pto.trowexpandadd ins(<src0>, <src1> : <src0_type>, <src1_type>)
 
 - **Implementation checks**:
   - `dst`, `src0`, and `src1` must have the same element type.
-  - The shared element type must be one of: `f16`, `f32`.
+  - Element type:
+    - A2/A3: `i16`, `i32`, `f16`, `f32`
+    - A5: `i8`, `i16`, `i32`, `f16`, `f32`
   - `src0` and `dst` must have the same shape and the same `valid_shape`.
   - `src0` and `dst` must use row-major layout (`blayout=row_major`).
   - `src1 valid_shape[0]` must equal `dst valid_shape[0]`.

@@ -3296,7 +3296,9 @@ LogicalResult pto::TColExpandOp::verify() {
   return success();
 }
 static LogicalResult verifyTColExpandBinaryLikeOp(Operation *op, Type t0, Type t1,
-                                                  Type td) {
+                                                  Type td, PTOArch targetArch,
+                                                  StringRef opName,
+                                                  bool allowIntegerTypes) {
   if (!isPTOShapedLike(t0) || !isPTOShapedLike(t1) || !isPTOShapedLike(td))
     return op->emitOpError("expects src0/src1/dst to be PTO shaped-like types");
 
@@ -3306,12 +3308,25 @@ static LogicalResult verifyTColExpandBinaryLikeOp(Operation *op, Type t0, Type t
   if (!e0 || !e1 || !ed)
     return op->emitOpError("failed to get element type for src0/src1/dst");
 
-  auto isSupportedFloat = [](Type elemTy) {
-    auto ft = elemTy.dyn_cast<FloatType>();
-    return ft && (ft.isF16() || ft.isF32());
+  auto isSupportedElem = [&](Type elemTy) {
+    if (elemTy.isF16() || elemTy.isF32())
+      return true;
+    if (!allowIntegerTypes)
+      return false;
+    if (elemTy.isInteger(16) || elemTy.isInteger(32))
+      return true;
+    return targetArch == PTOArch::A5 && elemTy.isInteger(8);
   };
-  if (!isSupportedFloat(e0) || !isSupportedFloat(e1) || !isSupportedFloat(ed))
-    return op->emitOpError("expects src0/src1/dst element type to be f16 or f32");
+  if (!isSupportedElem(e0) || !isSupportedElem(e1) || !isSupportedElem(ed)) {
+    if (!allowIntegerTypes)
+      return op->emitOpError() << "expects " << opName
+                               << " element type to be f16 or f32";
+    if (targetArch == PTOArch::A5)
+      return op->emitOpError() << "expects A5 " << opName
+                               << " element type to be i8/i16/i32/f16/f32";
+    return op->emitOpError() << "expects A2/A3 " << opName
+                             << " element type to be i16/i32/f16/f32";
+  }
 
   if (getShapeVec(t0) != getShapeVec(td))
     return op->emitOpError("expects src0/dst to have same shape");
@@ -3342,32 +3357,57 @@ static LogicalResult verifyTColExpandBinaryLikeOp(Operation *op, Type t0, Type t
   return success();
 }
 LogicalResult pto::TColExpandMulOp::verify() {
+  PTOArch arch = getTargetArch(getOperation());
   return verifyTColExpandBinaryLikeOp(getOperation(), getSrc0().getType(),
-                                      getSrc1().getType(), getDst().getType());
+                                      getSrc1().getType(), getDst().getType(),
+                                      arch, "tcolexpandmul",
+                                      /*allowIntegerTypes=*/true);
 }
 LogicalResult pto::TColExpandAddOp::verify() {
+  PTOArch arch = getTargetArch(getOperation());
   return verifyTColExpandBinaryLikeOp(getOperation(), getSrc0().getType(),
-                                      getSrc1().getType(), getDst().getType());
+                                      getSrc1().getType(), getDst().getType(),
+                                      arch, "tcolexpandadd",
+                                      /*allowIntegerTypes=*/true);
 }
 LogicalResult pto::TColExpandDivOp::verify() {
-  return verifyTColExpandBinaryLikeOp(getOperation(), getSrc0().getType(),
-                                      getSrc1().getType(), getDst().getType());
+  auto verifyByArch = [&](PTOArch targetArch) -> LogicalResult {
+    return verifyTColExpandBinaryLikeOp(getOperation(), getSrc0().getType(),
+                                        getSrc1().getType(), getDst().getType(),
+                                        targetArch, "tcolexpanddiv",
+                                        /*allowIntegerTypes=*/false);
+  };
+  auto verifyA2A3 = [&]() -> LogicalResult { return verifyByArch(PTOArch::A3); };
+  auto verifyA5 = [&]() -> LogicalResult { return verifyByArch(PTOArch::A5); };
+  return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
 }
 LogicalResult pto::TColExpandSubOp::verify() {
+  PTOArch arch = getTargetArch(getOperation());
   return verifyTColExpandBinaryLikeOp(getOperation(), getSrc0().getType(),
-                                      getSrc1().getType(), getDst().getType());
+                                      getSrc1().getType(), getDst().getType(),
+                                      arch, "tcolexpandsub",
+                                      /*allowIntegerTypes=*/true);
 }
 LogicalResult pto::TColExpandExpdifOp::verify() {
+  PTOArch arch = getTargetArch(getOperation());
   return verifyTColExpandBinaryLikeOp(getOperation(), getSrc0().getType(),
-                                      getSrc1().getType(), getDst().getType());
+                                      getSrc1().getType(), getDst().getType(),
+                                      arch, "tcolexpandexpdif",
+                                      /*allowIntegerTypes=*/false);
 }
 LogicalResult pto::TColExpandMaxOp::verify() {
+  PTOArch arch = getTargetArch(getOperation());
   return verifyTColExpandBinaryLikeOp(getOperation(), getSrc0().getType(),
-                                      getSrc1().getType(), getDst().getType());
+                                      getSrc1().getType(), getDst().getType(),
+                                      arch, "tcolexpandmax",
+                                      /*allowIntegerTypes=*/true);
 }
 LogicalResult pto::TColExpandMinOp::verify() {
+  PTOArch arch = getTargetArch(getOperation());
   return verifyTColExpandBinaryLikeOp(getOperation(), getSrc0().getType(),
-                                      getSrc1().getType(), getDst().getType());
+                                      getSrc1().getType(), getDst().getType(),
+                                      arch, "tcolexpandmin",
+                                      /*allowIntegerTypes=*/true);
 }
 LogicalResult pto::TColMaxOp::verify() {
   auto verifyA2A3 = [&]() -> LogicalResult {
@@ -7485,7 +7525,7 @@ mlir::LogicalResult mlir::pto::TRowExpandDivOp::verify() {
 
 
 mlir::LogicalResult mlir::pto::TRowExpandMulOp::verify() {
-  auto verifyCommon = [&]() -> LogicalResult {
+  auto verifyByArch = [&](PTOArch targetArch) -> LogicalResult {
     Type src0Ty = getSrc0().getType();
     Type src1Ty = getSrc1().getType();
     Type dstTy = getDst().getType();
@@ -7502,21 +7542,27 @@ mlir::LogicalResult mlir::pto::TRowExpandMulOp::verify() {
       return emitOpError("expects src0 and src1 to have the same element type");
     if (!isRowMajorTileBuf(dstTy))
       return emitOpError("expects dst to use row-major layout");
-    auto ft = getElemTy(src0Ty).dyn_cast<mlir::FloatType>();
-    if (!ft || (!ft.isF16() && !ft.isF32()))
-      return emitOpError("expects element type to be f16 or f32");
+    Type elem = getElemTy(src0Ty);
+    bool supported = elem.isF16() || elem.isF32() || elem.isInteger(16) ||
+                     elem.isInteger(32) ||
+                     (targetArch == PTOArch::A5 && elem.isInteger(8));
+    if (!supported) {
+      if (targetArch == PTOArch::A5)
+        return emitOpError(
+            "expects A5 trowexpandmul element type to be i8/i16/i32/f16/f32");
+      return emitOpError(
+          "expects A2/A3 trowexpandmul element type to be i16/i32/f16/f32");
+    }
     return mlir::success();
   };
-  auto verifyA2A3 = [&]() -> LogicalResult {
-    return verifyCommon();
-  };
-  auto verifyA5 = [&]() -> LogicalResult { return verifyCommon(); };
+  auto verifyA2A3 = [&]() -> LogicalResult { return verifyByArch(PTOArch::A3); };
+  auto verifyA5 = [&]() -> LogicalResult { return verifyByArch(PTOArch::A5); };
   return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
 }
 
 
 mlir::LogicalResult mlir::pto::TRowExpandSubOp::verify() {
-  auto verifyCommon = [&]() -> LogicalResult {
+  auto verifyByArch = [&](PTOArch targetArch) -> LogicalResult {
     Type src0Ty = getSrc0().getType();
     Type src1Ty = getSrc1().getType();
     Type dstTy = getDst().getType();
@@ -7533,20 +7579,26 @@ mlir::LogicalResult mlir::pto::TRowExpandSubOp::verify() {
       return emitOpError("expects src0 and src1 to have the same element type");
     if (!isRowMajorTileBuf(dstTy))
       return emitOpError("expects dst to use row-major layout");
-    auto ft = getElemTy(src0Ty).dyn_cast<mlir::FloatType>();
-    if (!ft || (!ft.isF16() && !ft.isF32()))
-      return emitOpError("expects element type to be f16 or f32");
+    Type elem = getElemTy(src0Ty);
+    bool supported = elem.isF16() || elem.isF32() || elem.isInteger(16) ||
+                     elem.isInteger(32) ||
+                     (targetArch == PTOArch::A5 && elem.isInteger(8));
+    if (!supported) {
+      if (targetArch == PTOArch::A5)
+        return emitOpError(
+            "expects A5 trowexpandsub element type to be i8/i16/i32/f16/f32");
+      return emitOpError(
+          "expects A2/A3 trowexpandsub element type to be i16/i32/f16/f32");
+    }
     return mlir::success();
   };
-  auto verifyA2A3 = [&]() -> LogicalResult {
-    return verifyCommon();
-  };
-  auto verifyA5 = [&]() -> LogicalResult { return verifyCommon(); };
+  auto verifyA2A3 = [&]() -> LogicalResult { return verifyByArch(PTOArch::A3); };
+  auto verifyA5 = [&]() -> LogicalResult { return verifyByArch(PTOArch::A5); };
   return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
 }
 
 mlir::LogicalResult mlir::pto::TRowExpandAddOp::verify() {
-  auto verifyCommon = [&]() -> LogicalResult {
+  auto verifyByArch = [&](PTOArch targetArch) -> LogicalResult {
     Type src0Ty = getSrc0().getType();
     Type src1Ty = getSrc1().getType();
     Type dstTy = getDst().getType();
@@ -7564,9 +7616,17 @@ mlir::LogicalResult mlir::pto::TRowExpandAddOp::verify() {
       return emitOpError("expects src0 to use row-major layout");
     if (!isRowMajorTileBuf(dstTy))
       return emitOpError("expects dst to use row-major layout");
-    auto ft = getElemTy(src0Ty).dyn_cast<mlir::FloatType>();
-    if (!ft || (!ft.isF16() && !ft.isF32()))
-      return emitOpError("expects element type to be f16 or f32");
+    Type elem = getElemTy(src0Ty);
+    bool supported = elem.isF16() || elem.isF32() || elem.isInteger(16) ||
+                     elem.isInteger(32) ||
+                     (targetArch == PTOArch::A5 && elem.isInteger(8));
+    if (!supported) {
+      if (targetArch == PTOArch::A5)
+        return emitOpError(
+            "expects A5 trowexpandadd element type to be i8/i16/i32/f16/f32");
+      return emitOpError(
+          "expects A2/A3 trowexpandadd element type to be i16/i32/f16/f32");
+    }
     auto src1Valid = getValidShapeVec(src1Ty);
     auto dstValid = getValidShapeVec(dstTy);
     if (src1Valid.size() != 2 || dstValid.size() != 2)
@@ -7575,7 +7635,9 @@ mlir::LogicalResult mlir::pto::TRowExpandAddOp::verify() {
         src1Valid[0] != dstValid[0])
       return emitOpError("expects src1 valid_shape[0] to equal dst valid_shape[0]");
     bool src1IsRowMajor = isRowMajorTileBuf(src1Ty);
-    int64_t expectedCol = ft.isF16() ? 16 : 8;
+    int64_t expectedCol = elem.isInteger(8)
+                              ? 32
+                              : ((elem.isF16() || elem.isInteger(16)) ? 16 : 8);
     int64_t src1Col = src1Valid[1];
     if (src1IsRowMajor) {
       if (src1Col != ShapedType::kDynamic && src1Col != expectedCol)
@@ -7586,8 +7648,8 @@ mlir::LogicalResult mlir::pto::TRowExpandAddOp::verify() {
     }
     return mlir::success();
   };
-  auto verifyA2A3 = [&]() -> LogicalResult { return verifyCommon(); };
-  auto verifyA5 = [&]() -> LogicalResult { return verifyCommon(); };
+  auto verifyA2A3 = [&]() -> LogicalResult { return verifyByArch(PTOArch::A3); };
+  auto verifyA5 = [&]() -> LogicalResult { return verifyByArch(PTOArch::A5); };
   return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
 }
 
@@ -7595,7 +7657,8 @@ static LogicalResult verifyTRowExpandReduceLikeOp(Operation *op, Type src0Ty,
                                                   Type src1Ty, Type dstTy,
                                                   Type tmpTy, bool hasTmp,
                                                   PTOArch targetArch,
-                                                  StringRef opName) {
+                                                  StringRef opName,
+                                                  bool allowIntegerTypes) {
   if (failed(verifyTileBufCommon(op, src0Ty, "src0")) ||
       failed(verifyTileBufCommon(op, src1Ty, "src1")) ||
       failed(verifyTileBufCommon(op, dstTy, "dst")))
@@ -7610,9 +7673,20 @@ static LogicalResult verifyTRowExpandReduceLikeOp(Operation *op, Type src0Ty,
   Type elem = getElemTy(dstTy);
   if (!elem || getElemTy(src0Ty) != elem || getElemTy(src1Ty) != elem)
     return op->emitOpError("expects src0, src1, and dst to have the same element type");
-  auto ft = elem.dyn_cast<FloatType>();
-  if (!ft || (!ft.isF16() && !ft.isF32()))
-    return op->emitOpError() << "expects " << opName << " element type to be f16 or f32";
+  bool supported = elem.isF16() || elem.isF32() ||
+                   (allowIntegerTypes &&
+                    (elem.isInteger(16) || elem.isInteger(32) ||
+                     (targetArch == PTOArch::A5 && elem.isInteger(8))));
+  if (!supported) {
+    if (!allowIntegerTypes)
+      return op->emitOpError() << "expects " << opName
+                               << " element type to be f16 or f32";
+    if (targetArch == PTOArch::A5)
+      return op->emitOpError() << "expects A5 " << opName
+                               << " element type to be i8/i16/i32/f16/f32";
+    return op->emitOpError() << "expects A2/A3 " << opName
+                             << " element type to be i16/i32/f16/f32";
+  }
 
   if (!isRowMajorTileBuf(dstTy))
     return op->emitOpError("expects dst to use row-major layout");
@@ -7650,7 +7724,7 @@ static LogicalResult verifyTRowExpandReduceLikeOp(Operation *op, Type src0Ty,
       return op->emitOpError() << "expects " << operandName
                                << " valid_shape[0] to equal dst valid_shape[0]";
     }
-    int64_t expectedCol = ft.isF16() ? 16 : 8;
+    int64_t expectedCol = elem.isInteger(8) ? 32 : ((elem.isF16() || elem.isInteger(16)) ? 16 : 8);
     int64_t operandCol = operandValid[1];
     bool operandIsRowMajor = isRowMajorTileBuf(operandTy);
     if (requireNonRowMajor && operandIsRowMajor) {
@@ -7716,14 +7790,16 @@ mlir::LogicalResult mlir::pto::TRowExpandExpdifOp::verify() {
                                         getSrc1().getType(), getDst().getType(),
                                         getTmp() ? getTmp().getType() : Type{},
                                         (bool)getTmp(), PTOArch::A3,
-                                        "trowexpandexpdif");
+                                        "trowexpandexpdif",
+                                        /*allowIntegerTypes=*/false);
   };
   auto verifyA5 = [&]() -> LogicalResult {
     return verifyTRowExpandReduceLikeOp(getOperation(), getSrc0().getType(),
                                         getSrc1().getType(), getDst().getType(),
                                         getTmp() ? getTmp().getType() : Type{},
                                         (bool)getTmp(), PTOArch::A5,
-                                        "trowexpandexpdif");
+                                        "trowexpandexpdif",
+                                        /*allowIntegerTypes=*/false);
   };
   return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
 }
@@ -7734,14 +7810,16 @@ mlir::LogicalResult mlir::pto::TRowExpandMaxOp::verify() {
                                         getSrc1().getType(), getDst().getType(),
                                         getTmp() ? getTmp().getType() : Type{},
                                         (bool)getTmp(), PTOArch::A3,
-                                        "trowexpandmax");
+                                        "trowexpandmax",
+                                        /*allowIntegerTypes=*/true);
   };
   auto verifyA5 = [&]() -> LogicalResult {
     return verifyTRowExpandReduceLikeOp(getOperation(), getSrc0().getType(),
                                         getSrc1().getType(), getDst().getType(),
                                         getTmp() ? getTmp().getType() : Type{},
                                         (bool)getTmp(), PTOArch::A5,
-                                        "trowexpandmax");
+                                        "trowexpandmax",
+                                        /*allowIntegerTypes=*/true);
   };
   return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
 }
@@ -7752,14 +7830,16 @@ mlir::LogicalResult mlir::pto::TRowExpandMinOp::verify() {
                                         getSrc1().getType(), getDst().getType(),
                                         getTmp() ? getTmp().getType() : Type{},
                                         (bool)getTmp(), PTOArch::A3,
-                                        "trowexpandmin");
+                                        "trowexpandmin",
+                                        /*allowIntegerTypes=*/true);
   };
   auto verifyA5 = [&]() -> LogicalResult {
     return verifyTRowExpandReduceLikeOp(getOperation(), getSrc0().getType(),
                                         getSrc1().getType(), getDst().getType(),
                                         getTmp() ? getTmp().getType() : Type{},
                                         (bool)getTmp(), PTOArch::A5,
-                                        "trowexpandmin");
+                                        "trowexpandmin",
+                                        /*allowIntegerTypes=*/true);
   };
   return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
 }
@@ -7776,9 +7856,10 @@ mlir::LogicalResult mlir::pto::TRowMaxOp::verify() {
       return emitOpError("expects src and dst to have the same element type");
     if (failed(verifyRowReductionValidRegion(*this, ts, td)))
       return failure();
-    auto ft = getElemTy(ts).dyn_cast<mlir::FloatType>();
-    if (!ft || (!ft.isF16() && !ft.isF32()))
-      return emitOpError("expects element type to be f16 or f32");
+    Type elem = getElemTy(ts);
+    if (!(elem.isInteger(16) || elem.isInteger(32) || elem.isF16() ||
+          elem.isF32()))
+      return emitOpError("expects element type to be i16/i32/f16/f32");
     return mlir::success();
   };
   auto verifyA5 = [&]() -> LogicalResult {
@@ -7791,9 +7872,10 @@ mlir::LogicalResult mlir::pto::TRowMaxOp::verify() {
       return emitOpError("expects src and dst to have the same element type");
     if (failed(verifyRowReductionValidRegion(*this, ts, td)))
       return failure();
-    auto ft = getElemTy(ts).dyn_cast<mlir::FloatType>();
-    if (!ft || (!ft.isF16() && !ft.isF32()))
-      return emitOpError("expects element type to be f16 or f32");
+    Type elem = getElemTy(ts);
+    if (!(elem.isInteger(16) || elem.isInteger(32) || elem.isF16() ||
+          elem.isF32()))
+      return emitOpError("expects element type to be i16/i32/f16/f32");
     return mlir::success();
   };
   return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
@@ -7814,9 +7896,10 @@ mlir::LogicalResult mlir::pto::TRowArgMaxOp::verify() {
     if (failed(verifyRowReductionValidRegion(*this, srcTy, dstTy)))
       return failure();
 
-    auto srcElem = getElemTy(srcTy).dyn_cast<mlir::FloatType>();
-    if (!srcElem || (!srcElem.isF16() && !srcElem.isF32()))
-      return emitOpError("expects src element type to be f16 or f32");
+    Type srcElem = getElemTy(srcTy);
+    if (!(srcElem.isInteger(16) || srcElem.isInteger(32) || srcElem.isF16() ||
+          srcElem.isF32()))
+      return emitOpError("expects src element type to be i16/i32/f16/f32");
 
     auto dstInt = dyn_cast<IntegerType>(getElemTy(dstTy));
     if (!dstInt || dstInt.getWidth() != 32 ||
@@ -7845,9 +7928,10 @@ mlir::LogicalResult mlir::pto::TRowMinOp::verify() {
       return emitOpError("expects src and dst to have the same element type");
     if (failed(verifyRowReductionValidRegion(*this, ts, td)))
       return failure();
-    auto ft = getElemTy(ts).dyn_cast<mlir::FloatType>();
-    if (!ft || (!ft.isF16() && !ft.isF32()))
-      return emitOpError("expects element type to be f16 or f32");
+    Type elem = getElemTy(ts);
+    if (!(elem.isInteger(16) || elem.isInteger(32) || elem.isF16() ||
+          elem.isF32()))
+      return emitOpError("expects element type to be i16/i32/f16/f32");
     return mlir::success();
   };
   auto verifyA5 = [&]() -> LogicalResult {
@@ -7865,9 +7949,10 @@ mlir::LogicalResult mlir::pto::TRowMinOp::verify() {
       return emitOpError("expects src and dst to have the same element type");
     if (failed(verifyRowReductionValidRegion(*this, ts, td)))
       return failure();
-    auto ft = getElemTy(ts).dyn_cast<mlir::FloatType>();
-    if (!ft || (!ft.isF16() && !ft.isF32()))
-      return emitOpError("expects element type to be f16 or f32");
+    Type elem = getElemTy(ts);
+    if (!(elem.isInteger(16) || elem.isInteger(32) || elem.isF16() ||
+          elem.isF32()))
+      return emitOpError("expects element type to be i16/i32/f16/f32");
     return mlir::success();
   };
   return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
@@ -7888,9 +7973,10 @@ mlir::LogicalResult mlir::pto::TRowArgMinOp::verify() {
     if (failed(verifyRowReductionValidRegion(*this, srcTy, dstTy)))
       return failure();
 
-    auto srcElem = getElemTy(srcTy).dyn_cast<mlir::FloatType>();
-    if (!srcElem || (!srcElem.isF16() && !srcElem.isF32()))
-      return emitOpError("expects src element type to be f16 or f32");
+    Type srcElem = getElemTy(srcTy);
+    if (!(srcElem.isInteger(16) || srcElem.isInteger(32) || srcElem.isF16() ||
+          srcElem.isF32()))
+      return emitOpError("expects src element type to be i16/i32/f16/f32");
 
     auto dstInt = dyn_cast<IntegerType>(getElemTy(dstTy));
     if (!dstInt || dstInt.getWidth() != 32 ||
@@ -7914,9 +8000,10 @@ mlir::LogicalResult mlir::pto::TRowSumOp::verify() {
       return emitOpError("expects src and dst to have the same element type");
     if (failed(verifyRowReductionValidRegion(*this, ts, td)))
       return failure();
-    auto ft = getElemTy(ts).dyn_cast<mlir::FloatType>();
-    if (!ft || (!ft.isF16() && !ft.isF32()))
-      return emitOpError("expects element type to be f16 or f32");
+    Type elem = getElemTy(ts);
+    if (!(elem.isInteger(16) || elem.isInteger(32) || elem.isF16() ||
+          elem.isF32()))
+      return emitOpError("expects element type to be i16/i32/f16/f32");
     return mlir::success();
   };
   auto verifyA5 = [&]() -> LogicalResult {
@@ -7929,9 +8016,10 @@ mlir::LogicalResult mlir::pto::TRowSumOp::verify() {
       return emitOpError("expects src and dst to have the same element type");
     if (failed(verifyRowReductionValidRegion(*this, ts, td)))
       return failure();
-    auto ft = getElemTy(ts).dyn_cast<mlir::FloatType>();
-    if (!ft || (!ft.isF16() && !ft.isF32()))
-      return emitOpError("expects element type to be f16 or f32");
+    Type elem = getElemTy(ts);
+    if (!(elem.isInteger(16) || elem.isInteger(32) || elem.isF16() ||
+          elem.isF32()))
+      return emitOpError("expects element type to be i16/i32/f16/f32");
     return mlir::success();
   };
   return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
