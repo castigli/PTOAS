@@ -70,6 +70,7 @@
 #include "PTO/IR/PTOOps.h.inc"
 
 namespace mlir {
+class MLIRContext;
 class TypeConverter;
 
 namespace pto {
@@ -101,15 +102,17 @@ enum class PTOParserTargetArch {
   A5,
 };
 
-void setPTOParserTargetArch(PTOParserTargetArch arch);
-PTOParserTargetArch getPTOParserTargetArch();
+void setPTOParserTargetArch(MLIRContext *context, PTOParserTargetArch arch);
+PTOParserTargetArch getPTOParserTargetArch(MLIRContext *context);
 
 class ScopedPTOParserTargetArch {
 public:
-  explicit ScopedPTOParserTargetArch(PTOParserTargetArch arch);
+  explicit ScopedPTOParserTargetArch(MLIRContext *context,
+                                     PTOParserTargetArch arch);
   ~ScopedPTOParserTargetArch();
 
 private:
+  MLIRContext *context;
   PTOParserTargetArch previousArch;
 };
 

@@ -152,6 +152,50 @@ def _find_matching_brace(text: str, open_brace_index: int) -> Optional[int]:
     return None
 
 
+def _find_matching_paren(text: str, open_paren_index: int) -> Optional[int]:
+    depth = 0
+    for idx in range(open_paren_index, len(text)):
+        ch = text[idx]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return idx
+    return None
+
+
+def _split_top_level(text: str, sep: str) -> list[str]:
+    parts = []
+    start = 0
+    paren_depth = 0
+    brace_depth = 0
+    bracket_depth = 0
+    for idx, ch in enumerate(text):
+        if ch == "(":
+            paren_depth += 1
+        elif ch == ")":
+            paren_depth = max(paren_depth - 1, 0)
+        elif ch == "{":
+            brace_depth += 1
+        elif ch == "}":
+            brace_depth = max(brace_depth - 1, 0)
+        elif ch == "[":
+            bracket_depth += 1
+        elif ch == "]":
+            bracket_depth = max(bracket_depth - 1, 0)
+        elif (
+            ch == sep
+            and paren_depth == 0
+            and brace_depth == 0
+            and bracket_depth == 0
+        ):
+            parts.append(text[start:idx].strip())
+            start = idx + 1
+    parts.append(text[start:].strip())
+    return parts
+
+
 def _extract_function_body(function_text: str) -> str:
     brace_index = function_text.find("{")
     if brace_index < 0:
@@ -907,6 +951,7 @@ def _infer_aicore_arch(kernel_text: str, soc_version: str) -> str:
     # IMPORTANT: the default arch depends on the Ascend SoC.
     has_mix_macros = "__DAV_CUBE__" in kernel_text and "__DAV_VEC__" in kernel_text
     has_intra_block_sync = "set_intra_block(" in kernel_text or "wait_intra_block(" in kernel_text
+    has_mixed_section_sync = has_mix_macros and has_intra_block_sync
     cube_markers = (
         "TileType::Mat",
         "TileType::Left",
@@ -926,15 +971,16 @@ def _infer_aicore_arch(kernel_text: str, soc_version: str) -> str:
 
     sv = (soc_version or "").lower()
     if "950" in sv or "a5" in sv:
-        # Only inter-core mixed kernels (with intra-block sync intrinsics)
-        # require true mix arch. Generic sectioned kernels should keep vec arch.
-        if has_mix_macros and has_intra_block_sync:
+        # Sectioned kernels that synchronize across DAV cube/vector regions
+        # need PTO-ISA's mixed-kernel compile mode so the toolchain chooses
+        # the correct pipe restrictions and DAV macro ownership.
+        if has_mixed_section_sync:
             return "dav-c310"
         # Ascend950 (A5) uses A5 instruction set. pto-isa examples build A5
         # kernels with dav-c310-{vec|cube}.
         return "dav-c310-cube" if needs_cube else "dav-c310-vec"
     if "910b" in sv:
-        if has_mix_macros and has_intra_block_sync:
+        if has_mixed_section_sync:
             return "dav-c310"
         # Ascend910B* (e.g. Ascend910B1) uses dav-c310 toolchain arch.
         return "dav-c310-cube" if needs_cube else "dav-c310-vec"
@@ -1127,15 +1173,30 @@ def _infer_int_var_maxima(kernel_text: str, seed_env: Optional[dict] = None) -> 
         assigns.append((name, expr))
 
     loops = []
-    for m in re.finditer(
-        r"for\s*\(\s*(?:unsigned|int|long|size_t|int(?:8|16|32|64)_t|uint(?:8|16|32|64)_t)\s+(\w+)\s*=\s*([^;]+?)\s*;\s*\1\s*<\s*([^;]+?)\s*;\s*\1\s*\+=\s*([^)]+?)\s*\)",
-        kernel_text,
-    ):
-        ind = m.group(1)
-        start = m.group(2).strip()
-        end = m.group(3).strip()
-        step = m.group(4).strip()
-        loops.append((ind, start, end, step))
+    for m in re.finditer(r"\bfor\s*\(", kernel_text):
+        open_paren = kernel_text.find("(", m.start())
+        if open_paren < 0:
+            continue
+        close_paren = _find_matching_paren(kernel_text, open_paren)
+        if close_paren is None:
+            continue
+        header = kernel_text[open_paren + 1:close_paren]
+        parts = _split_top_level(header, ";")
+        if len(parts) != 3:
+            continue
+        init, cond, step = parts
+        init_m = re.match(
+            r"^\s*(?:unsigned|int|long|size_t|int(?:8|16|32|64)_t|uint(?:8|16|32|64)_t)\s+(\w+)\s*=\s*(.+?)\s*$",
+            init,
+        )
+        if not init_m:
+            continue
+        ind = init_m.group(1)
+        cond_m = re.match(rf"^\s*{re.escape(ind)}\s*<\s*(.+?)\s*$", cond)
+        step_m = re.match(rf"^\s*{re.escape(ind)}\s*\+=\s*(.+?)\s*$", step)
+        if not cond_m or not step_m:
+            continue
+        loops.append((ind, init_m.group(2).strip(), cond_m.group(1).strip(), step_m.group(1).strip()))
 
     maxima: dict[str, Optional[int]] = {
         k: (None if v is None else int(v))
@@ -1403,6 +1464,9 @@ def generate_testcase(
     has_dav_cube = "__DAV_CUBE__" in raw_kernel
     has_dav_vec = "__DAV_VEC__" in raw_kernel
     has_intra_block_sync = "set_intra_block(" in raw_kernel or "wait_intra_block(" in raw_kernel
+    has_mixed_section_sync = has_dav_cube and has_dav_vec and has_intra_block_sync
+    has_cube_only_section = has_dav_cube and not has_dav_vec
+    has_vec_only_section = has_dav_vec and not has_dav_cube
 
     is_mixed_kernel = kernel_info["kind"] == "mixed"
 
@@ -1414,10 +1478,10 @@ def generate_testcase(
             else:
                 aicore_arch = "dav-c220"
         # Sectioned kernels contain `#if defined(__DAV_CUBE__)` / `__DAV_VEC__`
-        # blocks. For inter-core-style mixed kernels (with intra-block sync),
-        # align to PTO-ISA mix-kernel compile mode (`dav-c310`) so the
-        # toolchain owns DAV macro definition.
-        elif has_dav_cube and has_dav_vec and has_intra_block_sync:
+        # blocks. If they also carry explicit pipe synchronization, align to
+        # PTO-ISA mix-kernel compile mode (`dav-c310`) so the toolchain owns
+        # DAV macro definition and pipe legality checks.
+        elif has_mixed_section_sync:
             sv = (soc_version or "").lower()
             if "950" in sv or "a5" in sv:
                 aicore_arch = "dav-c310"
@@ -1425,9 +1489,26 @@ def generate_testcase(
                 aicore_arch = "dav-c310"
             else:
                 aicore_arch = "dav-c220"
+        elif has_cube_only_section:
+            # A cube-only section must keep the cube arch. Building it as vec
+            # while forcing `__DAV_CUBE__` makes AIC pipe synchronization fail
+            # legality checks on A5.
+            sv = (soc_version or "").lower()
+            if "950" in sv or "a5" in sv or "910b" in sv:
+                aicore_arch = "dav-c310-cube"
+            else:
+                aicore_arch = "dav-c220-cube"
+        elif has_vec_only_section:
+            sv = (soc_version or "").lower()
+            if "950" in sv or "a5" in sv:
+                aicore_arch = "dav-c310-vec"
+            elif "910b" in sv:
+                aicore_arch = "dav-c310-vec"
+            else:
+                aicore_arch = "dav-c220-vec"
         elif has_dav_cube or has_dav_vec:
-            # Single-section kernels can still be built with vec arch while
-            # forcing the needed DAV macro.
+            # Generic multi-section kernels without mixed-kernel sync keep the
+            # historical vec-arch + forced-macro path.
             sv = (soc_version or "").lower()
             if "950" in sv or "a5" in sv:
                 aicore_arch = "dav-c310-vec"

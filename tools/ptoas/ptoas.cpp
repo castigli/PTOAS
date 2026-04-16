@@ -983,8 +983,8 @@ int main(int argc, char **argv) {
     llvm::SourceMgr sourceMgr;
     sourceMgr.AddNewSourceBuffer(std::move(*fileOrErr), llvm::SMLoc());
     pto::ScopedPTOParserTargetArch scopedParserArch(
-        arch == "a5" ? pto::PTOParserTargetArch::A5
-                     : pto::PTOParserTargetArch::A3);
+        &context, arch == "a5" ? pto::PTOParserTargetArch::A5
+                               : pto::PTOParserTargetArch::A3);
     module = parseSourceFile<ModuleOp>(sourceMgr, &context);
     if (!module) {
       llvm::errs() << "Error: Failed to parse MLIR.\n";

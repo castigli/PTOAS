@@ -7083,7 +7083,7 @@ result = src[offset]
 
 **Hardware Mapping:**
 
-- Executes on the **Vector pipeline** (`PIPE_V`) when operating on tile_buf
+- Executes on the **Scalar pipeline** (`PIPE_S`) when operating on tile_buf
 
 **Basic Example:**
 
@@ -7120,7 +7120,7 @@ If `dst` is a shaped type, `val` must have exactly the same type as `dst`'s elem
 
 **Hardware Mapping:**
 
-- Executes on the **Vector pipeline** (`PIPE_V`) when operating on tile_buf
+- Executes on the **Scalar pipeline** (`PIPE_S`) when operating on tile_buf
 
 **Basic Example:**
 

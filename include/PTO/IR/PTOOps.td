@@ -2215,7 +2215,7 @@ def TSetValOp : PTO_TOp<"tsetval", [
 
   let extraClassDeclaration = [{
     static StringRef getIntrinsicName() { return "SETVAL"; }
-    ::mlir::pto::PIPE getPipe() { return ::mlir::pto::PIPE::PIPE_V; }
+    ::mlir::pto::PIPE getPipe() { return ::mlir::pto::PIPE::PIPE_S; }
     ::mlir::MutableOperandRange getDpsInitsMutable() { return getDstMutable(); }
   }];
 }
@@ -2245,7 +2245,7 @@ def TGetValOp : PTO_TOp<"tgetval", [
 
   let extraClassDeclaration = [{
     static StringRef getIntrinsicName() { return "GETVAL"; }
-    ::mlir::pto::PIPE getPipe() { return ::mlir::pto::PIPE::PIPE_V; }
+    ::mlir::pto::PIPE getPipe() { return ::mlir::pto::PIPE::PIPE_S; }
   }];
 }
 
@@ -3618,6 +3618,34 @@ def TFillPadExpandOp : PTO_TOp<"tfillpad_expand", [
   DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
 ]> {
   let summary = "Copy src into dst and fill padded elements using dst PadVal, allowing dst to be larger (tilebuf, DPS)";
+
+  let arguments = (ins
+    PTODpsType:$src,
+    PTODpsType:$dst
+  );
+
+  let results = (outs);
+
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `ins`  `(` $src `:` qualified(type($src)) `)`
+    `outs` `(` $dst `:` qualified(type($dst) ) `)`
+    attr-dict
+  }];
+
+  let extraClassDeclaration = [{
+    ::mlir::pto::PIPE getPipe() { return ::mlir::pto::PIPE::PIPE_V; }
+    ::mlir::MutableOperandRange getDpsInitsMutable() { return getDstMutable(); }
+  }];
+}
+
+def TFillPadInplaceOp : PTO_TOp<"tfillpad_inplace", [
+  PTO_DpsInitOpInterface,
+  OpPipeInterface,
+  DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
+]> {
+  let summary = "In-place fill padding on shared backing storage: src supplies valid-region bounds, dst supplies target pad bounds (tilebuf, DPS)";
 
   let arguments = (ins
     PTODpsType:$src,
