@@ -14,6 +14,156 @@ import sys
 import numpy as np
 
 
+def _bf16_to_float32(values):
+    return (values.astype(np.uint32) << 16).view(np.float32)
+
+
+def _bf16_to_ordered_int(values):
+    sign = (values & np.uint16(0x8000)) != 0
+    ordered = np.where(sign, np.bitwise_not(values), values | np.uint16(0x8000))
+    return ordered.astype(np.int32, copy=False)
+
+
+def _compare_bf16_arrays(golden, output, *, label, max_ulp=1, extra="", report=True):
+    golden_f32 = _bf16_to_float32(golden)
+    output_f32 = _bf16_to_float32(output)
+
+    nan_match = np.isnan(golden_f32) & np.isnan(output_f32)
+    exact_match = golden == output
+    zero_match = (golden_f32 == 0.0) & (output_f32 == 0.0)
+
+    golden_ord = _bf16_to_ordered_int(golden)
+    output_ord = _bf16_to_ordered_int(output)
+    ulp_diff = np.abs(golden_ord - output_ord)
+    close_match = ulp_diff <= int(max_ulp)
+
+    ok = nan_match | exact_match | zero_match | close_match
+    if np.all(ok):
+        return True
+
+    if not report:
+        return False
+
+    bad = np.nonzero(~ok)[0]
+    pos = int(bad[np.argmax(ulp_diff[bad])])
+    suffix = f", {extra}" if extra else ""
+    print(
+        f"[ERROR] Mismatch ({label}): max ulp diff={int(ulp_diff[pos])} at idx={pos} "
+        f"(golden_bits={int(golden[pos])}, out_bits={int(output[pos])}, "
+        f"golden={float(golden_f32[pos])}, out={float(output_f32[pos])}{suffix})"
+    )
+    return False
+
+
+def compare_bf16_bin(golden_path, output_path, max_ulp=1):
+    if not os.path.exists(output_path):
+        print(f"[ERROR] Output missing: {output_path}")
+        return False
+    if not os.path.exists(golden_path):
+        print(f"[ERROR] Golden missing: {golden_path}")
+        return False
+    golden = np.fromfile(golden_path, dtype=np.uint16)
+    output = np.fromfile(output_path, dtype=np.uint16)
+    if golden.shape != output.shape:
+        print(f"[ERROR] Shape mismatch: {golden_path} {golden.shape} vs {output_path} {output.shape}")
+        return False
+    return _compare_bf16_arrays(golden, output, label=f"bf16 {golden_path} vs {output_path}", max_ulp=max_ulp)
+
+
+def compare_bf16_bin_prefix(golden_path, output_path, max_ulp, count):
+    if not os.path.exists(output_path):
+        print(f"[ERROR] Output missing: {output_path}")
+        return False
+    if not os.path.exists(golden_path):
+        print(f"[ERROR] Golden missing: {golden_path}")
+        return False
+    try:
+        count = int(count)
+    except Exception:
+        print(f"[ERROR] Invalid prefix count: {count}")
+        return False
+    if count <= 0:
+        print(f"[ERROR] Invalid prefix count: {count}")
+        return False
+
+    golden = np.fromfile(golden_path, dtype=np.uint16, count=count)
+    output = np.fromfile(output_path, dtype=np.uint16, count=count)
+    if golden.size != count or output.size != count:
+        print(
+            f"[ERROR] Prefix read too small: need={count} elems, "
+            f"golden={golden.size}, out={output.size}"
+        )
+        return False
+    return _compare_bf16_arrays(
+        golden,
+        output,
+        label=f"bf16 prefix {golden_path} vs {output_path}",
+        max_ulp=max_ulp,
+        extra=f"count={count}",
+    )
+
+
+def compare_bf16_bin_at_indices(golden_path, output_path, max_ulp, indices_path, indices_dtype):
+    if not os.path.exists(output_path):
+        print(f"[ERROR] Output missing: {output_path}")
+        return False
+    if not os.path.exists(golden_path):
+        print(f"[ERROR] Golden missing: {golden_path}")
+        return False
+    if not os.path.exists(indices_path):
+        print(f"[ERROR] Indices missing: {indices_path}")
+        return False
+
+    indices_dtype_np = np.dtype(indices_dtype)
+    golden = np.fromfile(golden_path, dtype=np.uint16)
+    output = np.fromfile(output_path, dtype=np.uint16)
+    indices = np.fromfile(indices_path, dtype=indices_dtype_np)
+
+    if golden.shape != output.shape:
+        print(f"[ERROR] Shape mismatch: {golden_path} {golden.shape} vs {output_path} {output.shape}")
+        return False
+    if indices.size == 0:
+        return True
+
+    indices_i64 = indices.astype(np.int64, copy=False)
+    if np.any(indices_i64 < 0) or np.any(indices_i64 >= golden.size):
+        bad = int(np.nonzero((indices_i64 < 0) | (indices_i64 >= golden.size))[0][0])
+        print(
+            f"[ERROR] Indexed compare out of range at idx={bad} "
+            f"(value={indices_i64[bad]}, limit={golden.size})"
+        )
+        return False
+
+    golden_sel = golden[indices_i64]
+    output_sel = output[indices_i64]
+    if _compare_bf16_arrays(
+        golden_sel,
+        output_sel,
+        label=f"bf16 indexed {golden_path} vs {output_path}",
+        max_ulp=max_ulp,
+        report=False,
+    ):
+        return True
+
+    golden_f32 = _bf16_to_float32(golden_sel)
+    output_f32 = _bf16_to_float32(output_sel)
+    golden_ord = _bf16_to_ordered_int(golden_sel)
+    output_ord = _bf16_to_ordered_int(output_sel)
+    ulp_diff = np.abs(golden_ord - output_ord)
+    nan_match = np.isnan(golden_f32) & np.isnan(output_f32)
+    exact_match = golden_sel == output_sel
+    zero_match = (golden_f32 == 0.0) & (output_f32 == 0.0)
+    bad = np.nonzero(~(nan_match | exact_match | zero_match | (ulp_diff <= int(max_ulp))))[0]
+    pos = int(bad[np.argmax(ulp_diff[bad])])
+    src_idx = int(indices_i64[pos])
+    print(
+        f"[ERROR] Indexed source idx={src_idx} "
+        f"(golden_bits={int(golden_sel[pos])}, out_bits={int(output_sel[pos])}, "
+        f"golden={float(golden_f32[pos])}, out={float(output_f32[pos])})"
+    )
+    return False
+
+
 def compare_bin(golden_path, output_path, dtype, eps):
     if not os.path.exists(output_path):
         print(f"[ERROR] Output missing: {output_path}")
