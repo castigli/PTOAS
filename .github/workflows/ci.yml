@@ -204,6 +204,8 @@ jobs:
       - name: Run sample tests (py -> pto -> cpp)
         shell: bash
         env:
+          CI_EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_SOC_VERSION: ${{ github.event.inputs.soc_version || 'Ascend910' }}
           PTOAS_BIN: ${{ github.workspace }}/build/tools/ptoas/ptoas
           PYTHON_BIN: /usr/bin/python3
           MLIR_PYTHON_ROOT: ${{ env.MLIR_PYTHONPATH }}
@@ -213,7 +215,15 @@ jobs:
           export PYTHONPATH="${MLIR_PYTHON_ROOT}:${PTO_PYTHON_ROOT}:${PYTHONPATH:-}"
           export LD_LIBRARY_PATH="${LLVM_DIR}/lib:${PTO_INSTALL_DIR}/lib:${LD_LIBRARY_PATH:-}"
           export PTOAS_OUT_DIR="${PAYLOAD_DIR}/test/samples"
-          bash test/samples/runop.sh --enablebc all
+          if [[ "${CI_EVENT_NAME}" == "workflow_dispatch" || "${CI_EVENT_NAME}" == "schedule" ]]; then
+            # Board-validation payloads must only contain the arch-matching
+            # direct .pto samples. Some A3/A5 qwen decode cases intentionally
+            # share the same testcase basename, so SKIP_CASES cannot
+            # distinguish them later once the payload is built.
+            SOC_VERSION="${WORKFLOW_SOC_VERSION}" bash test/samples/runop.sh --enablebc all
+          else
+            bash test/samples/runop.sh --enablebc all
+          fi
 
       - name: Build payload artifact
         if: >-
@@ -294,9 +304,7 @@ jobs:
           # RUN_ONLY_CASES requests, so remote validation does not try to force
           # A5-only cases through an A3 flow or vice versa.
           A3_ONLY_CASES="partition5d,partition5d_dynamic,mrgsort,tmatmulk_autosync"
-          QWEN3_TILELET_A5_ONLY_CASES="$(printf 'qwen3_decode_layer_incore_%s,' {0..19})"
-          QWEN3_TILELET_A5_ONLY_CASES="${QWEN3_TILELET_A5_ONLY_CASES%,}"
-          A5_ONLY_CASES="partition5d_a5,partition5d_dynamic_a5,mrgsort_a5,tmatmulk_autosync_a5,tpack,${QWEN3_TILELET_A5_ONLY_CASES}"
+          A5_ONLY_CASES="partition5d_a5,partition5d_dynamic_a5,mrgsort_a5,tmatmulk_autosync_a5,tpack"
 
           sv_lc="$(printf '%s' "${SOC_VERSION}" | tr '[:upper:]' '[:lower:]')"
           is_a5=0
