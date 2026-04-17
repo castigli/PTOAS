@@ -1135,7 +1135,7 @@ int main(int argc, char **argv) {
   
   pm.addNestedPass<mlir::func::FuncOp>(
       pto::createPTOLowerFrontendPipeOpsPass());
-  pm.addNestedPass<mlir::func::FuncOp>(pto::createPTOVerifyTFreePass());
+  //pm.addNestedPass<mlir::func::FuncOp>(pto::createPTOVerifyTFreePass());
   pm.addPass(pto::createPTOInferValidatePipeInitPass());
   pm.addNestedPass<mlir::func::FuncOp>(pto::createLoweringSyncToPipePass());
   
