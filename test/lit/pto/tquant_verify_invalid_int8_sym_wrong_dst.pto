@@ -6,10 +6,11 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// RUN: not ptoas --pto-arch=a3 %s 2>&1 | FileCheck %s
+// RUN: ptoas --pto-arch=a3 %s 2>&1 | FileCheck %s
 
-// Negative test for pto.tquant verifier.
-// CHECK: error: 'pto.tquant' op expects dst element type i8 for INT8_SYM quantization
+// Signless/signedness is intentionally ignored in verifier: ui8 is accepted for INT8_SYM.
+// CHECK-NOT: error:
+// CHECK: AICORE void tquant_sym_wrong_dst()
 
 func.func @tquant_sym_wrong_dst() attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
   %src = memref.alloc() : memref<16x16xf32, #pto.address_space<vec>>

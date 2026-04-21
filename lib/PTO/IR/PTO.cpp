@@ -1783,7 +1783,7 @@ LogicalResult TStoreOp::verify() {
     return ty.isInteger(8) || ty.isInteger(16) || ty.isInteger(32) ||
            ty.isInteger(64) || ty.isF16() || ty.isBF16() || ty.isF32();
   };
-  auto isI8Like = [&](Type ty) -> bool { return ty.isSignlessInteger(8); };
+  auto isI8Like = [&](Type ty) -> bool { return ty.isInteger(8); };
   bool hasPreQuant = static_cast<bool>(getPreQuantScalar());
   auto reluMode = getReluPreMode();
 
@@ -1814,10 +1814,10 @@ LogicalResult TStoreOp::verify() {
       return success();
     }
 
-    if (!(srcElem.isSignlessInteger(32) || srcElem.isF32()))
+    if (!(srcElem.isInteger(32) || srcElem.isF32()))
       return emitOpError("expects A2/A3 acc tstore src element type to be i32 or f32");
     if (hasPreQuant) {
-      if (srcElem.isSignlessInteger(32)) {
+      if (srcElem.isInteger(32)) {
         if (!(isI8Like(dstElem) || dstElem.isF16()))
           return emitOpError("expects A2/A3 acc preQuantScalar tstore dst type to be i8/ui8/f16");
       } else if (srcElem.isF32()) {
@@ -1825,7 +1825,7 @@ LogicalResult TStoreOp::verify() {
           return emitOpError("expects A2/A3 acc preQuantScalar tstore dst type to be i8/ui8");
       }
     } else {
-      if (!(dstElem.isSignlessInteger(32) || dstElem.isF32() || dstElem.isF16() ||
+      if (!(dstElem.isInteger(32) || dstElem.isF32() || dstElem.isF16() ||
             dstElem.isBF16()))
         return emitOpError("expects A2/A3 acc tstore dst element type to be i32/f32/f16/bf16");
     }
@@ -1867,10 +1867,10 @@ LogicalResult TStoreOp::verify() {
       return success();
     }
 
-    if (!(srcElem.isSignlessInteger(32) || srcElem.isF32()))
+    if (!(srcElem.isInteger(32) || srcElem.isF32()))
       return emitOpError("expects A5 acc tstore src element type to be i32 or f32");
     if (hasPreQuant) {
-      if (srcElem.isSignlessInteger(32)) {
+      if (srcElem.isInteger(32)) {
         if (!(isI8Like(dstElem) || dstElem.isF16() || dstElem.isBF16()))
           return emitOpError("expects A5 acc preQuantScalar tstore dst type to be i8/ui8/f16/bf16");
       } else if (srcElem.isF32()) {
@@ -1878,7 +1878,7 @@ LogicalResult TStoreOp::verify() {
           return emitOpError("expects A5 acc preQuantScalar tstore dst type to be i8/ui8/f16/bf16/f32");
       }
     } else {
-      if (!(dstElem.isSignlessInteger(32) || dstElem.isF32() || dstElem.isF16() ||
+      if (!(dstElem.isInteger(32) || dstElem.isF32() || dstElem.isF16() ||
             dstElem.isBF16()))
         return emitOpError("expects A5 acc tstore dst element type to be i32/f32/f16/bf16");
     }
@@ -2110,8 +2110,6 @@ static bool isSupportedVecElemType(Type ty, bool allowBf16,
   if (allowBf16 && ty.isBF16())
     return true;
   if (auto it = dyn_cast<IntegerType>(ty)) {
-    if (!it.isSignless() && !it.isUnsigned())
-      return false;
     switch (it.getWidth()) {
     case 32:
     case 16:
@@ -2129,7 +2127,7 @@ static bool isSupportedMGatherMScatterIndexElemType(Type ty) {
   auto it = dyn_cast<IntegerType>(ty);
   if (!it || it.getWidth() != 32)
     return false;
-  return it.isSignless();
+  return true;
 }
 
 static bool isSupportedMGatherMScatterPayloadElemType(Operation *op, Type ty) {
@@ -2149,11 +2147,11 @@ static bool isSupportedMScatterAtomicPayloadElemType(Type ty,
     return true;
   case pto::ScatterAtomicOp::Add:
     return ty.isF16() || ty.isF32() ||
-           (intTy && intTy.getWidth() == 32 && intTy.isSignless());
+           (intTy && intTy.getWidth() == 32);
   case pto::ScatterAtomicOp::Max:
   case pto::ScatterAtomicOp::Min:
     return ty.isF32() ||
-           (intTy && intTy.getWidth() == 32 && intTy.isSignless());
+           (intTy && intTy.getWidth() == 32);
   }
   llvm_unreachable("unknown ScatterAtomicOp");
 }
@@ -2953,7 +2951,7 @@ mlir::LogicalResult mlir::pto::TConcatOp::verify() {
     if (elem.isF16() || elem.isF32() || elem.isBF16())
       return success();
     auto it = mlir::dyn_cast<IntegerType>(elem);
-    if (!it || !it.isSignless() ||
+    if (!it ||
         (it.getWidth() != 8 && it.getWidth() != 16 && it.getWidth() != 32))
       return emitOpError("expects element type to be i8, i16, i32, f16, f32, or bf16");
     return success();
@@ -3438,8 +3436,7 @@ LogicalResult pto::TColArgMaxOp::verify() {
       return emitOpError("expects src element type to be f16 or f32");
 
     auto dstInt = dyn_cast<IntegerType>(getElemTy(dstTy));
-    if (!dstInt || dstInt.getWidth() != 32 ||
-        (!dstInt.isSignless() && !dstInt.isUnsigned()))
+    if (!dstInt || dstInt.getWidth() != 32)
       return emitOpError("expects dst element type to be i32 or ui32");
     return success();
   };
@@ -3505,8 +3502,7 @@ LogicalResult pto::TColArgMinOp::verify() {
       return emitOpError("expects src element type to be f16 or f32");
 
     auto dstInt = dyn_cast<IntegerType>(getElemTy(dstTy));
-    if (!dstInt || dstInt.getWidth() != 32 ||
-        (!dstInt.isSignless() && !dstInt.isUnsigned()))
+    if (!dstInt || dstInt.getWidth() != 32)
       return emitOpError("expects dst element type to be i32 or ui32");
     return success();
   };
@@ -3699,8 +3695,7 @@ LogicalResult pto::TColProdOp::verify() {
       return failure();
     Type elem = getElemTy(srcTy);
     if (!(elem.isF16() || elem.isF32() || elem.isBF16() ||
-          elem.isInteger(16) || elem.isUnsignedInteger(16) ||
-          elem.isInteger(32) || elem.isUnsignedInteger(32)))
+          elem.isInteger(16) || elem.isInteger(32)))
       return emitOpError("expects A5 tcolprod element type to be i16/ui16/i32/ui32/f16/bf16/f32");
     return success();
   };
@@ -3740,7 +3735,7 @@ llvm::LogicalResult mlir::pto::TRandomOp::verify() {
       return emitOpError("expects dst to use row-major layout");
 
     Type elemTy = getElemTy(dstTy);
-    if (!(elemTy.isInteger(32) || elemTy.isUnsignedInteger(32)))
+    if (!elemTy.isInteger(32))
       return emitOpError("expects dst element type to be i32 or ui32");
 
     auto checkWord = [&](Value v, StringRef name) -> LogicalResult {
@@ -5238,7 +5233,7 @@ mlir::LogicalResult mlir::pto::TMovFPOp::verify() {
     auto srcElemTy = getElemTy(srcTy);
     auto srcIntTy = dyn_cast<IntegerType>(srcElemTy);
     if (!(srcElemTy.isF32() ||
-          (srcIntTy && srcIntTy.getWidth() == 32 && (srcIntTy.isSignless() || srcIntTy.isUnsigned()))))
+          (srcIntTy && srcIntTy.getWidth() == 32)))
       return emitOpError()
              << "expects src to have element type f32, i32";
     auto fpSpace = getPTOMemorySpaceEnum(fpTy);
@@ -5277,8 +5272,7 @@ mlir::LogicalResult mlir::pto::TMovFPOp::verify() {
     auto srcElemTy = getElemTy(srcTy);
     auto srcIntTy = dyn_cast<IntegerType>(srcElemTy);
     if (!(srcElemTy.isF32() ||
-          (srcIntTy && srcIntTy.getWidth() == 32 &&
-           (srcIntTy.isSignless() || srcIntTy.isUnsigned()))))
+          (srcIntTy && srcIntTy.getWidth() == 32)))
       return emitOpError()
              << "expects src to have element type f32, i32";
     auto fpSpace = getPTOMemorySpaceEnum(fpTy);
@@ -5622,9 +5616,9 @@ LogicalResult TGetValOp::verify() {
 }
 
 LogicalResult THistogramOp::verify() {
-  auto isSignlessOrUnsignedInt = [](Type ty, unsigned width) {
+  auto isIntegerWidth = [](Type ty, unsigned width) {
     auto it = dyn_cast<IntegerType>(ty);
-    return it && it.getWidth() == width && (it.isSignless() || it.isUnsigned());
+    return it && it.getWidth() == width;
   };
 
   auto verifyA2A3 = [&]() -> LogicalResult {
@@ -5666,11 +5660,11 @@ LogicalResult THistogramOp::verify() {
       return emitOpError(
           "expects idx to use DN layout (col_major + none_box)");
 
-    if (!isSignlessOrUnsignedInt(getElemTy(srcTy), 16))
+    if (!isIntegerWidth(getElemTy(srcTy), 16))
       return emitOpError("expects src element type to be ui16");
-    if (!isSignlessOrUnsignedInt(getElemTy(idxTy), 8))
+    if (!isIntegerWidth(getElemTy(idxTy), 8))
       return emitOpError("expects idx element type to be ui8");
-    if (!isSignlessOrUnsignedInt(getElemTy(dstTy), 32))
+    if (!isIntegerWidth(getElemTy(dstTy), 32))
       return emitOpError("expects dst element type to be ui32");
 
     auto srcShape = getShapeVec(srcTy);
@@ -6623,7 +6617,7 @@ mlir::LogicalResult mlir::pto::TPReluOp::verify() {
     auto [t0, t1, tt, td] = *tysOr;
     Type tmpElem = getElemTy(tt);
     auto tmpIntTy = mlir::dyn_cast<IntegerType>(tmpElem);
-    if (!tmpIntTy || tmpIntTy.getWidth() != 8 || !tmpIntTy.isUnsigned())
+    if (!tmpIntTy || tmpIntTy.getWidth() != 8)
       return emitOpError("expects A2/A3 tmp element type to be u8");
     if (!isRowMajorTileBuf(tt))
       return emitOpError("expects tmp to use row-major layout");
@@ -6718,18 +6712,17 @@ mlir::LogicalResult mlir::pto::TQuantOp::verify() {
     Type dstElemTy = getElemTy(dstTy);
     auto dstIntTy = dyn_cast<IntegerType>(dstElemTy);
     if (getQuantType() == mlir::pto::QuantType::INT8_SYM) {
-      if (!dstIntTy || dstIntTy.getWidth() != 8 ||
-          !(dstIntTy.isSignless() || dstIntTy.isSigned()))
+      if (!dstIntTy || dstIntTy.getWidth() != 8)
         return emitOpError()
-               << "expects dst element type i8 for INT8_SYM quantization";
+               << "expects dst element type i8/ui8 for INT8_SYM quantization";
       if (getOffset())
         return emitOpError()
                << "INT8_SYM quantization must not have an offset operand";
     } else {
       // INT8_ASYM
-      if (!dstIntTy || dstIntTy.getWidth() != 8 || !dstIntTy.isUnsigned())
+      if (!dstIntTy || dstIntTy.getWidth() != 8)
         return emitOpError()
-               << "expects dst element type ui8 for INT8_ASYM quantization";
+               << "expects dst element type i8/ui8 for INT8_ASYM quantization";
       if (!getOffset())
         return emitOpError()
                << "INT8_ASYM quantization requires an offset operand";
@@ -6821,8 +6814,7 @@ mlir::LogicalResult mlir::pto::TDequantOp::verify() {
   auto verifyStructural = [&]() -> LogicalResult {
     Type srcElemTy = getElemTy(getSrc().getType());
     auto srcIntTy = dyn_cast<IntegerType>(srcElemTy);
-    if (!srcIntTy || !(srcIntTy.getWidth() == 8 || srcIntTy.getWidth() == 16) ||
-        !(srcIntTy.isSignless() || srcIntTy.isSigned()))
+    if (!srcIntTy || !(srcIntTy.getWidth() == 8 || srcIntTy.getWidth() == 16))
       return emitOpError()
              << "expects src element type i8 or i16";
     if (!getElemTy(getDst().getType()).isF32())
@@ -7995,8 +7987,7 @@ mlir::LogicalResult mlir::pto::TRowArgMaxOp::verify() {
       return emitOpError("expects src element type to be i16/i32/f16/f32");
 
     auto dstInt = dyn_cast<IntegerType>(getElemTy(dstTy));
-    if (!dstInt || dstInt.getWidth() != 32 ||
-        (!dstInt.isSignless() && !dstInt.isUnsigned()))
+    if (!dstInt || dstInt.getWidth() != 32)
       return emitOpError("expects dst element type to be i32 or ui32");
     return success();
   };
@@ -8072,8 +8063,7 @@ mlir::LogicalResult mlir::pto::TRowArgMinOp::verify() {
       return emitOpError("expects src element type to be i16/i32/f16/f32");
 
     auto dstInt = dyn_cast<IntegerType>(getElemTy(dstTy));
-    if (!dstInt || dstInt.getWidth() != 32 ||
-        (!dstInt.isSignless() && !dstInt.isUnsigned()))
+    if (!dstInt || dstInt.getWidth() != 32)
       return emitOpError("expects dst element type to be i32 or ui32");
     return success();
   };
@@ -8344,7 +8334,7 @@ mlir::LogicalResult mlir::pto::TSelSOp::verify() {
     Type elem = *elemOr;
     bool ok = elem.isF16() || elem.isF32();
     if (auto it = mlir::dyn_cast<mlir::IntegerType>(elem))
-      ok = it.isSignless() && (it.getWidth() == 16 || it.getWidth() == 32);
+      ok = (it.getWidth() == 16 || it.getWidth() == 32);
     if (!ok)
       return emitOpError(
           "expects A2/A3 tsels src and dst element type to be i16, i32, f16, or f32");
@@ -8364,7 +8354,7 @@ mlir::LogicalResult mlir::pto::TSelSOp::verify() {
     Type elem = *elemOr;
     bool ok = elem.isF16() || elem.isF32();
     if (auto it = mlir::dyn_cast<mlir::IntegerType>(elem))
-      ok = it.isSignless() && (it.getWidth() == 8 || it.getWidth() == 16 || it.getWidth() == 32);
+      ok = (it.getWidth() == 8 || it.getWidth() == 16 || it.getWidth() == 32);
     if (!ok)
       return emitOpError(
           "expects A5 tsels src and dst element type to be i8, i16, i32, f16, or f32");
@@ -8490,8 +8480,8 @@ mlir::LogicalResult mlir::pto::TSort32Op::verify() {
 
   auto idxElem = getElemTy(idxTy);
   auto idxInt = dyn_cast<IntegerType>(idxElem);
-  if (!idxInt || idxInt.getWidth() != 32 || !idxInt.isUnsigned())
-    return emitOpError() << "expects idx element type to be u32";
+  if (!idxInt || idxInt.getWidth() != 32)
+    return emitOpError() << "expects idx element type to be i32/u32";
   return mlir::success();
 }
 
@@ -8558,8 +8548,7 @@ mlir::LogicalResult mlir::pto::TStoreFPOp::verify() {
     auto srcElemTy = getElemTy(srcTy);
     auto srcIntTy = dyn_cast<IntegerType>(srcElemTy);
     if (!(srcElemTy.isF32() ||
-          (srcIntTy && srcIntTy.getWidth() == 32 &&
-           (srcIntTy.isSignless() || srcIntTy.isUnsigned()))))
+          (srcIntTy && srcIntTy.getWidth() == 32)))
       return emitOpError()
              << "expects src to have element type f32, i32";
     auto srcShape = getShapeVec(srcTy);
