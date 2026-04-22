@@ -20,9 +20,11 @@
 
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/raw_ostream.h"
 
 #include <algorithm>
 #include <optional>
+#include <string>
 #include <vector>
 
 #define DEBUG_TYPE "pto-plan-memory"
@@ -69,6 +71,19 @@ static LocalMemSpec getLocalMemSpec(Operation *op, AddressSpace as) {
   }
 }
 
+static std::string getStableValueKey(Value value) {
+  std::string key;
+  llvm::raw_string_ostream os(key);
+  value.printAsOperand(os, OpPrintingFlags());
+  return os.str();
+}
+
+static void sortValuesByStableKey(SmallVectorImpl<Value> &values) {
+  std::stable_sort(values.begin(), values.end(), [](Value lhs, Value rhs) {
+    return getStableValueKey(lhs) < getStableValueKey(rhs);
+  });
+}
+
 static SmallVector<Value> getScratchBuffersFromEffects(Operation *op,
                                                        ValueRange dpsInits) {
   SmallVector<Value> scratchBuffers;
@@ -91,6 +106,7 @@ static SmallVector<Value> getScratchBuffersFromEffects(Operation *op,
     if (!llvm::is_contained(scratchBuffers, value))
       scratchBuffers.push_back(value);
   }
+  sortValuesByStableKey(scratchBuffers);
   return scratchBuffers;
 }
 
@@ -506,6 +522,7 @@ SmallVector<Value> MemLivenessAnalysis::GetLiveBuffersInLoop(scf::ForOp forOp,
         allocBeforeLoopBuffers.push_back(Buffer);
     }
   }
+  sortValuesByStableKey(allocBeforeLoopBuffers);
   return allocBeforeLoopBuffers;
 }
 
@@ -643,8 +660,9 @@ void MemLivenessAnalysis::OpKillHandle(OpInfo *opInfo, Liveness live,
   if (currentLiveValues.empty()) {
     return;
   }
-  SetVector<Value> liveValues(currentLiveValues.begin(),
-                              currentLiveValues.end());
+  SmallVector<Value> liveValues(currentLiveValues.begin(),
+                                currentLiveValues.end());
+  sortValuesByStableKey(liveValues);
   for (const Value &operand : liveValues) {
     UpdateOpKillInfo(opInfo, operand, live);
   }
@@ -789,20 +807,27 @@ SmallVector<ValuePair> MemPlan::GenerateInplaceList() {
       continue;
     if (hasTouchOp[operationSeq->operation]) {
       continue;
+    }
+
+    SmallVector<Value> genBuffers(it->second.gen.begin(), it->second.gen.end());
+    SmallVector<Value> killBuffers(it->second.kill.begin(), it->second.kill.end());
+    sortValuesByStableKey(genBuffers);
+    sortValuesByStableKey(killBuffers);
+
+    for (const Value &genBuffer : genBuffers) {
+      auto genBufferIter = bufferInfos.find(genBuffer);
+      if (genBufferIter == bufferInfos.end())
+        llvm::report_fatal_error("gen buffer missing from buffer info map");
+      if (genBufferIter->second.ignoreInplace) {
+        continue;
       }
-      for (const Value &genBuffer : it->second.gen) {
-        auto genBufferIter = bufferInfos.find(genBuffer);
-        if (genBufferIter == bufferInfos.end())
-          llvm::report_fatal_error("gen buffer missing from buffer info map");
-        if (genBufferIter->second.ignoreInplace) {
+
+      for (const Value &killBuffer : killBuffers) {
+        auto killBufferIter = bufferInfos.find(killBuffer);
+        if (killBufferIter == bufferInfos.end())
+          llvm::report_fatal_error("kill buffer missing from buffer info map");
+        if (killBufferIter->second.ignoreInplace) {
           continue;
-        }
-        for (const Value &killBuffer : it->second.kill) {
-          auto killBufferIter = bufferInfos.find(killBuffer);
-          if (killBufferIter == bufferInfos.end())
-            llvm::report_fatal_error("kill buffer missing from buffer info map");
-          if (killBufferIter->second.ignoreInplace) {
-            continue;
         }
 
         bool bufferSizeMatch =
@@ -904,6 +929,47 @@ LogicalResult MemPlan::plan() {
     EmitPlanMemoryFailureInfo();
     return failure();
   }
+  auto hasAddressOverlap = [](const StorageEntry *lhs, const StorageEntry *rhs) {
+    uint64_t lhsBegin = lhs->bitsOffset;
+    uint64_t lhsEnd = lhs->bitsOffset + lhs->alignedConstBits;
+    uint64_t rhsBegin = rhs->bitsOffset;
+    uint64_t rhsEnd = rhs->bitsOffset + rhs->alignedConstBits;
+    return lhsBegin < rhsEnd && rhsBegin < lhsEnd;
+  };
+  SmallVector<const StorageEntry *> plannedEntries;
+  plannedEntries.reserve(StorageEntryVec.size() + pingEntry2RelationPongEntry.size());
+  for (const auto &entry : StorageEntryVec) {
+    plannedEntries.push_back(entry.get());
+  }
+  for (const auto &entry : pingEntry2RelationPongEntry) {
+    plannedEntries.push_back(entry.second.get());
+  }
+  for (size_t i = 0; i < plannedEntries.size(); ++i) {
+    for (size_t j = i + 1; j < plannedEntries.size(); ++j) {
+      const StorageEntry *lhs = plannedEntries[i];
+      const StorageEntry *rhs = plannedEntries[j];
+      if (!lhs || !rhs) {
+        continue;
+      }
+      if (lhs->bufInfo->bufferScope != rhs->bufInfo->bufferScope) {
+        continue;
+      }
+      if (!hasAddressOverlap(lhs, rhs)) {
+        continue;
+      }
+      bool lifeOverlap =
+          !GetOverlapBufferLife(lhs->bufferLifeVec, rhs->bufferLifeVec).empty();
+      bool semanticConflict = HasSemanticConflict(lhs, rhs->bufferLifeVec);
+      if (!lifeOverlap && !semanticConflict) {
+        continue;
+      }
+      func_.emitError()
+          << "PlanMemory produced overlapping local buffers in "
+          << stringifyEnum(lhs->bufInfo->bufferScope)
+          << " at offsets " << lhs->bitsOffset << " and " << rhs->bitsOffset;
+      return failure();
+    }
+  }
   // Update the address information of each buffer after memory buffer.
   UpdateBuffer2Offsets();
   if (enablePrintMemoryAllocatedSize) {
@@ -918,7 +984,9 @@ void MemPlan::GenerateStorageEntry() {
     auto it = genKillMap.find(operation.get());
     if (it == genKillMap.end())
       continue;
-    for (const Value &genBuffer : it->second.gen) {
+    SmallVector<Value> genBuffers(it->second.gen.begin(), it->second.gen.end());
+    sortValuesByStableKey(genBuffers);
+    for (const Value &genBuffer : genBuffers) {
       auto iter = bufferInfos.find(genBuffer);
       if (iter == bufferInfos.end()) {
         continue;
