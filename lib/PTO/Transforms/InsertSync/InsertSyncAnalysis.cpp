@@ -204,11 +204,9 @@ unsigned InsertSyncAnalysis::InsertLoopSync(
     InsertSeqSync(nowCompound, syncElement, static_cast<int>(newBegin),
                   static_cast<int>(newEnd), syncRecordForList, forEndIndex);
     // A loop may execute zero iterations at runtime. Keep correctness for both
-    // paths by not promoting alreadySync from the loop-body traversal into the
-    // outer state. We only carry syncFinder updates, matching no-else branch
-    // behavior in InsertBranchSync.
-    for (size_t bufferIdx = 0; bufferIdx < syncRecordList.size(); bufferIdx++)
-      syncRecordList[bufferIdx].syncFinder = syncRecordForList[bufferIdx].syncFinder;
+    // paths by not promoting any loop-body-derived sync state into the outer
+    // state. In particular, syncFinder participates in alreadySync inference
+    // later, so propagating it would still be unsound under zero-trip loops.
     return (loopElement->endId - loopElement->beginId);
   }
   return 0;
