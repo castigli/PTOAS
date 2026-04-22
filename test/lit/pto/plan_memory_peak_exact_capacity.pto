@@ -1,4 +1,4 @@
-// RUN: ptoas %s 2>&1 1>/dev/null | FileCheck %s
+// RUN: ptoas --mlir-print-ir-after=pto-plan-memory %s 2>&1 1>/dev/null | FileCheck %s
 
 module {
   func.func @peak_exact_capacity(%arg0: memref<16x16x16xf16, #pto.address_space<gm>>,
@@ -132,7 +132,7 @@ module {
   }
 }
 
-// CHECK: end PTO plan Mem!
+// CHECK: IR Dump After PlanMemory
 // CHECK: func.func @peak_exact_capacity
 // CHECK-NOT: memref.alloc
 // 24 live buffers implies a max offset of 23*8192 = 188416 bytes.

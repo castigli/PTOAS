@@ -1,5 +1,5 @@
-// RUN: ptoas --pto-arch=a3 %s 2>&1 | FileCheck %s --check-prefix=A3
-// RUN: ptoas --pto-arch=a5 %s 2>&1 | FileCheck %s --check-prefix=A5
+// RUN: ptoas --pto-arch=a3 %s -emit-pto-ir 2>&1 | FileCheck %s --check-prefix=A3
+// RUN: ptoas --pto-arch=a5 %s -emit-pto-ir 2>&1 | FileCheck %s --check-prefix=A5
 module attributes {"pto.device-spec" = "Ascend910B3"} {
   func.func @tquant_sym_run(%src_ptr: !pto.ptr<f32>, %fp_ptr: !pto.ptr<f32>, %dst_ptr: !pto.ptr<i8>)
       attributes {pto.entry, pto.kernel_kind = #pto.kernel_kind<vector>} {

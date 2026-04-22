@@ -1,4 +1,4 @@
-// RUN: ptoas --pto-arch=a3 %s 2>&1 | FileCheck %s --check-prefix=A3
+// RUN: ptoas --pto-arch=a3 --mlir-print-ir-after=pto-view-to-memref %s 2>&1 | FileCheck %s --check-prefix=A3
 
 module {
   func.func @trems_tmp_form() {
@@ -11,6 +11,6 @@ module {
   }
 }
 
-// A3: pto.trems ins(%{{.*}}, %{{.*}}, %{{.*}} : memref<1x16xf32
-// A3: outs(%{{.*}} : memref<1x16xf32
+// A3: pto.trems ins(%{{.*}}, %{{.*}}, %{{[^)]*}} : memref<1x16xf32
+// A3-SAME: outs(%{{.*}} : memref<1x16xf32
 // A3: TREMS({{.*}}, {{.*}}, {{.*}}, {{.*}});

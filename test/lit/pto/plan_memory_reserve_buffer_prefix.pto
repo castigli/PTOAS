@@ -1,4 +1,4 @@
-// RUN: ptoas %s 2>&1 1>/dev/null | FileCheck %s
+// RUN: ptoas --mlir-print-ir-after=pto-plan-memory %s 2>&1 1>/dev/null | FileCheck %s
 
 module {
   func.func @reserve_prefix(%arg0: memref<16x16x16xf16, #pto.address_space<gm>>,
@@ -19,7 +19,7 @@ module {
   }
 }
 
-// CHECK: end PTO plan Mem!
+// CHECK: IR Dump After PlanMemory
 // CHECK: func.func @reserve_prefix(
 // CHECK: %c0_i64 = arith.constant 0 : i64
 // CHECK: %{{.*}} = pto.reserve_buffer{name = "fifo", size = 8192, location = <vec>, auto = true, base = 8192} -> i32
