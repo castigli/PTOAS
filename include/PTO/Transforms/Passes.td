@@ -231,4 +231,21 @@ def PTOVerifyTFree : Pass<"pto-verify-tfree", "func::FuncOp"> {
   ];
 }
 
+def PTOViewToMemref : Pass<"pto-view-to-memref", "ModuleOp"> {
+  let summary = "Lower PTO views to memref with Metadata Binding";
+  let description = [{
+    Lower PTO tile/view operations to memref-based IR while preserving tile
+    metadata through binding ops and SSA backtracking.
+  }];
+
+  let constructor = "mlir::pto::createPTOViewToMemrefPass()";
+
+  let dependentDialects = [
+    "mlir::pto::PTODialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::func::FuncDialect"
+  ];
+}
+
 #endif // MLIR_DIALECT_PTO_PASSES

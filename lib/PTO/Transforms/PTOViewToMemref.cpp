@@ -28,6 +28,13 @@
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Pass/Pass.h"
 
+namespace mlir {
+namespace pto {
+#define GEN_PASS_DEF_PTOVIEWTOMEMREF
+#include "PTO/Transforms/Passes.h.inc"
+} // namespace pto
+} // namespace mlir
+
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/raw_ostream.h"
 #include "Utils.h" // 假设包含一些通用的工具函数
@@ -1142,20 +1149,8 @@ static LogicalResult lowerTileBufViewLikeOps(func::FuncOp func, MLIRContext *ctx
 // =============================================================================
 
 struct PTOViewToMemrefPass
-    : public PassWrapper<PTOViewToMemrefPass, OperationPass<ModuleOp>> {
+    : public mlir::pto::impl::PTOViewToMemrefBase<PTOViewToMemrefPass> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(PTOViewToMemrefPass)
-
-  StringRef getArgument() const final { return "pto-view-to-memref"; }
-  StringRef getDescription() const final {
-    return "Lower PTO views to memref with Metadata Binding";
-  }
-
-  void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<mlir::pto::PTODialect,
-                    memref::MemRefDialect,
-                    arith::ArithDialect,
-                    func::FuncDialect>();
-  }
 
   void runOnOperation() override {
     ModuleOp mod = getOperation();
