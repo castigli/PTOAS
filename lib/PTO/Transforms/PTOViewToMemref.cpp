@@ -50,8 +50,6 @@ using namespace mlir;
 namespace mlir {
 namespace pto {
 
-#define GEN_PASS_DEF_PTOVIEWTOMEMREF
-
 static constexpr llvm::StringLiteral kLoweredSetValidShapeAttrName =
     "__pto.lowered_set_validshape";
 static constexpr llvm::StringLiteral kForceDynamicValidShapeAttrName =
