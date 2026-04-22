@@ -18,8 +18,10 @@ ENV PY_PATH="/opt/python/${PY_VER}"
 ENV PATH="${PY_PATH}/bin:${PATH}"
 
 # dependency
-RUN dnf install -y ninja-build cmake git ccache gcc-c++ lld zip && dnf clean all
+RUN dnf install -y ninja-build cmake git ccache gcc-c++ lld zip binutils patchelf && dnf clean all
 RUN pip install --no-cache-dir numpy pybind11 nanobind setuptools wheel auditwheel
+
+COPY cmake/LinuxHardeningCache.cmake /tmp/LinuxHardeningCache.cmake
 
 # setting build directories
 ENV WORKSPACE_DIR=/llvm-workspace
@@ -34,7 +36,7 @@ WORKDIR $WORKSPACE_DIR
 RUN git clone --depth 1 --branch ${LLVM_TAG} https://github.com/llvm/llvm-project.git
 
 WORKDIR $LLVM_SOURCE_DIR
-RUN cmake -G Ninja -S llvm -B $LLVM_BUILD_DIR \
+RUN cmake -C /tmp/LinuxHardeningCache.cmake -G Ninja -S llvm -B $LLVM_BUILD_DIR \
     -DLLVM_ENABLE_PROJECTS="mlir;clang" \
     -DBUILD_SHARED_LIBS=ON \
     -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
@@ -50,7 +52,7 @@ RUN git clone https://github.com/zhangstevenunity/PTOAS.git
 # TODO: tag git commit of PTOAS repo
 
 WORKDIR $PTO_SOURCE_DIR
-RUN cmake -G Ninja \
+RUN cmake -C /tmp/LinuxHardeningCache.cmake -G Ninja \
     -S . \
     -B build \
     -DLLVM_DIR=$LLVM_BUILD_DIR/lib/cmake/llvm \

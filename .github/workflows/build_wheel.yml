@@ -72,7 +72,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          dnf install -y ninja-build cmake git ccache gcc-c++ lld zip
+          dnf install -y ninja-build cmake git ccache gcc-c++ lld zip binutils patchelf
           dnf clean all
 
       - name: Install Python dependencies
@@ -95,7 +95,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: /llvm-workspace/llvm-project/build-shared
-          key: llvm-${{ env.LLVM_TAG }}-manylinux_2_34-${{ matrix.arch }}-${{ matrix.python }}-v1
+          key: llvm-${{ env.LLVM_TAG }}-manylinux_2_34-${{ matrix.arch }}-${{ matrix.python }}-hardening-v1
 
       - name: Prepare LLVM source
         run: |
@@ -114,14 +114,14 @@ jobs:
           echo "LLVM cache miss while running on PR/release."
           echo "PR/release runs are cache-consumers only and should reuse cache generated on the default branch."
           echo "Please run this workflow on the default branch first to populate cache key:"
-          echo "llvm-${{ env.LLVM_TAG }}-manylinux_2_34-${{ matrix.arch }}-${{ matrix.python }}-v1"
+          echo "llvm-${{ env.LLVM_TAG }}-manylinux_2_34-${{ matrix.arch }}-${{ matrix.python }}-hardening-v1"
 
       - name: Build LLVM/MLIR
         if: steps.cache-llvm.outputs.cache-hit != 'true'
         run: |
           export PATH="${PY_PATH}/bin:$PATH"
           cd $LLVM_SOURCE_DIR
-          cmake -G Ninja -S llvm -B $LLVM_BUILD_DIR \
+          cmake -C "$PTO_SOURCE_DIR/cmake/LinuxHardeningCache.cmake" -G Ninja -S llvm -B $LLVM_BUILD_DIR \
             -DLLVM_ENABLE_PROJECTS="mlir;clang" \
             -DBUILD_SHARED_LIBS=ON \
             -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
@@ -137,13 +137,13 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: /llvm-workspace/llvm-project/build-shared
-          key: llvm-${{ env.LLVM_TAG }}-manylinux_2_34-${{ matrix.arch }}-${{ matrix.python }}-v1
+          key: llvm-${{ env.LLVM_TAG }}-manylinux_2_34-${{ matrix.arch }}-${{ matrix.python }}-hardening-v1
 
       - name: Build PTOAS
         run: |
           export PATH="${PY_PATH}/bin:$PATH"
           cd $PTO_SOURCE_DIR
-          cmake -G Ninja \
+          cmake -C "$PTO_SOURCE_DIR/cmake/LinuxHardeningCache.cmake" -G Ninja \
             -S . \
             -B build \
             -DLLVM_DIR=$LLVM_BUILD_DIR/lib/cmake/llvm \
