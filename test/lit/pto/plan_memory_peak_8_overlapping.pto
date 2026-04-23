@@ -1,4 +1,4 @@
-// RUN: ptoas %s 2>&1 1>/dev/null | FileCheck %s
+// RUN: ptoas --mlir-print-ir-after=pto-plan-memory %s 2>&1 1>/dev/null | FileCheck %s
 
 module {
   func.func @peak_8_overlapping(%arg0: memref<16x16x16xf16, #pto.address_space<gm>>,
@@ -50,7 +50,7 @@ module {
   }
 }
 
-// CHECK: end PTO plan Mem!
+// CHECK: IR Dump After PlanMemory
 // CHECK: func.func @peak_8_overlapping
 // CHECK-NOT: memref.alloc
 // 8 live buffers implies a max offset of 7*8192 = 57344 bytes.

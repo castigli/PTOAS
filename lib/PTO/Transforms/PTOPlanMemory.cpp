@@ -2163,9 +2163,6 @@ void PlanMemoryPass::runOnOperation() {
       return signalPassFailure();
     }
   }
-  llvm::errs() << "end PTO plan Mem!\n";
-  auto op = getOperation();
-  op->dump();
 }
 
 std::unique_ptr<Pass>

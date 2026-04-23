@@ -1,4 +1,4 @@
-// RUN: ptoas --pto-arch a5 %s 2>&1 | FileCheck %s
+// RUN: ptoas --pto-arch a5 --mlir-print-ir-after=pto-view-to-memref %s 2>&1 | FileCheck %s
 
 module attributes {"pto.target_arch" = "a5"} {
   func.func @compact_left_blayout_parser_a5() {

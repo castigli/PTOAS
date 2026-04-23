@@ -1,4 +1,4 @@
-// RUN: ptoas %s 2>&1 1>/dev/null | FileCheck %s
+// RUN: ptoas --mlir-print-ir-after=pto-plan-memory %s 2>&1 1>/dev/null | FileCheck %s
 
 module {
   func.func @fragmentation_hole_fit(%arg0: memref<16x16x16xf16, #pto.address_space<gm>>,
@@ -141,7 +141,7 @@ module {
   }
 }
 
-// CHECK: end PTO plan Mem!
+// CHECK: IR Dump After PlanMemory
 // CHECK: func.func @fragmentation_hole_fit
 // CHECK-NOT: memref.alloc
 // With 23 live UB buffers, there is exactly one remaining 8192B slot. The two

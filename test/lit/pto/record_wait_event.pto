@@ -1,4 +1,4 @@
-// RUN: ptoas %s 2>&1 | FileCheck %s
+// RUN: ptoas --mlir-print-ir-after=pto-lowering-sync-to-pipe %s 2>&1 | FileCheck %s
 
 module {
   func.func @sync_ops() {

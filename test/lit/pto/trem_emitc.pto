@@ -1,4 +1,4 @@
-// RUN: ptoas --pto-arch=a3 %s 2>&1 | FileCheck %s --check-prefix=A3
+// RUN: ptoas --pto-arch=a3 --mlir-print-ir-after=pto-view-to-memref %s 2>&1 | FileCheck %s --check-prefix=A3
 
 module {
   func.func @trem_tmp_form() {

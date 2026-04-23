@@ -64,11 +64,6 @@ std::unique_ptr<Pass> createPTORemoveRedundantBarrierPass();
 std::unique_ptr<Pass> createPTOViewToMemrefPass();
 std::unique_ptr<Pass> createInferPTOLayoutPass();
 std::unique_ptr<Pass> createPTOA5NormalizeTMovPass();
-// Declare register function
-void registerPTOPasses();
-
-} // namespace pto
-} // namespace mlir
 
 //===----------------------------------------------------------------------===//
 // Registration
@@ -77,5 +72,9 @@ void registerPTOPasses();
 #undef GEN_PASS_DECL
 #define GEN_PASS_REGISTRATION
 #include "PTO/Transforms/Passes.h.inc"
+
+} // namespace pto
+} // namespace mlir
+
 
 #endif // MLIR_DIALECT_PTO_TRANSFORMS_PASSES_H

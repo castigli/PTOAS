@@ -62,7 +62,6 @@ static bool hasGatherScatterLikeOps(func::FuncOp func) {
 struct PTOInsertSyncPass : public mlir::pto::impl::PTOInsertSyncBase<PTOInsertSyncPass> {
   
   void runOnOperation() override {
-    llvm::errs() << "\n// === [PTOInsertSync] Start === //\n";
     func::FuncOp func = getOperation();
 
     // If the function already contains explicit synchronization ops (either
@@ -143,11 +142,6 @@ struct PTOInsertSyncPass : public mlir::pto::impl::PTOInsertSyncBase<PTOInsertSy
     SyncCodegen codegen(syncIR, func, SyncAnalysisMode::NORMALSYNC);
     codegen.Run();
  
-    // 6. 最终结果打印
-    llvm::errs() << "\n// === [PTOInsertSync] Final Result === //\n";
-    func.print(llvm::errs());
-    llvm::errs() << "\n\n";
-    llvm::errs() << "// === [PTOInsertSync] End === //\n";
   }
 };
  

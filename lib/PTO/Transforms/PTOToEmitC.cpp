@@ -53,6 +53,9 @@
 #include <string>
 #include <type_traits>
 #include <utility>
+
+#define DEBUG_TYPE "pto-emitc"
+
 namespace mlir {
 #define GEN_PASS_DEF_EMITPTOMANUAL
 #include "PTO/Transforms/Passes.h.inc"
@@ -341,7 +344,7 @@ public:
     // 3. MemRef 转换 (Debug 重点)
     // ---------------------------------------------------------
     addConversion([this, Ctx](MemRefType type) -> std::optional<Type> {
-      llvm::errs() << "[Debug] Converting MemRef: " << type << "\n";
+      LLVM_DEBUG(llvm::dbgs() << "Converting MemRef: " << type << "\n");
 
       // A. 转换元素类型
       Type elemType = type.getElementType();
@@ -374,7 +377,7 @@ public:
       }
 
       std::string finalTypeStr = qualifier + " " + elemTypeStr;
-      llvm::errs() << "  [Success] -> " << finalTypeStr << "*\n";
+      LLVM_DEBUG(llvm::dbgs() << "  [Success] -> " << finalTypeStr << "*\n");
       
       return emitc::PointerType::get(emitc::OpaqueType::get(Ctx, finalTypeStr));
     });
@@ -10368,7 +10371,7 @@ struct EmitPTOManualPass
   }
 
   void runOnOperation() override {
-    llvm::errs() << "DEBUG: Start PTOToEmitC Pass\n";
+    LLVM_DEBUG(llvm::dbgs() << "DEBUG: Start PTOToEmitC Pass\n");
     MLIRContext *ctx = &getContext();
     ModuleOp mop = getOperation();
 

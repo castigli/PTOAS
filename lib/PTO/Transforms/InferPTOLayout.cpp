@@ -28,6 +28,13 @@
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
 
+namespace mlir {
+namespace pto {
+#define GEN_PASS_DEF_INFERPTOLAYOUT
+#include "PTO/Transforms/Passes.h.inc"
+} // namespace pto
+} // namespace mlir
+
 using namespace mlir;
 using namespace mlir::pto;
 
@@ -524,7 +531,7 @@ static void inferReinterpretCastLayoutAttr(memref::ReinterpretCastOp op,
 }
 
 struct InferPTOLayoutPass
-    : public PassWrapper<InferPTOLayoutPass, OperationPass<func::FuncOp>> {
+    : public mlir::pto::impl::InferPTOLayoutBase<InferPTOLayoutPass> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(InferPTOLayoutPass)
 
   void runOnOperation() override {
