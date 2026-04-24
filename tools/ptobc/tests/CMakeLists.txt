@@ -63,3 +63,10 @@ add_test(NAME ptobc_frontend_pipe_v0_encode
     TESTDATA_DIR=${PTObc_TESTDATA_DIR}
     ${CMAKE_CURRENT_LIST_DIR}/frontend_pipe_v0_encode.sh
 )
+
+add_test(NAME ptobc_tconcat_set_validshape_v0_encode
+  COMMAND ${CMAKE_COMMAND} -E env
+    PTOBC_BIN=$<TARGET_FILE:ptobc>
+    TESTDATA_DIR=${PTObc_TESTDATA_DIR}
+    ${CMAKE_CURRENT_LIST_DIR}/tconcat_set_validshape_v0_encode.sh
+)
