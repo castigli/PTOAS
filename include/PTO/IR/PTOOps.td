@@ -3565,7 +3565,7 @@ def TInsertOp : PTO_TOp<"tinsert", [
 
   let extraClassDeclaration = [{
     // TINSERT runs on different pipes depending on target/path:
-    // - A5 Vec(UB)->Vec(UB): PIPE_V  (ND_VEC path).
+    // - Vec(UB)->Vec(UB): PIPE_V.
     // - A5 Vec(UB)->Mat(L1): PIPE_MTE3 (custom UB->L1 copy path).
     // - Acc->Mat (A2/A3/A5 regular path): PIPE_FIX.
     ::mlir::pto::PIPE getPipe() {
@@ -3609,7 +3609,7 @@ def TInsertOp : PTO_TOp<"tinsert", [
 
       auto sOpt = getASFromType(getSrc().getType());
       auto dOpt = getASFromType(getDst().getType());
-      if (isA5Target() && sOpt.has_value() && dOpt.has_value() &&
+      if (sOpt.has_value() && dOpt.has_value() &&
           sOpt.value() == ::mlir::pto::AddressSpace::VEC &&
           dOpt.value() == ::mlir::pto::AddressSpace::VEC)
         return ::mlir::pto::PIPE::PIPE_V;

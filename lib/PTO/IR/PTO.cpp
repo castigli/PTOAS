@@ -4141,11 +4141,14 @@ mlir::LogicalResult mlir::pto::TExtractOp::verify() {
     (void)srcElem;
     if (!isA2A3ExtractElemType(dstElem))
       return emitOpError("expects A2/A3 textract element type to be i8/f16/bf16/f32");
+    if (srcSpace && dstSpace && *srcSpace == pto::AddressSpace::VEC &&
+        *dstSpace == pto::AddressSpace::VEC)
+      return mlir::success();
     if (!srcSpace || *srcSpace != pto::AddressSpace::MAT)
-      return emitOpError("expects A2/A3 textract src to use loc=mat");
+      return emitOpError("expects A2/A3 textract src to use loc=mat or vec");
     if (!dstSpace || (*dstSpace != pto::AddressSpace::LEFT &&
                       *dstSpace != pto::AddressSpace::RIGHT))
-      return emitOpError("expects A2/A3 textract dst to use loc=left or loc=right");
+      return emitOpError("expects A2/A3 textract dst to use loc=left, loc=right, or loc=vec");
     if (!hasMatExtractSourceLayoutA2A3(srcTb))
       return emitOpError("expects A2/A3 textract src to use a supported mat blayout/slayout combination");
     if (*dstSpace == pto::AddressSpace::LEFT) {
@@ -4221,6 +4224,9 @@ mlir::LogicalResult mlir::pto::TInsertOp::verify() {
       return ft.getWidth() == 8 || ft.isF16() || ft.isBF16() || ft.isF32();
     return false;
   };
+  auto isA2A3VecInsertElemType = [&](Type ty) -> bool {
+    return ty.isInteger(8) || ty.isF16() || ty.isBF16() || ty.isF32();
+  };
   auto verifyCommon = [&]() -> FailureOr<std::tuple<Type, Type, pto::TileBufType,
                                                     pto::TileBufType, Type, Type,
                                                     std::optional<pto::AddressSpace>,
@@ -4253,9 +4259,17 @@ mlir::LogicalResult mlir::pto::TInsertOp::verify() {
       return failure();
     auto [srcTy, dstTy, srcTb, dstTb, srcElem, dstElem, srcSpace, dstSpace] =
         *common;
+    if (srcSpace && dstSpace && *srcSpace == pto::AddressSpace::VEC &&
+        *dstSpace == pto::AddressSpace::VEC) {
+      if (srcElem != dstElem || !isA2A3VecInsertElemType(srcElem))
+        return emitOpError(
+            "expects A2/A3 vec->vec tinsert src/dst to have same supported dtype "
+            "(i8/f16/bf16/f32)");
+      return success();
+    }
     if (!srcSpace || !dstSpace || *srcSpace != pto::AddressSpace::ACC ||
         *dstSpace != pto::AddressSpace::MAT)
-      return emitOpError("expects A2/A3 tinsert src to use loc=acc and dst to use loc=mat");
+      return emitOpError("expects A2/A3 tinsert to use acc->mat or vec->vec");
 
     if (!isColMajorRowMajorNZ(srcTb))
       return emitOpError("expects A2/A3 tinsert src to use blayout=col_major and slayout=row_major");

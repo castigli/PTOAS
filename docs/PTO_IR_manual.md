@@ -6827,7 +6827,8 @@ dst[i + indexRow, j + indexCol] = src[i, j]
 **Hardware Mapping:**
 
 - Lowers to **`TINSERT(dst, src, indexRow, indexCol)`**
-- Uses target data-movement pipeline (MTE1 by default; A5 UB->L1 path uses MTE3)
+- Uses the target data-movement pipeline: `Vec -> Vec` uses `PIPE_V`, A5
+  `Vec -> Mat` uses `PIPE_MTE3`, and regular `Acc -> Mat` uses `PIPE_FIX`.
 
 **Basic Example:**
 
@@ -6862,6 +6863,7 @@ dst[i, j] = src[i + indexRow, j + indexCol]
 
 - **Implementation checks (A2A3)**
   - `dst` element type must match `src` element type and must be one of: `i8`, `f16`, `bf16`, `f32`.
+  - `Vec -> Vec` extraction is supported for matching element types.
   - Source layout/fractal must satisfy one of the target-supported combinations: `slayout=col_major` with `blayout=row_major`, or `slayout=row_major`.
   - Runtime bounds checks:
     - `indexRow + dst.rows <= src.rows`
