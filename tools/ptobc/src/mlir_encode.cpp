@@ -495,6 +495,12 @@ void Encoder::encodeKnownOp(mlir::Operation &op, Buffer &out,
     }
     for (auto result : op.getResults())
       writeULEB128(internType(file, result.getType()), out.bytes);
+  } else if (info.result_type_mode == 0x02) {
+    writeULEB128(op.getNumResults(), out.bytes);
+    for (auto result : op.getResults())
+      writeULEB128(internType(file, result.getType()), out.bytes);
+  } else if (info.result_type_mode != 0x00) {
+    throw std::runtime_error("unknown result_type_mode in v0 schema");
   }
 
   if (op.getNumRegions() != info.num_regions) {

@@ -1,0 +1,49 @@
+// RUN: ptoas --pto-arch=a3 %s 2>&1 | FileCheck %s --check-prefix=A3
+
+module {
+  func.func @cube_kernel(%gm_slot_buffer: !pto.ptr<f32>)
+      attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    %v2c_local = pto.reserve_buffer {
+      name = "v2c_fifo",
+      size = 4096,
+      location = #pto.address_space<mat>,
+      auto = true
+    } -> i32
+    pto.aic_initialize_pipe {id = 0, dir_mask = 2, slot_size = 1024, local_slot_num = 1}
+      (gm_slot_buffer = %gm_slot_buffer : !pto.ptr<f32>,
+       c2v_consumer_buf = %c0_i32 : i32,
+       v2c_consumer_buf = %v2c_local : i32)
+
+    %recv_tile = pto.tpop_from_aiv {id = 0, split = 0}
+      -> !pto.tile_buf<loc=mat, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=col_major, slayout=row_major, fractal=512, pad=0>
+    pto.tfree_from_aiv {id = 0, split = 0}
+    return
+  }
+
+  func.func @vector_kernel(%gm_slot_buffer: !pto.ptr<f32>)
+      attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0_i32 = arith.constant 0 : i32
+    %v2c_import = pto.import_reserved_buffer {
+      name = "v2c_fifo",
+      peer_func = @cube_kernel
+    } -> i32
+    pto.aiv_initialize_pipe {id = 0, dir_mask = 2, slot_size = 1024, local_slot_num = 1}
+      (gm_slot_buffer = %gm_slot_buffer : !pto.ptr<f32>,
+       c2v_consumer_buf = %c0_i32 : i32,
+       v2c_consumer_buf = %v2c_import : i32)
+
+    %vec_tile = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tpush_to_aic(%vec_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>) {id = 0, split = 0}
+    return
+  }
+}
+
+// A3-LABEL: AICORE void cube_kernel(__gm__ float*
+// A3: auto {{v[0-9]+}} = TPipe<0, Direction::DIR_V2C, 1024, 8, 1, true>(
+// A3: TPOP<TPipe<0, Direction::DIR_V2C, 1024, 8, 1, true>
+// A3: TFREE<TPipe<0, Direction::DIR_V2C, 1024, 8, 1, true>, TileSplitAxis::TILE_NO_SPLIT>(
+
+// A3-LABEL: AICORE void vector_kernel(__gm__ float*
+// A3: auto {{v[0-9]+}} = TPipe<0, Direction::DIR_V2C, 1024, 8, 1, true>(
+// A3: TPUSH<TPipe<0, Direction::DIR_V2C, 1024, 8, 1, true>

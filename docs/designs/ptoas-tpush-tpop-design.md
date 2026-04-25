@@ -47,7 +47,7 @@
 #### 语法
 
 ```mlir
-pto.aic_initialize_pipe {id = 0, dir_mask = 3, slot_size = 1024}
+pto.aic_initialize_pipe {id = 0, dir_mask = 3, slot_size = 1024, local_slot_num = 1}
   (gm_slot_buffer = %gm_buf : !pto.ptr<f32>,
    c2v_consumer_buf = %c2v_consumer_buf : i32,
    v2c_consumer_buf = %v2c_consumer_buf : i32)
@@ -60,6 +60,7 @@ pto.aic_initialize_pipe {id = 0, dir_mask = 3, slot_size = 1024}
 | `ID` | 编译期整数常量 | 前端逻辑 pipe 标识，要求 `>= 0` |
 | `DIR_MASK` | 编译期整数常量 | `1`、`2` 或 `3` |
 | `SLOT_SIZE` | 编译期整数常量 | 单 slot 字节数，定义为切分前完整 tile 字节数 |
+| `LOCAL_SLOT_NUM` | 编译期整数常量或空值 | 可选，仅影响 A2/A3 lowering 后 consumer 侧 local slot buffer 槽数 |
 | `GM_SLOT_BUFFER` | `!pto.ptr<T>` 或空值 | A2/A3 路径使用的 GM 指针，A5 路径为空 |
 | `C2V_CONSUMER_BUF` | `i32` | C2V 方向 consumer 的 local slot buffer 基址 |
 | `V2C_CONSUMER_BUF` | `i32` | V2C 方向 consumer 的 local slot buffer 基址 |
@@ -73,7 +74,7 @@ pto.aic_initialize_pipe {id = 0, dir_mask = 3, slot_size = 1024}
 #### 语法
 
 ```mlir
-pto.aiv_initialize_pipe {id = 0, dir_mask = 3, slot_size = 1024}
+pto.aiv_initialize_pipe {id = 0, dir_mask = 3, slot_size = 1024, local_slot_num = 1}
   (gm_slot_buffer = %gm_buf : !pto.ptr<f32>,
    c2v_consumer_buf = %c2v_consumer_buf : i32,
    v2c_consumer_buf = %v2c_consumer_buf : i32)
@@ -350,7 +351,8 @@ DIR_BOTH 示例：
 #### 可选属性
 
 - `local_slot_num`
-  - 仅 `initialize_l2g2l_pipe` 承载
+  - 可直接由 `initialize_l2g2l_pipe` 承载，也可由 legacy 前端
+    `pto.aic_initialize_pipe` / `pto.aiv_initialize_pipe` 提供并在 A2/A3 lowering 时转发
   - 表示 GM 路径下 consumer 侧 local slot buffer 的槽数
   - 仅在通过 GM 传递时对底层 `TPipe` 模板参数有意义，不改变 GM FIFO 的 `slot_num`
   - 缺省值等于该内部 pipe 的 `slot_num`
@@ -447,6 +449,8 @@ pto.tfree(%pipe) { split = 0 }
 #### A2/A3
 
 - `pto.aic_initialize_pipe` 和 `pto.aiv_initialize_pipe` lower 为 `pto.initialize_l2g2l_pipe`
+- 若前端提供了 `local_slot_num`，则直接转发到 lowered
+  `pto.initialize_l2g2l_pipe`
 - 若前端未提供更具体信息，lowering 默认补上 `local_slot_num = slot_num`
 
 #### A5
@@ -457,14 +461,16 @@ pto.tfree(%pipe) { split = 0 }
 
 - 只生成一条内部 pipe
 - `slot_num = 8`
-- 对 `initialize_l2g2l_pipe`，`local_slot_num = 8`
+- 对 `initialize_l2g2l_pipe`，默认 `local_slot_num = 8`
+- 若前端显式提供 `local_slot_num`，则使用显式值
 
 ### 6.3 `DIR_MASK=3`
 
 前端一个 init op 生成**单条** DIR_BOTH 内部 pipe：
 
 - `%pipe`：`dir_mask = 3`，`slot_num = 4`
-- 若 lowering 为 `initialize_l2g2l_pipe`，`local_slot_num = 4`
+- 若 lowering 为 `initialize_l2g2l_pipe`，默认 `local_slot_num = 4`
+- 若前端显式提供 `local_slot_num`，则使用显式值
 
 地址选择规则：
 
@@ -756,7 +762,9 @@ pass 在模块级按两步执行：
 - `slot_size > 0`
 - `slot_num` 只允许 `8` 或 `4`
 - `DIR_MASK=1/2` 时，`slot_num` 必须与单向/双向 lowering 规则一致
-- `local_slot_num` 若出现，只允许出现在 `pto.initialize_l2g2l_pipe` 上，且必须大于 `0` 且不大于 `slot_num`
+- `local_slot_num` 若出现，可出现在 `pto.initialize_l2g2l_pipe` 或 legacy 前端
+  `pto.aic_initialize_pipe` / `pto.aiv_initialize_pipe` 上，且必须大于 `0`
+  且不大于其对应 lowering 规则下的 `slot_num`
 - `flag_base` 若出现，必须满足基本合法性；是否已填写以及具体分配值由 flag 分配保证
 - `pto.initialize_l2g2l_pipe` 必须提供 `gm_addr` 和 `local_addr`
 - `pto.initialize_l2l_pipe` 必须提供 `local_addr`
@@ -805,7 +813,7 @@ EmitC 将以下内部 init op 映射到底层 `TPipe`：
 - `dir_mask`
 - `slot_size`
 - `slot_num`
-- `local_slot_num`（仅 `initialize_l2g2l_pipe`）
+- `local_slot_num`
 - `flag_base`
 - `gm_addr`（仅 `initialize_l2g2l_pipe`）
 - `local_addr`

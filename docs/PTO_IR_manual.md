@@ -6419,6 +6419,61 @@ pto.tconcat ins(%a, %b : !pto.tile_buf<...>, !pto.tile_buf<...>)
 
 ---
 
+##### `pto.tconcatidx` - Indexed Tile Concatenation
+
+**Summary:** Concatenates two source tiles along the column dimension with per-row index control, where two additional index tiles specify the number of columns to copy from each source on a per-row basis.
+
+**Semantics:**
+
+For each row \(i\):
+- Read `idx0_num = src0Idx[i, 0]` and `idx1_num = src1Idx[i, 0]` as element counts
+- Copy the first `min(idx0_num, src0_valid_col, dst_valid_col)` columns from `src0` to `dst`
+- Copy the first `min(idx1_num, src1_valid_col, dst_valid_col - copied_from_src0)` columns from `src1` to `dst`
+
+**Arguments:**
+
+| Name | Type | Description |
+|------|------|-------------|
+| `src0` | `pto.tile_buf` | First source tile |
+| `src1` | `pto.tile_buf` | Second source tile |
+| `src0Idx` | `pto.tile_buf` | Per-row index for `src0` (column count to copy) |
+| `src1Idx` | `pto.tile_buf` | Per-row index for `src1` (column count to copy) |
+| `dst` | `pto.tile_buf` | Destination tile |
+
+**Results:** None. Writes into `dst` via DPS pattern.
+
+**Assembly Format:**
+
+```
+pto.tconcatidx ins(<src0>, <src1>, <src0Idx>, <src1Idx> :
+                   <src0_type>, <src1_type>, <src0Idx_type>, <src1Idx_type>)
+               outs(<dst> : <dst_type>)
+```
+
+**Constraints & Verification:**
+
+- `dst`, `src0`, `src1` must have the same data type, and must be one of: `i8/i16/i32/f16/f32/bf16`
+- `src0Idx`, `src1Idx` must have the same index type, and must be one of: `i8/i16/i32`
+- All tiles must use `loc=vec` and row-major layout
+- `validRow(src0) == validRow(src1) == validRow(dst)`
+- `validRow(src0Idx) == validRow(src1Idx) == validRow(dst)`
+- Index tile must have `valid_col >= 1`
+
+**Hardware Mapping:**
+
+- Executes on the **Vector pipeline** (`PIPE_V`)
+- Operates on data in the **VEC (UB)** memory space
+
+**Basic Example:**
+
+```mlir
+pto.tconcatidx ins(%src0, %src1, %idx0, %idx1 :
+  !pto.tile_buf<...>, !pto.tile_buf<...>, !pto.tile_buf<...>, !pto.tile_buf<...>)
+  outs(%dst : !pto.tile_buf<...>)
+```
+
+---
+
 ##### `pto.tgather` - Gather/Select Elements
 
 **Summary:** Gathers elements from a source tile using one of three PTO-ISA-compatible forms:
@@ -6827,7 +6882,8 @@ dst[i + indexRow, j + indexCol] = src[i, j]
 **Hardware Mapping:**
 
 - Lowers to **`TINSERT(dst, src, indexRow, indexCol)`**
-- Uses target data-movement pipeline (MTE1 by default; A5 UB->L1 path uses MTE3)
+- Uses the target data-movement pipeline: `Vec -> Vec` uses `PIPE_V`, A5
+  `Vec -> Mat` uses `PIPE_MTE3`, and regular `Acc -> Mat` uses `PIPE_FIX`.
 
 **Basic Example:**
 
@@ -6862,6 +6918,7 @@ dst[i, j] = src[i + indexRow, j + indexCol]
 
 - **Implementation checks (A2A3)**
   - `dst` element type must match `src` element type and must be one of: `i8`, `f16`, `bf16`, `f32`.
+  - `Vec -> Vec` extraction is supported for matching element types.
   - Source layout/fractal must satisfy one of the target-supported combinations: `slayout=col_major` with `blayout=row_major`, or `slayout=row_major`.
   - Runtime bounds checks:
     - `indexRow + dst.rows <= src.rows`
@@ -7844,6 +7901,10 @@ generated IR. The detailed design document is:
   `pto.aic_initialize_pipe` / `pto.aiv_initialize_pipe` with the matching
   `pto.tpush_*` / `pto.tpop_*` / `pto.tfree_*` ops in the same function.
 - `slot_size` is expressed in bytes and uses the pre-split logical tile size.
+- `local_slot_num` is an optional compile-time integer attribute on
+  `pto.aic_initialize_pipe` / `pto.aiv_initialize_pipe`.
+  On A2/A3 it overrides the default consumer-side local FIFO slot count used
+  when lowering to `pto.initialize_l2g2l_pipe`.
 - `nosplit` is an optional compile-time boolean attribute on
   `pto.aic_initialize_pipe` / `pto.aiv_initialize_pipe`.
 - `split` is a compile-time attribute, not a runtime SSA operand.
@@ -7969,7 +8030,7 @@ function's reserved buffer declaration.
 
 ```mlir
 // A2/A3 (with GM slot buffer):
-pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 1024}
+pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 1024, local_slot_num = 1}
   (gm_slot_buffer = %gm_buf : !pto.ptr<f32>,
    c2v_consumer_buf = %c2v_import : i32,
    v2c_consumer_buf = %c0_i32 : i32)
@@ -7986,6 +8047,8 @@ pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 1024, nosplit = true}
   the same function
 - `dir_mask`: communication direction encoding
 - `slot_size`: logical slot size in bytes
+- `local_slot_num`: optional A2/A3-only local FIFO slot count override for the
+  lowered `pto.initialize_l2g2l_pipe`
 - `nosplit`: optional compile-time boolean controlling no-split pipe mode
 - `gm_slot_buffer`: optional GM pointer (`!pto.ptr<T>`), required on A2/A3, omitted on A5
 - `c2v_consumer_buf`: C2V consumer local base address
@@ -7998,6 +8061,9 @@ pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 1024, nosplit = true}
 - Must appear in Cube kernels
 - Multiple `pto.aic_initialize_pipe` ops are allowed in one Cube function, but
   `id` must be unique among frontend initialize ops in that function
+- If `local_slot_num` is present, it must be greater than `0` and no greater
+  than the legacy slot count implied by `dir_mask`
+  (`8` for `dir_mask = 1/2`, `4` for `dir_mask = 3`)
 - The lowered pipes for one function must fit within 16 hardware flag ids in
   total
 - If `nosplit = true`, all frontend data-transfer ops bound to the same logical
@@ -8013,7 +8079,7 @@ pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 1024, nosplit = true}
 
 ```mlir
 // A2/A3 (with GM slot buffer):
-pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 1024}
+pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 1024, local_slot_num = 1}
   (gm_slot_buffer = %gm_buf : !pto.ptr<f32>,
    c2v_consumer_buf = %c2v_local : i32,
    v2c_consumer_buf = %c0_i32 : i32)

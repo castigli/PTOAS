@@ -1367,6 +1367,7 @@ def AicInitializePipeOp : PTO_Op<"aic_initialize_pipe"> {
       DefaultValuedOptionalAttr<I32Attr, "0">:$id,
       I8Attr:$dir_mask,
       I32Attr:$slot_size,
+      OptionalAttr<I32Attr>:$local_slot_num,
       OptionalAttr<BoolAttr>:$nosplit,
       Optional<PtrType>:$gm_slot_buffer,
       I32:$c2v_consumer_buf,
@@ -1375,20 +1376,7 @@ def AicInitializePipeOp : PTO_Op<"aic_initialize_pipe"> {
 
   let results = (outs);
   let hasVerifier = 1;
-
-  let assemblyFormat = [{
-    `{` (`id` `=` $id^ `,`)?
-        `dir_mask` `=` $dir_mask `,`
-        `slot_size` `=` $slot_size
-        (`,` `nosplit` `=` $nosplit^)?
-        `}`
-    `(`
-      (`gm_slot_buffer` `=` $gm_slot_buffer^ `:` type($gm_slot_buffer) `,`)?
-      `c2v_consumer_buf` `=` $c2v_consumer_buf `:` type($c2v_consumer_buf) `,`
-      `v2c_consumer_buf` `=` $v2c_consumer_buf `:` type($v2c_consumer_buf)
-    `)`
-    attr-dict
-  }];
+  let hasCustomAssemblyFormat = 1;
 }
 
 def AivInitializePipeOp : PTO_Op<"aiv_initialize_pipe"> {
@@ -1398,6 +1386,7 @@ def AivInitializePipeOp : PTO_Op<"aiv_initialize_pipe"> {
       DefaultValuedOptionalAttr<I32Attr, "0">:$id,
       I8Attr:$dir_mask,
       I32Attr:$slot_size,
+      OptionalAttr<I32Attr>:$local_slot_num,
       OptionalAttr<BoolAttr>:$nosplit,
       Optional<PtrType>:$gm_slot_buffer,
       I32:$c2v_consumer_buf,
@@ -1406,20 +1395,7 @@ def AivInitializePipeOp : PTO_Op<"aiv_initialize_pipe"> {
 
   let results = (outs);
   let hasVerifier = 1;
-
-  let assemblyFormat = [{
-    `{` (`id` `=` $id^ `,`)?
-        `dir_mask` `=` $dir_mask `,`
-        `slot_size` `=` $slot_size
-        (`,` `nosplit` `=` $nosplit^)?
-        `}`
-    `(`
-      (`gm_slot_buffer` `=` $gm_slot_buffer^ `:` type($gm_slot_buffer) `,`)?
-      `c2v_consumer_buf` `=` $c2v_consumer_buf `:` type($c2v_consumer_buf) `,`
-      `v2c_consumer_buf` `=` $v2c_consumer_buf `:` type($v2c_consumer_buf)
-    `)`
-    attr-dict
-  }];
+  let hasCustomAssemblyFormat = 1;
 }
 
 def TPushToAivOp : PTO_TOp<"tpush_to_aiv"> {
@@ -2641,6 +2617,49 @@ def TConcatOp: PTO_TOp<"tconcat", [
   }];
 }
 
+def TConcatidxOp: PTO_TOp<"tconcatidx", [
+  PTO_DpsInitOpInterface,
+  OpPipeInterface,
+  DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
+]> {
+  let summary = "TCONCAT (indexed): Concatenate two tiles along the column dimension with per-row index control.";
+  let description = [{
+    Indexed form of tconcat. Takes two additional index tiles (src0Idx, src1Idx)
+    that specify the number of columns to copy from each source on a per-row basis.
+
+    Semantics (per row):
+      idx0_num = src0Idx[row, 0]
+      idx1_num = src1Idx[row, 0]
+      copy from src0: min(idx0_num, src0_valid_col, dst_valid_col) columns
+      copy from src1: min(idx1_num, src1_valid_col, dst_valid_col - copied_from_src0) columns
+  }];
+
+  let arguments = (ins
+    PTODpsType:$src0,
+    PTODpsType:$src1,
+    PTODpsType:$src0Idx,
+    PTODpsType:$src1Idx,
+    PTODpsType:$dst
+  );
+
+  let results = (outs);
+
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `ins` `(` $src0 `,` $src1 `,` $src0Idx `,` $src1Idx `:`
+      qualified(type($src0)) `,` qualified(type($src1)) `,`
+      qualified(type($src0Idx)) `,` qualified(type($src1Idx)) `)`
+    `outs` `(` $dst `:` qualified(type($dst) ) `)`
+    attr-dict
+  }];
+
+  let extraClassDeclaration = [{
+    ::mlir::pto::PIPE getPipe() { return ::mlir::pto::PIPE::PIPE_V; }
+    ::mlir::MutableOperandRange getDpsInitsMutable() { return getDstMutable(); }
+  }];
+}
+
 def TAndSOp : PTO_TOp<"tands", [
   PTO_DpsInitOpInterface,
   OpPipeInterface,
@@ -3565,7 +3584,7 @@ def TInsertOp : PTO_TOp<"tinsert", [
 
   let extraClassDeclaration = [{
     // TINSERT runs on different pipes depending on target/path:
-    // - A5 Vec(UB)->Vec(UB): PIPE_V  (ND_VEC path).
+    // - Vec(UB)->Vec(UB): PIPE_V.
     // - A5 Vec(UB)->Mat(L1): PIPE_MTE3 (custom UB->L1 copy path).
     // - Acc->Mat (A2/A3/A5 regular path): PIPE_FIX.
     ::mlir::pto::PIPE getPipe() {
@@ -3609,7 +3628,7 @@ def TInsertOp : PTO_TOp<"tinsert", [
 
       auto sOpt = getASFromType(getSrc().getType());
       auto dOpt = getASFromType(getDst().getType());
-      if (isA5Target() && sOpt.has_value() && dOpt.has_value() &&
+      if (sOpt.has_value() && dOpt.has_value() &&
           sOpt.value() == ::mlir::pto::AddressSpace::VEC &&
           dOpt.value() == ::mlir::pto::AddressSpace::VEC)
         return ::mlir::pto::PIPE::PIPE_V;

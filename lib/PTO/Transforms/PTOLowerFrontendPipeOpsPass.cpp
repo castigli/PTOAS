@@ -70,7 +70,9 @@ static FailureOr<Value> createFrontendPipe(InitOpT initOp, IRRewriter &rewriter,
   if (failed(requireFrontendGmSlotBuffer(initOp)))
     return failure();
 
-  auto localSlotNumAttr = rewriter.getI32IntegerAttr(slotNum);
+  IntegerAttr localSlotNumAttr = initOp.getLocalSlotNumAttr();
+  if (!localSlotNumAttr)
+    localSlotNumAttr = rewriter.getI32IntegerAttr(slotNum);
   auto pipe = rewriter.create<InitializeL2G2LPipeOp>(
       loc, pipeTy, dirAttr, slotSizeAttr, slotNumAttr, localSlotNumAttr,
       IntegerAttr{}, noSplitAttr, initOp.getGmSlotBuffer(), localAddr,

@@ -559,18 +559,31 @@ static mlir::Operation *buildKnownOpFromReader(BuildCtx &bc, Reader &r,
   auto operandIds = readKnownOperandIds(bc, r, opcode, variant, *info, imms);
   auto operands = materializeOperands(bc, operandIds);
 
+  uint64_t numResults = info->num_results;
   llvm::SmallVector<mlir::Type, 4> resultTypes;
-  resultTypes.reserve(info->num_results);
-  if (info->result_type_mode == 0x01) {
-    for (unsigned i = 0; i < info->num_results; ++i)
-      resultTypes.push_back(getType(bc, r.readULEB()));
-  } else {
-    for (unsigned i = 0; i < info->num_results; ++i)
+  switch (info->result_type_mode) {
+  case 0x00:
+    resultTypes.reserve(numResults);
+    for (uint64_t i = 0; i < numResults; ++i)
       resultTypes.push_back(mlir::NoneType::get(bc.ctx));
+    break;
+  case 0x01:
+    resultTypes.reserve(numResults);
+    for (uint64_t i = 0; i < numResults; ++i)
+      resultTypes.push_back(getType(bc, r.readULEB()));
+    break;
+  case 0x02:
+    numResults = r.readULEB();
+    resultTypes.reserve(numResults);
+    for (uint64_t i = 0; i < numResults; ++i)
+      resultTypes.push_back(getType(bc, r.readULEB()));
+    break;
+  default:
+    throw std::runtime_error("unknown result_type_mode");
   }
 
   const size_t resStart = bc.values.size();
-  for (unsigned i = 0; i < info->num_results; ++i)
+  for (uint64_t i = 0; i < numResults; ++i)
     bc.values.push_back(mlir::Value());
 
   const char *opNameC = ptobc::v0::fullNameFromOpcodeVariant(opcode, variant);
@@ -588,7 +601,7 @@ static mlir::Operation *buildKnownOpFromReader(BuildCtx &bc, Reader &r,
   mlir::Operation *op = mlir::Operation::create(state);
   block.getOperations().push_back(op);
   registerDecodedOp(bc, opId, op);
-  assignDecodedResults(bc, resStart, op, info->num_results);
+  assignDecodedResults(bc, resStart, op, numResults);
   for (unsigned i = 0; i < info->num_regions; ++i)
     buildRegionInto(bc, r, op->getRegion(i));
   return op;

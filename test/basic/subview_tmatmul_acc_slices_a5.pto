@@ -1,0 +1,28 @@
+// RUN: ptoas --pto-arch=a5 %s 2>&1 | FileCheck %s
+
+module {
+  func.func @subview_tmatmul_acc_slices_a5()
+      attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0 = arith.constant 0 : index
+    %c128 = arith.constant 128 : index
+
+    %q_left = pto.alloc_tile : !pto.tile_buf<loc=left, dtype=f32, rows=32, cols=64, v_row=32, v_col=64, blayout=col_major, slayout=row_major, fractal=512, pad=0>
+    %k_right_lo = pto.alloc_tile : !pto.tile_buf<loc=right, dtype=f32, rows=64, cols=128, v_row=64, v_col=128, blayout=row_major, slayout=col_major, fractal=512, pad=0>
+    %k_right_hi = pto.alloc_tile : !pto.tile_buf<loc=right, dtype=f32, rows=64, cols=128, v_row=64, v_col=128, blayout=row_major, slayout=col_major, fractal=512, pad=0>
+    %qk_acc = pto.alloc_tile : !pto.tile_buf<loc=acc, dtype=f32, rows=32, cols=256, v_row=32, v_col=256, blayout=col_major, slayout=row_major, fractal=1024, pad=0>
+
+    %qk_lo = pto.subview %qk_acc[%c0, %c0] sizes [32, 128] :
+      !pto.tile_buf<loc=acc, dtype=f32, rows=32, cols=256, v_row=32, v_col=256, blayout=col_major, slayout=row_major, fractal=1024, pad=0>
+      -> !pto.tile_buf<loc=acc, dtype=f32, rows=32, cols=128, v_row=32, v_col=128, blayout=col_major, slayout=row_major, fractal=1024, pad=0>
+    %qk_hi = pto.subview %qk_acc[%c0, %c128] sizes [32, 128] :
+      !pto.tile_buf<loc=acc, dtype=f32, rows=32, cols=256, v_row=32, v_col=256, blayout=col_major, slayout=row_major, fractal=1024, pad=0>
+      -> !pto.tile_buf<loc=acc, dtype=f32, rows=32, cols=128, v_row=32, v_col=128, blayout=col_major, slayout=row_major, fractal=1024, pad=0>
+
+    pto.tmatmul ins(%q_left, %k_right_lo : !pto.tile_buf<loc=left, dtype=f32, rows=32, cols=64, v_row=32, v_col=64, blayout=col_major, slayout=row_major, fractal=512, pad=0>, !pto.tile_buf<loc=right, dtype=f32, rows=64, cols=128, v_row=64, v_col=128, blayout=row_major, slayout=col_major, fractal=512, pad=0>) outs(%qk_lo : !pto.tile_buf<loc=acc, dtype=f32, rows=32, cols=128, v_row=32, v_col=128, blayout=col_major, slayout=row_major, fractal=1024, pad=0>)
+    pto.tmatmul ins(%q_left, %k_right_hi : !pto.tile_buf<loc=left, dtype=f32, rows=32, cols=64, v_row=32, v_col=64, blayout=col_major, slayout=row_major, fractal=512, pad=0>, !pto.tile_buf<loc=right, dtype=f32, rows=64, cols=128, v_row=64, v_col=128, blayout=row_major, slayout=col_major, fractal=512, pad=0>) outs(%qk_hi : !pto.tile_buf<loc=acc, dtype=f32, rows=32, cols=128, v_row=32, v_col=128, blayout=col_major, slayout=row_major, fractal=1024, pad=0>)
+    return
+  }
+}
+
+// CHECK-COUNT-2: Tile<TileType::Acc, float, 32, 128, BLayout::ColMajor, 32, 128, SLayout::RowMajor, 1024, PadValue::Null, CompactMode::Null>
+// CHECK-COUNT-2: TMATMUL(

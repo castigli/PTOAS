@@ -984,30 +984,6 @@ static LogicalResult lowerSubViewOps(func::FuncOp func, MLIRContext *ctx) {
         return failure();
       }
 
-      int32_t bl = 0;
-      (void)readBLayoutI32(configAttr.getBLayout(), bl);
-      auto srcShape = srcMrTy.getShape();
-      if (srcShape.size() == 2) {
-        if (bl == 0) {
-          if (staticSizes[1] != srcShape[1]) {
-            op.emitError("boxed RowMajor subview must keep full cols");
-            return failure();
-          }
-          if (!off1Const || off1 != 0) {
-            op.emitError("boxed RowMajor subview requires static col offset = 0");
-            return failure();
-          }
-        } else {
-          if (staticSizes[0] != srcShape[0]) {
-            op.emitError("boxed ColMajor subview must keep full rows");
-            return failure();
-          }
-          if (!off0Const || off0 != 0) {
-            op.emitError("boxed ColMajor subview requires static row offset = 0");
-            return failure();
-          }
-        }
-      }
     }
 
     SmallVector<int64_t> srcStrides;
@@ -2033,6 +2009,40 @@ struct PTOViewToMemrefPass
             TypeRange{},
             src0,
             src1,
+            dst);
+      }
+
+      SmallVector<mlir::pto::TConcatidxOp, 8> concatIdxs;
+      func.walk([&](mlir::pto::TConcatidxOp op) { concatIdxs.push_back(op); });
+
+      IRRewriter rewriter(ctx);
+      for (auto op : concatIdxs) {
+        rewriter.setInsertionPoint(op);
+
+        Value src0 = op.getSrc0();
+        Value src1 = op.getSrc1();
+        Value src0Idx = op.getSrc0Idx();
+        Value src1Idx = op.getSrc1Idx();
+        Value dst = op.getDst();
+
+        auto src0Ty = dyn_cast<MemRefType>(src0.getType());
+        auto src1Ty = dyn_cast<MemRefType>(src1.getType());
+        auto src0IdxTy = dyn_cast<MemRefType>(src0Idx.getType());
+        auto src1IdxTy = dyn_cast<MemRefType>(src1Idx.getType());
+        auto dstTy = dyn_cast<MemRefType>(dst.getType());
+        if (!src0Ty || !src1Ty || !src0IdxTy || !src1IdxTy || !dstTy) {
+          op.emitError("ins/outs are not memref yet");
+          signalPassFailure();
+          return;
+        }
+
+        rewriter.replaceOpWithNewOp<pto::TConcatidxOp>(
+            op,
+            TypeRange{},
+            src0,
+            src1,
+            src0Idx,
+            src1Idx,
             dst);
       }
 

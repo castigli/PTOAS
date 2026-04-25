@@ -6065,6 +6065,26 @@ struct PTOConcatToEmitC : public OpConversionPattern<pto::TConcatOp> {
     return success();
   }
 };
+struct PTOConcatidxToEmitC : public OpConversionPattern<pto::TConcatidxOp> {
+  using OpConversionPattern<pto::TConcatidxOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(pto::TConcatidxOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Value src0 = peelUnrealized(adaptor.getSrc0());
+    Value src1 = peelUnrealized(adaptor.getSrc1());
+    Value src0Idx = peelUnrealized(adaptor.getSrc0Idx());
+    Value src1Idx = peelUnrealized(adaptor.getSrc1Idx());
+    Value dst  = peelUnrealized(adaptor.getDst());
+
+    rewriter.create<emitc::CallOpaqueOp>(
+        op.getLoc(), TypeRange{}, "TCONCAT",
+        ArrayAttr{}, ArrayAttr{},
+        ValueRange{dst, src0, src1, src0Idx, src1Idx});
+
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
 struct PTOAndSToEmitC : public OpConversionPattern<pto::TAndSOp> {
   using OpConversionPattern<pto::TAndSOp>::OpConversionPattern;
 
@@ -9104,6 +9124,88 @@ struct PTOBindTileToEmitC : public OpConversionPattern<pto::BindTileOp> {
     return false;
   }
 
+  static bool getTilePointerStrides(pto::TileBufConfigAttr configAttr,
+                                    Type elemTy, int64_t rows, int64_t cols,
+                                    int64_t &rowStride,
+                                    int64_t &colStride) {
+    if (rows == ShapedType::kDynamic || cols == ShapedType::kDynamic)
+      return false;
+
+    int32_t blVal = 0;
+    if (auto blAttr = dyn_cast<BLayoutAttr>(configAttr.getBLayout()))
+      blVal = static_cast<int32_t>(blAttr.getValue());
+    else if (auto intAttr = dyn_cast<IntegerAttr>(configAttr.getBLayout()))
+      blVal = static_cast<int32_t>(intAttr.getInt());
+
+    int32_t slVal = 0;
+    if (auto slAttr = dyn_cast<SLayoutAttr>(configAttr.getSLayout()))
+      slVal = static_cast<int32_t>(slAttr.getValue());
+    else if (auto intAttr = dyn_cast<IntegerAttr>(configAttr.getSLayout()))
+      slVal = static_cast<int32_t>(intAttr.getInt());
+
+    bool boxed = slVal != 0;
+    int64_t innerRows = 1;
+    int64_t innerCols = 1;
+    if (boxed) {
+      int32_t fractal = 512;
+      if (auto frAttr = dyn_cast<IntegerAttr>(configAttr.getSFractalSize()))
+        fractal = static_cast<int32_t>(frAttr.getInt());
+
+      unsigned elemBytes = pto::getPTOStorageElemByteSize(elemTy);
+      if (elemBytes == 0)
+        return false;
+
+      switch (fractal) {
+      case 1024:
+        innerRows = 16;
+        innerCols = 16;
+        break;
+      case 32:
+        innerRows = 16;
+        innerCols = 2;
+        break;
+      case 512:
+        if (slVal == 1) {
+          innerRows = 16;
+          innerCols = 32 / elemBytes;
+        } else if (slVal == 2) {
+          innerRows = 32 / elemBytes;
+          innerCols = 16;
+        } else {
+          return false;
+        }
+        break;
+      default:
+        return false;
+      }
+      if (innerRows <= 0 || innerCols <= 0)
+        return false;
+    }
+
+    if (!boxed) {
+      if (blVal == 1) {
+        rowStride = 1;
+        colStride = rows;
+      } else {
+        rowStride = cols;
+        colStride = 1;
+      }
+      return true;
+    }
+
+    if (blVal == 1) {
+      if (slVal != 1)
+        return false;
+      rowStride = innerCols;
+      colStride = rows;
+      return true;
+    }
+
+    rowStride = cols;
+    colStride = innerRows;
+    return true;
+  }
+
   LogicalResult matchAndRewrite(pto::BindTileOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     auto loc = op.getLoc();
@@ -9185,6 +9287,37 @@ struct PTOBindTileToEmitC : public OpConversionPattern<pto::BindTileOp> {
           blTok = "BLayout::ColMajor";
       }
       pto::BLayout blayout = getTileBufBLayoutValue(configAttr);
+
+      if (isSubView) {
+        auto subMrTy = dyn_cast<MemRefType>(op.getSource().getType());
+        auto subViewOp = op.getSource().getDefiningOp<memref::SubViewOp>();
+        if (subMrTy && subMrTy.getRank() >= 2 && subViewOp) {
+          int64_t subRows = subMrTy.getDimSize(0);
+          int64_t subCols = subMrTy.getDimSize(1);
+          SmallVector<int64_t> inheritedStrides;
+          int64_t inheritedOffset = ShapedType::kDynamic;
+
+          if (!pto::isPTOFloat4PackedType(elemTy) &&
+              subRows != ShapedType::kDynamic &&
+              subCols != ShapedType::kDynamic &&
+              succeeded(getStridesAndOffset(subMrTy, inheritedStrides,
+                                            inheritedOffset)) &&
+              inheritedStrides.size() >= 2) {
+            int64_t childRowStride = 0;
+            int64_t childColStride = 0;
+            bool sameStrides = getTilePointerStrides(
+                configAttr, elemTy, subRows, subCols, childRowStride,
+                childColStride);
+            sameStrides = sameStrides &&
+                          inheritedStrides[0] == childRowStride &&
+                          inheritedStrides[1] == childColStride;
+            if (sameStrides) {
+              rows = subRows;
+              cols = subCols;
+            }
+          }
+        }
+      }
 
       std::string slTok = "SLayout::NoneBox";
       if (auto slAttr = dyn_cast<SLayoutAttr>(configAttr.getSLayout())) {
@@ -10264,7 +10397,7 @@ static void populatePTOToEmitCPatterns(RewritePatternSet &patterns,
   patterns.add<PTOTDivSToEmitC>(typeConverter, ctx);
   patterns.add<PTOFModToEmitC>(typeConverter, ctx);
   patterns.add<PTORemToEmitC>(typeConverter, ctx);
-  patterns.add<PTOConcatToEmitC>(typeConverter, ctx);
+  patterns.add<PTOConcatToEmitC, PTOConcatidxToEmitC>(typeConverter, ctx);
   patterns.add<PTORecipToEmitC>(typeConverter, ctx);
   patterns.add<PTOMulsToEmitC>(typeConverter, ctx);
   patterns.add<PTOExpToEmitC>(typeConverter, ctx);

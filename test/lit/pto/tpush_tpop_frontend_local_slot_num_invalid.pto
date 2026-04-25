@@ -1,0 +1,15 @@
+// RUN: not ptoas --pto-arch=a3 %s 2>&1 | FileCheck %s
+
+module {
+  func.func @cube_kernel(%gm_slot_buffer: !pto.ptr<f32>)
+      attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    pto.aic_initialize_pipe {id = 0, dir_mask = 3, slot_size = 1024, local_slot_num = 5}
+      (gm_slot_buffer = %gm_slot_buffer : !pto.ptr<f32>,
+       c2v_consumer_buf = %c0_i32 : i32,
+       v2c_consumer_buf = %c0_i32 : i32)
+    return
+  }
+}
+
+// CHECK: error: 'pto.aic_initialize_pipe' op expects 'local_slot_num' to be less than or equal to 4 for dir_mask = 3

@@ -20,5 +20,5 @@ module {
   }
 }
 
-// CHECK: Tile<TileType::Vec, float, 16, 16, BLayout::ColMajor, 16, 8, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>
-// CHECK-NOT: Tile<TileType::Vec, float, 16, 8, BLayout::ColMajor, 16, 8, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>
+// CHECK: Tile<TileType::Vec, float, 16, 8, BLayout::ColMajor, 16, 8, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>
+// CHECK-NOT: Tile<TileType::Vec, float, 16, 16, BLayout::ColMajor, 16, 8, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>

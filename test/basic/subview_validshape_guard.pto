@@ -66,8 +66,8 @@ module {
 // CHECK: Tile<TileType::Vec, float, 4, 4, BLayout::RowMajor, 2, 2, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>
 // CHECK-NOT: Tile<TileType::Vec, float, 4, 4, BLayout::RowMajor, 1, 1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>
 
-// Default compact subview also keeps parent physical shape (4x4), valid defaults to sizes (2x4).
-// CHECK: Tile<TileType::Vec, float, 4, 4, BLayout::RowMajor, 2, 4, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>
+// Default row-major full-col subview can use the compact child physical shape (2x4).
+// CHECK: Tile<TileType::Vec, float, 2, 4, BLayout::RowMajor, 2, 4, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>
 
 // Explicit valid override takes effect.
 // CHECK: Tile<TileType::Vec, float, 4, 4, BLayout::RowMajor, 1, 1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>
