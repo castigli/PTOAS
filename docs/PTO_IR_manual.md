@@ -6419,6 +6419,61 @@ pto.tconcat ins(%a, %b : !pto.tile_buf<...>, !pto.tile_buf<...>)
 
 ---
 
+##### `pto.tconcatidx` - Indexed Tile Concatenation
+
+**Summary:** Concatenates two source tiles along the column dimension with per-row index control, where two additional index tiles specify the number of columns to copy from each source on a per-row basis.
+
+**Semantics:**
+
+For each row \(i\):
+- Read `idx0_num = src0Idx[i, 0]` and `idx1_num = src1Idx[i, 0]` as element counts
+- Copy the first `min(idx0_num, src0_valid_col, dst_valid_col)` columns from `src0` to `dst`
+- Copy the first `min(idx1_num, src1_valid_col, dst_valid_col - copied_from_src0)` columns from `src1` to `dst`
+
+**Arguments:**
+
+| Name | Type | Description |
+|------|------|-------------|
+| `src0` | `pto.tile_buf` | First source tile |
+| `src1` | `pto.tile_buf` | Second source tile |
+| `src0Idx` | `pto.tile_buf` | Per-row index for `src0` (column count to copy) |
+| `src1Idx` | `pto.tile_buf` | Per-row index for `src1` (column count to copy) |
+| `dst` | `pto.tile_buf` | Destination tile |
+
+**Results:** None. Writes into `dst` via DPS pattern.
+
+**Assembly Format:**
+
+```
+pto.tconcatidx ins(<src0>, <src1>, <src0Idx>, <src1Idx> :
+                   <src0_type>, <src1_type>, <src0Idx_type>, <src1Idx_type>)
+               outs(<dst> : <dst_type>)
+```
+
+**Constraints & Verification:**
+
+- `dst`, `src0`, `src1` must have the same data type, and must be one of: `i8/i16/i32/f16/f32/bf16`
+- `src0Idx`, `src1Idx` must have the same index type, and must be one of: `i8/i16/i32`
+- All tiles must use `loc=vec` and row-major layout
+- `validRow(src0) == validRow(src1) == validRow(dst)`
+- `validRow(src0Idx) == validRow(src1Idx) == validRow(dst)`
+- Index tile must have `valid_col >= 1`
+
+**Hardware Mapping:**
+
+- Executes on the **Vector pipeline** (`PIPE_V`)
+- Operates on data in the **VEC (UB)** memory space
+
+**Basic Example:**
+
+```mlir
+pto.tconcatidx ins(%src0, %src1, %idx0, %idx1 :
+  !pto.tile_buf<...>, !pto.tile_buf<...>, !pto.tile_buf<...>, !pto.tile_buf<...>)
+  outs(%dst : !pto.tile_buf<...>)
+```
+
+---
+
 ##### `pto.tgather` - Gather/Select Elements
 
 **Summary:** Gathers elements from a source tile using one of three PTO-ISA-compatible forms:

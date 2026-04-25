@@ -2036,6 +2036,40 @@ struct PTOViewToMemrefPass
             dst);
       }
 
+      SmallVector<mlir::pto::TConcatidxOp, 8> concatIdxs;
+      func.walk([&](mlir::pto::TConcatidxOp op) { concatIdxs.push_back(op); });
+
+      IRRewriter rewriter(ctx);
+      for (auto op : concatIdxs) {
+        rewriter.setInsertionPoint(op);
+
+        Value src0 = op.getSrc0();
+        Value src1 = op.getSrc1();
+        Value src0Idx = op.getSrc0Idx();
+        Value src1Idx = op.getSrc1Idx();
+        Value dst = op.getDst();
+
+        auto src0Ty = dyn_cast<MemRefType>(src0.getType());
+        auto src1Ty = dyn_cast<MemRefType>(src1.getType());
+        auto src0IdxTy = dyn_cast<MemRefType>(src0Idx.getType());
+        auto src1IdxTy = dyn_cast<MemRefType>(src1Idx.getType());
+        auto dstTy = dyn_cast<MemRefType>(dst.getType());
+        if (!src0Ty || !src1Ty || !src0IdxTy || !src1IdxTy || !dstTy) {
+          op.emitError("ins/outs are not memref yet");
+          signalPassFailure();
+          return;
+        }
+
+        rewriter.replaceOpWithNewOp<pto::TConcatidxOp>(
+            op,
+            TypeRange{},
+            src0,
+            src1,
+            src0Idx,
+            src1Idx,
+            dst);
+      }
+
       SmallVector<mlir::pto::TAndSOp, 8> andsops;
       func.walk([&](mlir::pto::TAndSOp op) { andsops.push_back(op); });
 

@@ -2641,6 +2641,49 @@ def TConcatOp: PTO_TOp<"tconcat", [
   }];
 }
 
+def TConcatidxOp: PTO_TOp<"tconcatidx", [
+  PTO_DpsInitOpInterface,
+  OpPipeInterface,
+  DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
+]> {
+  let summary = "TCONCAT (indexed): Concatenate two tiles along the column dimension with per-row index control.";
+  let description = [{
+    Indexed form of tconcat. Takes two additional index tiles (src0Idx, src1Idx)
+    that specify the number of columns to copy from each source on a per-row basis.
+
+    Semantics (per row):
+      idx0_num = src0Idx[row, 0]
+      idx1_num = src1Idx[row, 0]
+      copy from src0: min(idx0_num, src0_valid_col, dst_valid_col) columns
+      copy from src1: min(idx1_num, src1_valid_col, dst_valid_col - copied_from_src0) columns
+  }];
+
+  let arguments = (ins
+    PTODpsType:$src0,
+    PTODpsType:$src1,
+    PTODpsType:$src0Idx,
+    PTODpsType:$src1Idx,
+    PTODpsType:$dst
+  );
+
+  let results = (outs);
+
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `ins` `(` $src0 `,` $src1 `,` $src0Idx `,` $src1Idx `:`
+      qualified(type($src0)) `,` qualified(type($src1)) `,`
+      qualified(type($src0Idx)) `,` qualified(type($src1Idx)) `)`
+    `outs` `(` $dst `:` qualified(type($dst) ) `)`
+    attr-dict
+  }];
+
+  let extraClassDeclaration = [{
+    ::mlir::pto::PIPE getPipe() { return ::mlir::pto::PIPE::PIPE_V; }
+    ::mlir::MutableOperandRange getDpsInitsMutable() { return getDstMutable(); }
+  }];
+}
+
 def TAndSOp : PTO_TOp<"tands", [
   PTO_DpsInitOpInterface,
   OpPipeInterface,

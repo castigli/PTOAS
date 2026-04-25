@@ -3305,6 +3305,139 @@ mlir::LogicalResult mlir::pto::TConcatOp::verify() {
   return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
 }
 
+LogicalResult pto::TConcatidxOp::verify() {
+  auto verifyCommon = [&]() -> FailureOr<std::pair<Type, Type>> {
+    Type t0 = getSrc0().getType();
+    Type t1 = getSrc1().getType();
+    Type ti0 = getSrc0Idx().getType();
+    Type ti1 = getSrc1Idx().getType();
+    Type td = getDst().getType();
+    if (failed(verifyTileBufCommon(*this, t0, "src0")) ||
+        failed(verifyTileBufCommon(*this, t1, "src1")) ||
+        failed(verifyTileBufCommon(*this, ti0, "src0Idx")) ||
+        failed(verifyTileBufCommon(*this, ti1, "src1Idx")) ||
+        failed(verifyTileBufCommon(*this, td, "dst")))
+      return failure();
+
+    // Check data element type consistency.
+    Type e0 = getElemTy(t0);
+    Type e1 = getElemTy(t1);
+    Type ed = getElemTy(td);
+    if (!e0 || !e1 || !ed) {
+      emitOpError("failed to get element type for data operands");
+      return failure();
+    }
+    if (e0 != e1 || e0 != ed) {
+      emitOpError("expects src0, src1, and dst to have the same element type");
+      return failure();
+    }
+
+    // Check index element type consistency.
+    Type ei0 = getElemTy(ti0);
+    Type ei1 = getElemTy(ti1);
+    if (!ei0 || !ei1) {
+      emitOpError("failed to get element type for index operands");
+      return failure();
+    }
+    if (ei0 != ei1) {
+      emitOpError("expects src0Idx and src1Idx to have the same element type");
+      return failure();
+    }
+
+    // All five tiles must be rank-2.
+    auto v0  = getValidShapeVec(getSrc0());
+    auto v1  = getValidShapeVec(getSrc1());
+    auto vi0 = getValidShapeVec(getSrc0Idx());
+    auto vi1 = getValidShapeVec(getSrc1Idx());
+    auto vd  = getValidShapeVec(getDst());
+    if (v0.size() != 2 || v1.size() != 2 || vi0.size() != 2 ||
+        vi1.size() != 2 || vd.size() != 2)
+      return emitOpError("expects all operands to have rank-2 valid_shape");
+
+    // validRow must match dst (when known).
+    auto checkValidRow = [&](const auto &v, StringRef name) -> LogicalResult {
+      if (v[0] != ShapedType::kDynamic && vd[0] != ShapedType::kDynamic &&
+          v[0] != vd[0])
+        return emitOpError("expects ") << name << " valid row to match dst valid row";
+      return success();
+    };
+    if (failed(checkValidRow(v0, "src0")) ||
+        failed(checkValidRow(v1, "src1")) ||
+        failed(checkValidRow(vi0, "src0Idx")) ||
+        failed(checkValidRow(vi1, "src1Idx")))
+      return failure();
+
+    // Index tile must have cols >= 1 (when known).
+    if (vi0[1] != ShapedType::kDynamic && vi0[1] < 1)
+      return emitOpError("expects src0Idx valid_col >= 1");
+    if (vi1[1] != ShapedType::kDynamic && vi1[1] < 1)
+      return emitOpError("expects src1Idx valid_col >= 1");
+
+    return std::make_pair(e0, ei0);
+  };
+
+  auto verifyElementTypes = [&](Type dataElem, Type idxElem) -> LogicalResult {
+    // Data element type: f16, f32, bf16, i8, i16, i32 (signless).
+    if (!dataElem.isF16() && !dataElem.isF32() && !dataElem.isBF16()) {
+      auto it = mlir::dyn_cast<IntegerType>(dataElem);
+      if (!it || !it.isSignless() ||
+          (it.getWidth() != 8 && it.getWidth() != 16 && it.getWidth() != 32))
+        return emitOpError()
+               << "expects data element type to be i8, i16, i32, f16, f32, or bf16";
+    }
+
+    // Index element type: i8, i16, i32 (signless).
+    auto it = mlir::dyn_cast<IntegerType>(idxElem);
+    if (!it || !it.isSignless() ||
+        (it.getWidth() != 8 && it.getWidth() != 16 && it.getWidth() != 32))
+      return emitOpError()
+             << "expects index element type to be i8, i16, or i32";
+    return success();
+  };
+
+  auto verifyLocVec = [&](Type ty, StringRef name) -> LogicalResult {
+    auto as = getPTOMemorySpaceEnum(ty);
+    if (!as || *as != pto::AddressSpace::VEC)
+      return emitOpError() << "expects " << name << " to use loc=vec";
+    return success();
+  };
+
+  auto verifyA2A3 = [&]() -> LogicalResult {
+    auto elemOr = verifyCommon();
+    if (failed(elemOr))
+      return failure();
+    if (failed(verifyLocVec(getSrc0().getType(), "src0")) ||
+        failed(verifyLocVec(getSrc1().getType(), "src1")) ||
+        failed(verifyLocVec(getSrc0Idx().getType(), "src0Idx")) ||
+        failed(verifyLocVec(getSrc1Idx().getType(), "src1Idx")) ||
+        failed(verifyLocVec(getDst().getType(), "dst")))
+      return failure();
+    return verifyElementTypes(elemOr->first, elemOr->second);
+  };
+
+  auto verifyA5 = [&]() -> LogicalResult {
+    auto elemOr = verifyCommon();
+    if (failed(elemOr))
+      return failure();
+    if (failed(verifyLocVec(getSrc0().getType(), "src0")) ||
+        failed(verifyLocVec(getSrc1().getType(), "src1")) ||
+        failed(verifyLocVec(getSrc0Idx().getType(), "src0Idx")) ||
+        failed(verifyLocVec(getSrc1Idx().getType(), "src1Idx")) ||
+        failed(verifyLocVec(getDst().getType(), "dst")))
+      return failure();
+    if (!isRowMajorTileBuf(getSrc0().getType()) ||
+        !isRowMajorTileBuf(getSrc1().getType()) ||
+        !isRowMajorTileBuf(getSrc0Idx().getType()) ||
+        !isRowMajorTileBuf(getSrc1Idx().getType()) ||
+        !isRowMajorTileBuf(getDst().getType()))
+      return emitOpError(
+          "expects all operands to use row-major layout");
+    return verifyElementTypes(elemOr->first, elemOr->second);
+  };
+
+  return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
+}
+
 LogicalResult pto::TAndSOp::verify() {
   auto verifyCommon = [&]() -> FailureOr<Type> {
     return verifyDistinctRowMajorUnaryTileOpCommon(getOperation(), getSrc(),
@@ -9378,6 +9511,16 @@ void TMovOp::getEffects(SmallVectorImpl<SideEffects::EffectInstance<MemoryEffect
     PTO_ADD_WRITE(dstOperand);                                                      \
   }
 
+#define PTO_DEFINE_QUATERNARY_EFFECTS(OpClass, op0, op1, op2, op3, dstOperand)      \
+  void OpClass::getEffects(                                                         \
+      SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>> &effects) { \
+    PTO_ADD_READ(op0);                                                              \
+    PTO_ADD_READ(op1);                                                              \
+    PTO_ADD_READ(op2);                                                              \
+    PTO_ADD_READ(op3);                                                              \
+    PTO_ADD_WRITE(dstOperand);                                                      \
+  }
+
 void LoadScalarOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>> &effects) {
   PTO_ADD_READ(getPtrMutable());
@@ -9451,6 +9594,7 @@ void TAxpyOp::getEffects(
 
 PTO_DEFINE_BINARY_EFFECTS(TAndOp, getSrc0Mutable(), getSrc1Mutable(), getDstMutable())
 PTO_DEFINE_BINARY_EFFECTS(TConcatOp, getSrc0Mutable(), getSrc1Mutable(), getDstMutable())
+PTO_DEFINE_QUATERNARY_EFFECTS(TConcatidxOp, getSrc0Mutable(), getSrc1Mutable(), getSrc0IdxMutable(), getSrc1IdxMutable(), getDstMutable())
 PTO_DEFINE_UNARY_EFFECTS(TAndSOp, getSrcMutable(), getDstMutable())
 
 // TCI: Write(dst) (generates sequence)
