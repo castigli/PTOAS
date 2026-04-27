@@ -38,6 +38,8 @@ struct ValueComparator {
   }
 };
 
+using StableValueOrderMap = DenseMap<Value, uint32_t>;
+
 /// Various states when collecting gen-kill.
 enum BufferStatus { UNDEFFINED = 0, DEFFINED, GENED, KILLED };
 
@@ -268,6 +270,9 @@ public:
   /// map from buffer value to its buffer information.
   std::map<Value, BufferInfo, ValueComparator> bufferInfos;
 
+  /// stable IR order for Values used to keep memory planning deterministic.
+  StableValueOrderMap stableValueOrder;
+
   /// map from buffer to its lifetime.
   DenseMap<Value, std::shared_ptr<BufferLife>> buffer2Life;
 
@@ -447,6 +452,10 @@ public:
 
   inline void SetSemanticConflictPairs(SmallVector<ValuePair> conflictPairs) {
     semanticConflictPairs = std::move(conflictPairs);
+  }
+
+  inline void SetStableValueOrder(StableValueOrderMap valueOrder) {
+    stableValueOrder = std::move(valueOrder);
   }
 
   /// Setup the device's storage specs
@@ -708,6 +717,9 @@ private:
 
   /// map from buffer value to its storage entry info
   DenseMap<Value, StorageEntry *> buffer2storageEntry;
+
+  /// stable IR order for Values used to keep memory planning deterministic.
+  StableValueOrderMap stableValueOrder;
 
   /// Memory dma pipe first plan optimization.
   OptMemPlanForDma dmaFirstPipelineOpt;

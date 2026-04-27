@@ -14,6 +14,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/IR/AsmState.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "AllocToPointerCast.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
@@ -23,6 +24,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <algorithm>
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -84,21 +86,76 @@ static LocalMemSpec getLocalMemSpec(Operation *op, AddressSpace as) {
   }
 }
 
-static std::string getStableValueKey(Value value) {
-  std::string key;
-  llvm::raw_string_ostream os(key);
-  value.printAsOperand(os, OpPrintingFlags());
-  return os.str();
+static void collectStableValueOrder(Region &region,
+                                    AsmState &asmState,
+                                    DenseMap<Value, std::string> &stableValueKeys,
+                                    SmallVectorImpl<Value> &seenValues) {
+  auto recordValue = [&](Value value) {
+    if (stableValueKeys.find(value) != stableValueKeys.end())
+      return;
+    std::string key;
+    llvm::raw_string_ostream os(key);
+    value.printAsOperand(os, asmState);
+    stableValueKeys[value] = os.str();
+    seenValues.push_back(value);
+  };
+
+  for (Block &block : region) {
+    for (BlockArgument blockArg : block.getArguments())
+      recordValue(blockArg);
+    for (Operation &op : block) {
+      for (Value result : op.getResults())
+        recordValue(result);
+      for (Region &nestedRegion : op.getRegions())
+        collectStableValueOrder(nestedRegion, asmState, stableValueKeys,
+                                seenValues);
+    }
+  }
 }
 
-static void sortValuesByStableKey(SmallVectorImpl<Value> &values) {
-  std::stable_sort(values.begin(), values.end(), [](Value lhs, Value rhs) {
-    return getStableValueKey(lhs) < getStableValueKey(rhs);
+static StableValueOrderMap buildStableValueOrder(func::FuncOp func) {
+  DenseMap<Value, std::string> stableValueKeys;
+  SmallVector<Value> seenValues;
+  AsmState asmState(func);
+  collectStableValueOrder(func.getBody(), asmState, stableValueKeys, seenValues);
+
+  llvm::sort(seenValues, [&](Value lhs, Value rhs) {
+    const std::string &lhsKey = stableValueKeys.find(lhs)->second;
+    const std::string &rhsKey = stableValueKeys.find(rhs)->second;
+    if (lhsKey != rhsKey)
+      return lhsKey < rhsKey;
+    return isLessValue(lhs, rhs);
+  });
+
+  StableValueOrderMap stableValueOrder;
+  for (auto [index, value] : llvm::enumerate(seenValues))
+    stableValueOrder[value] = index;
+  return stableValueOrder;
+}
+
+static uint32_t lookupStableValueOrder(
+    Value value, const StableValueOrderMap &stableValueOrder) {
+  auto it = stableValueOrder.find(value);
+  if (it != stableValueOrder.end())
+    return it->second;
+  return std::numeric_limits<uint32_t>::max();
+}
+
+static void sortValuesByStableOrder(
+    SmallVectorImpl<Value> &values,
+    const StableValueOrderMap &stableValueOrder) {
+  llvm::sort(values, [&](Value lhs, Value rhs) {
+    uint32_t lhsOrder = lookupStableValueOrder(lhs, stableValueOrder);
+    uint32_t rhsOrder = lookupStableValueOrder(rhs, stableValueOrder);
+    if (lhsOrder != rhsOrder)
+      return lhsOrder < rhsOrder;
+    return isLessValue(lhs, rhs);
   });
 }
 
 static SmallVector<Value> getScratchBuffersFromEffects(Operation *op,
-                                                       ValueRange dpsInits) {
+                                                       ValueRange dpsInits,
+                                                       const StableValueOrderMap &stableValueOrder) {
   SmallVector<Value> scratchBuffers;
   auto memEffect = dyn_cast<MemoryEffectOpInterface>(op);
   if (!memEffect)
@@ -121,14 +178,16 @@ static SmallVector<Value> getScratchBuffersFromEffects(Operation *op,
     if (!llvm::is_contained(scratchBuffers, value))
       scratchBuffers.push_back(value);
   }
-  sortValuesByStableKey(scratchBuffers);
+  sortValuesByStableOrder(scratchBuffers, stableValueOrder);
   return scratchBuffers;
 }
 
 static SmallVector<ValuePair>
-getScratchConflictPairsFromEffects(Operation *op, ValueRange dpsInits) {
+getScratchConflictPairsFromEffects(Operation *op, ValueRange dpsInits,
+                                   const StableValueOrderMap &stableValueOrder) {
   SmallVector<ValuePair> conflictPairs;
-  SmallVector<Value> scratchBuffers = getScratchBuffersFromEffects(op, dpsInits);
+  SmallVector<Value> scratchBuffers =
+      getScratchBuffersFromEffects(op, dpsInits, stableValueOrder);
   for (Value scratch : scratchBuffers) {
     for (Value dst : dpsInits) {
       if (!scratch || !dst || scratch == dst)
@@ -302,6 +361,7 @@ static LogicalResult assignAutoReserveBufferBases(
 
 void MemLivenessAnalysis::build() {
   Region &funcRegion = func_.getBody();
+  stableValueOrder = buildStableValueOrder(func_);
   Liveness live(func_);
   // Recursively obtaining IR information.
   RecursionIR(&funcRegion, live);
@@ -372,12 +432,13 @@ void MemLivenessAnalysis::RecursionIR(Region *region, Liveness live) {
       // PTO ops with destination (tile_buf, partition_view, etc.); no
       // tensor/memref-only verification.
       SmallVector<Value> genBuffers = llvm::to_vector(ptoDpsOp.getDpsInits());
-      auto scratchBuffers =
-          getScratchBuffersFromEffects(op, ptoDpsOp.getDpsInits());
+      auto scratchBuffers = getScratchBuffersFromEffects(
+          op, ptoDpsOp.getDpsInits(), stableValueOrder);
       genBuffers.append(scratchBuffers.begin(), scratchBuffers.end());
       UpdateOpGenInfo(curOpInfo, genBuffers);
       for (const auto &conflictPair :
-           getScratchConflictPairsFromEffects(op, ptoDpsOp.getDpsInits())) {
+           getScratchConflictPairsFromEffects(op, ptoDpsOp.getDpsInits(),
+                                              stableValueOrder)) {
         RecordSemanticConflict(conflictPair.first, conflictPair.second);
       }
       OpKillHandle(curOpInfo, live, op->getBlock());
@@ -548,7 +609,7 @@ SmallVector<Value> MemLivenessAnalysis::GetLiveBuffersInLoop(scf::ForOp forOp,
         allocBeforeLoopBuffers.push_back(Buffer);
     }
   }
-  sortValuesByStableKey(allocBeforeLoopBuffers);
+  sortValuesByStableOrder(allocBeforeLoopBuffers, stableValueOrder);
   return allocBeforeLoopBuffers;
 }
 
@@ -688,7 +749,7 @@ void MemLivenessAnalysis::OpKillHandle(OpInfo *opInfo, Liveness live,
   }
   SmallVector<Value> liveValues(currentLiveValues.begin(),
                                 currentLiveValues.end());
-  sortValuesByStableKey(liveValues);
+  sortValuesByStableOrder(liveValues, stableValueOrder);
   for (const Value &operand : liveValues) {
     UpdateOpKillInfo(opInfo, operand, live);
   }
@@ -837,8 +898,8 @@ SmallVector<ValuePair> MemPlan::GenerateInplaceList() {
 
     SmallVector<Value> genBuffers(it->second.gen.begin(), it->second.gen.end());
     SmallVector<Value> killBuffers(it->second.kill.begin(), it->second.kill.end());
-    sortValuesByStableKey(genBuffers);
-    sortValuesByStableKey(killBuffers);
+    sortValuesByStableOrder(genBuffers, stableValueOrder);
+    sortValuesByStableOrder(killBuffers, stableValueOrder);
 
     for (const Value &genBuffer : genBuffers) {
       auto genBufferIter = bufferInfos.find(genBuffer);
@@ -1011,7 +1072,7 @@ void MemPlan::GenerateStorageEntry() {
     if (it == genKillMap.end())
       continue;
     SmallVector<Value> genBuffers(it->second.gen.begin(), it->second.gen.end());
-    sortValuesByStableKey(genBuffers);
+    sortValuesByStableOrder(genBuffers, stableValueOrder);
     for (const Value &genBuffer : genBuffers) {
       auto iter = bufferInfos.find(genBuffer);
       if (iter == bufferInfos.end()) {
@@ -2229,6 +2290,7 @@ void PlanMemoryPass::runOnOperation() {
     memPlan.SetBuffer2MultiNum(memLiveness.buffer2MultiNum);
     memPlan.SetInplacePairList(memLiveness.inplacePairList);
     memPlan.SetSemanticConflictPairs(memLiveness.semanticConflictPairs);
+    memPlan.SetStableValueOrder(std::move(memLiveness.stableValueOrder));
     if (failed(memPlan.plan())) {
       return signalPassFailure();
     }
