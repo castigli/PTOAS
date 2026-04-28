@@ -6688,68 +6688,6 @@ mlir::LogicalResult mlir::pto::TPReluOp::verify() {
   return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
 }
 
-ParseResult mlir::pto::TQuantOp::parse(OpAsmParser &parser,
-                                       OperationState &result) {
-  OpAsmParser::UnresolvedOperand src, fp, offset, dst;
-  Type srcTy, fpTy, offsetTy, dstTy;
-  bool hasOffset = false;
-
-  if (parser.parseKeyword("ins") || parser.parseLParen() ||
-      parser.parseOperand(src) || parser.parseComma() ||
-      parser.parseOperand(fp))
-    return failure();
-  if (succeeded(parser.parseOptionalComma())) {
-    if (parser.parseOperand(offset))
-      return failure();
-    hasOffset = true;
-  }
-  if (parser.parseColon() ||
-      parser.parseType(srcTy) || parser.parseComma() ||
-      parser.parseType(fpTy))
-    return failure();
-  if (hasOffset) {
-    if (parser.parseComma() || parser.parseType(offsetTy))
-      return failure();
-  }
-  if (parser.parseRParen())
-    return failure();
-  if (parser.parseKeyword("outs") || parser.parseLParen() ||
-      parser.parseOperand(dst) || parser.parseColonType(dstTy) ||
-      parser.parseRParen())
-    return failure();
-  if (parser.parseOptionalAttrDict(result.attributes))
-    return failure();
-
-  if (parser.resolveOperand(src, srcTy, result.operands) ||
-      parser.resolveOperand(fp, fpTy, result.operands))
-    return failure();
-  if (hasOffset) {
-    if (parser.resolveOperand(offset, offsetTy, result.operands))
-      return failure();
-  }
-  if (parser.resolveOperand(dst, dstTy, result.operands))
-    return failure();
-
-  result.addAttribute(
-      "operandSegmentSizes",
-      parser.getBuilder().getDenseI32ArrayAttr({1, 1, hasOffset ? 1 : 0, 1}));
-  return success();
-}
-
-void mlir::pto::TQuantOp::print(OpAsmPrinter &p) {
-  p << " ins(" << getSrc() << ", " << getFp();
-  if (getOffset()) {
-    p << ", " << getOffset();
-    p << " : " << getSrc().getType() << ", " << getFp().getType() << ", "
-      << getOffset().getType() << ")";
-  } else {
-    p << " : " << getSrc().getType() << ", " << getFp().getType() << ")";
-  }
-  p << " outs(" << getDst() << " : " << getDst().getType() << ")";
-  p.printOptionalAttrDict((*this)->getAttrs(),
-                          /*elidedAttrs=*/{"operandSegmentSizes"});
-}
-
 mlir::LogicalResult mlir::pto::TQuantOp::verify() {
   // Structural checks: always run regardless of operand representation
   // (applies both before and after PTOViewToMemref lowering).
@@ -6821,39 +6759,6 @@ mlir::LogicalResult mlir::pto::TQuantOp::verify() {
   };
 
   return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
-}
-
-ParseResult mlir::pto::TDequantOp::parse(OpAsmParser &parser,
-                                          OperationState &result) {
-  OpAsmParser::UnresolvedOperand src, scale, offset, dst;
-  Type srcTy, scaleTy, offsetTy, dstTy;
-
-  if (parser.parseKeyword("ins") || parser.parseLParen() ||
-      parser.parseOperand(src) || parser.parseComma() ||
-      parser.parseOperand(scale) || parser.parseComma() ||
-      parser.parseOperand(offset) || parser.parseColon() ||
-      parser.parseType(srcTy) || parser.parseComma() ||
-      parser.parseType(scaleTy) || parser.parseComma() ||
-      parser.parseType(offsetTy) || parser.parseRParen())
-    return failure();
-  if (parser.parseKeyword("outs") || parser.parseLParen() ||
-      parser.parseOperand(dst) || parser.parseColonType(dstTy) ||
-      parser.parseRParen())
-    return failure();
-  if (parser.parseOptionalAttrDict(result.attributes))
-    return failure();
-
-  return parser.resolveOperands({src, scale, offset, dst},
-                                {srcTy, scaleTy, offsetTy, dstTy},
-                                parser.getCurrentLocation(), result.operands);
-}
-
-void mlir::pto::TDequantOp::print(OpAsmPrinter &p) {
-  p << " ins(" << getSrc() << ", " << getScale() << ", " << getOffset()
-    << " : " << getSrc().getType() << ", " << getScale().getType() << ", "
-    << getOffset().getType() << ")"
-    << " outs(" << getDst() << " : " << getDst().getType() << ")";
-  p.printOptionalAttrDict((*this)->getAttrs());
 }
 
 mlir::LogicalResult mlir::pto::TDequantOp::verify() {
