@@ -1885,38 +1885,6 @@ LogicalResult TPrefetchOp::verify() {
   return success();
 }
 
-LogicalResult TPackOp::verify() {
-  if (shouldBypassDecodedMemrefVerifier(getOperation()))
-    return success();
-
-  auto verifyA2A3 = [&]() -> LogicalResult {
-    return emitOpError("tpack is only supported on A5 targets");
-  };
-
-  auto verifyA5 = [&]() -> LogicalResult {
-    if (failed(verifyVecTileCommonA5(*this, getSrc().getType(), "src")) ||
-        failed(verifyVecTileCommonA5(*this, getDst().getType(), "dst")))
-      return failure();
-
-    auto srcTy = cast<pto::TileBufType>(getSrc().getType());
-    auto dstTy = cast<pto::TileBufType>(getDst().getType());
-
-    if (srcTy.getValidShape() != dstTy.getValidShape())
-      return emitOpError("expects src and dst to have the same valid_shape");
-
-    unsigned srcBytes = getElemByteSize(srcTy.getElementType());
-    unsigned dstBytes = getElemByteSize(dstTy.getElementType());
-    if (!((srcBytes == 4 && dstBytes == 2) ||
-          (srcBytes == 4 && dstBytes == 1) ||
-          (srcBytes == 2 && dstBytes == 1)))
-      return emitOpError("expects A5 tpack element-size pair to be 4->2, 4->1, or 2->1 bytes");
-
-    return success();
-  };
-
-  return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
-}
-
 LogicalResult mlir::pto::SetFFTsOp::verify() {
   auto mr = llvm::dyn_cast<mlir::MemRefType>(getFfts().getType());
   if (!mr)
@@ -9435,12 +9403,6 @@ void TLoadOp::getEffects(SmallVectorImpl<SideEffects::EffectInstance<MemoryEffec
 }
 
 void TPrefetchOp::getEffects(
-    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>> &effects) {
-  addEffect(effects, &getSrcMutable(), MemoryEffects::Read::get());
-  addEffect(effects, &getDstMutable(), MemoryEffects::Write::get());
-}
-
-void TPackOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>> &effects) {
   addEffect(effects, &getSrcMutable(), MemoryEffects::Read::get());
   addEffect(effects, &getDstMutable(), MemoryEffects::Write::get());

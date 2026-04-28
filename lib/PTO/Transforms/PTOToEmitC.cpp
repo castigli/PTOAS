@@ -3953,25 +3953,6 @@ struct PTOTPrefetchToTPREFETCH : public OpConversionPattern<pto::TPrefetchOp> {
   }
 };
 
-struct PTOTPackToTPACK : public OpConversionPattern<pto::TPackOp> {
-  using OpConversionPattern<pto::TPackOp>::OpConversionPattern;
-
-  LogicalResult matchAndRewrite(pto::TPackOp op, OpAdaptor adaptor,
-                                ConversionPatternRewriter &rewriter) const override {
-    if (!op.getDst())
-      return rewriter.notifyMatchFailure(op, "expected outs(dst) on pto.tpack");
-
-    Value src = peelUnrealized(adaptor.getSrc());
-    Value dst = peelUnrealized(adaptor.getDst());
-
-    rewriter.create<emitc::CallOpaqueOp>(
-        op.getLoc(), TypeRange{}, "TPACK",
-        ArrayAttr{}, ArrayAttr{}, ValueRange{dst, src});
-    rewriter.eraseOp(op);
-    return success();
-  }
-};
-
 struct PTOTStoreToTSTORE : public OpConversionPattern<pto::TStoreOp> {
   using OpConversionPattern<pto::TStoreOp>::OpConversionPattern;
 
@@ -10511,7 +10492,6 @@ static void populatePTOToEmitCPatterns(RewritePatternSet &patterns,
   patterns.add<PTOMinToEmitC>(typeConverter, ctx);
   patterns.add<PTOTLoadToTLOAD>(typeConverter, ctx);
   patterns.add<PTOTPrefetchToTPREFETCH>(typeConverter, ctx);
-  patterns.add<PTOTPackToTPACK>(typeConverter, ctx);
   patterns.add<PTOTStoreToTSTORE>(typeConverter, ctx);
   patterns.add<PTOMScatterToMSCATTER>(typeConverter, ctx);
   patterns.add<PTOTAddCToTADDC>(typeConverter, ctx);

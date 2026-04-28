@@ -801,58 +801,6 @@ pto.tprefetch ins(%pv : !pto.partition_tensor_view<16x16xf16>)
 
 ---
 
-##### `pto.tpack` - Pack a Wider Vec Tile into a Narrower Vec Tile
-
-**Summary:** A5-only vector packing operation that narrows a source VEC tile into
-a destination VEC tile of the same valid shape.
-
-**Semantics:**
-
-```
-TPACK(dst, src)
-```
-
-Supported packing directions follow PTO-ISA:
-- `b32 -> b16`
-- `b32 -> b8`
-- `b16 -> b8`
-
-**Arguments:**
-
-| Name | Type | Description |
-|------|------|-------------|
-| `src` | `pto.tile_buf` | Source VEC tile with wider element type |
-| `dst` | `pto.tile_buf` | Destination VEC tile with narrower element type |
-
-**Results:** None. Writes into `dst` via DPS pattern.
-
-**Constraints & Verification:**
-
-- `pto.tpack` is only supported on **A5** targets.
-- `src` and `dst` must both be VEC tiles (`loc=vec`) with row-major layout.
-- `src` and `dst` must have the same `valid_shape`.
-- Supported element-size pairs are exactly:
-  - `4 -> 2` bytes
-  - `4 -> 1` bytes
-  - `2 -> 1` bytes
-
-**Hardware Mapping:**
-
-- Executes on the **Vector pipeline** (`PIPE_V`)
-
-**Basic Example:**
-
-```mlir
-pto.tpack ins(%src : !pto.tile_buf<loc=vec, dtype=i32, rows=128, cols=128,
-              v_row=128, v_col=128, blayout=row_major, slayout=none_box,
-              fractal=512, pad=0>)
-          outs(%dst : !pto.tile_buf<loc=vec, dtype=i16, rows=128, cols=128,
-               v_row=128, v_col=128, blayout=row_major, slayout=none_box,
-               fractal=512, pad=0>)
-```
-
----
-
 ##### `pto.tstore` - Store Tile to Partition View
 
 **Summary:** Stores a 2-D tile buffer back to a 2-D partition view. Supports phase/atomic/relu/pre-quant controls that lower to the corresponding `TSTORE` template overload family.
