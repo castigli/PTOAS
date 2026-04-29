@@ -97,7 +97,9 @@ static PipeSplitUsage classifyPipeUsage(Value pipe) {
 
   for (Operation *user : pipe.getUsers()) {
     int64_t split = -1;
-    if (auto pushOp = dyn_cast<TPushOp>(user)) {
+    if (auto allocOp = dyn_cast<TAllocOp>(user)) {
+      split = allocOp.getSplit();
+    } else if (auto pushOp = dyn_cast<TPushOp>(user)) {
       split = pushOp.getSplit();
     } else if (auto popOp = dyn_cast<TPopOp>(user)) {
       split = popOp.getSplit();
@@ -240,6 +242,8 @@ struct PTOInferValidatePipeInitPass
       adjacency[info.op];
 
       auto recordAddr = [&](Value addr, int8_t effectiveDirMask) {
+        if (!addr)
+          return;
         auto key = getPipePeerKey(addr, info.funcOp);
         if (!key)
           return;

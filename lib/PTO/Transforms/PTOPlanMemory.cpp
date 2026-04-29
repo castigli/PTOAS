@@ -457,8 +457,9 @@ void MemLivenessAnalysis::RecursionIR(Region *region, Liveness live) {
     } else if (auto callOp = dyn_cast<func::CallOp>(op)) {
       UpdateOpGenInfo(curOpInfo, llvm::to_vector(callOp->getOperands()));
       OpKillHandle(curOpInfo, live, op->getBlock());
-    } else if (isa<pto::TPushOp, pto::TFreeOp, pto::InitializeL2LPipeOp,
-                   pto::InitializeL2G2LPipeOp, pto::BuildAsyncSessionOp,
+    } else if (isa<pto::TAllocOp, pto::TPushOp, pto::TFreeOp,
+                   pto::InitializeL2LPipeOp, pto::InitializeL2G2LPipeOp,
+                   pto::BuildAsyncSessionOp,
                    pto::TPutAsyncOp, pto::TGetAsyncOp>(op)) {
       UpdateOpGenInfo(curOpInfo, llvm::to_vector(op->getOperands()));
       OpKillHandle(curOpInfo, live, op->getBlock());

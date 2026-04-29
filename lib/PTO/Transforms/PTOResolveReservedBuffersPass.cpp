@@ -17,6 +17,7 @@
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/StringRef.h"
 
 #include <algorithm>
 #include <map>
@@ -48,6 +49,7 @@ constexpr int8_t kBidirectionalDirMask = 3;
 constexpr unsigned kSingleDirectionFlagWidth = 2;
 constexpr unsigned kBidirectionalFlagWidth = 4;
 constexpr unsigned kVisitedInitReserveSize = 16;
+constexpr llvm::StringLiteral kFrontendPipeIdAttrName = "__pto.frontend_id";
 
 struct PipePeerKey {
   std::string ownerFunc;
@@ -69,6 +71,7 @@ struct PipeInitInfo {
   int32_t slotSize = 0;
   int32_t slotNum = 0;
   std::optional<int32_t> localSlotNum;
+  bool globalOnly = false;
 };
 
 struct PipeComponent {
@@ -78,6 +81,7 @@ struct PipeComponent {
   int32_t slotSize = 0;
   int32_t slotNum = 0;
   std::optional<int32_t> localSlotNum;
+  bool globalOnly = false;
   unsigned flagWidth = 0;
   std::optional<int32_t> explicitFlagBase;
 };
@@ -153,8 +157,19 @@ static PipeInitInfo buildPipeInitInfo(InitOpT initOp) {
   if constexpr (std::is_same_v<InitOpT, InitializeL2G2LPipeOp>) {
     if (auto attr = initOp.getLocalSlotNumAttr())
       info.localSlotNum = attr.getInt();
+    info.globalOnly = !initOp.getLocalAddr();
   }
   return info;
+}
+
+static PipePeerKey getGlobalTensorPipeKey(const PipeInitInfo &info) {
+  std::string id = "unknown";
+  if (auto idAttr =
+          info.op->getAttrOfType<IntegerAttr>(kFrontendPipeIdAttrName))
+    id = std::to_string(idAttr.getInt());
+  else
+    id = std::to_string(reinterpret_cast<uintptr_t>(info.op));
+  return PipePeerKey{"__pto_globaltensor_pipe", "id_" + id, info.dirMask};
 }
 
 template <typename InitOpT>
@@ -163,7 +178,15 @@ static LogicalResult collectPeerAwareInit(InitOpT initOp,
                                           PipeInitGroups &keyedInits) {
   PipeInitInfo info = buildPipeInitInfo(initOp);
 
+  if (info.globalOnly) {
+    keyedInits[getGlobalTensorPipeKey(info)].push_back(info.op);
+    initInfos.push_back(info);
+    return success();
+  }
+
   auto recordAddr = [&](Value addr, int8_t effectiveDirMask) {
+    if (!addr)
+      return false;
     auto key = getPipePeerKey(addr, info.funcOp);
     if (!key)
       return false;
@@ -210,8 +233,10 @@ static void setFlagBaseAttr(Operation *op, IntegerAttr attr) {
 
 static bool samePipeInitSignature(const PipeInitInfo &lhs,
                                   const PipeInitInfo &rhs) {
-  return std::tie(lhs.dirMask, lhs.slotSize, lhs.slotNum, lhs.localSlotNum) ==
-         std::tie(rhs.dirMask, rhs.slotSize, rhs.slotNum, rhs.localSlotNum);
+  return std::tie(lhs.dirMask, lhs.slotSize, lhs.slotNum, lhs.localSlotNum,
+                  lhs.globalOnly) ==
+         std::tie(rhs.dirMask, rhs.slotSize, rhs.slotNum, rhs.localSlotNum,
+                  rhs.globalOnly);
 }
 
 static FailureOr<SmallVector<PipeComponent>>
@@ -255,23 +280,26 @@ buildPeerAwareComponents(const SmallVectorImpl<PipeInitInfo> &initInfos,
       }
     }
 
-    if (component.ops.size() != kPeerPipeInitOpCount) {
+    if (!rootInfo.globalOnly && component.ops.size() != kPeerPipeInitOpCount) {
       return rootInfo.op->emitOpError(
           "requires a complete compatible peer init pair when local_addr comes "
           "from pto.reserve_buffer or pto.import_reserved_buffer");
     }
 
     const PipeInitInfo &lhs = *infoByOp[component.ops[0]];
-    const PipeInitInfo &rhs = *infoByOp[component.ops[1]];
-    if (!samePipeInitSignature(lhs, rhs)) {
-      return component.ops.front()->emitOpError(
-          "requires peer pipe init ops to agree on direction and pipe shape");
+    for (Operation *op : ArrayRef<Operation *>(component.ops).drop_front()) {
+      const PipeInitInfo &rhs = *infoByOp[op];
+      if (!samePipeInitSignature(lhs, rhs)) {
+        return component.ops.front()->emitOpError(
+            "requires peer pipe init ops to agree on direction and pipe shape");
+      }
     }
 
     component.dirMask = lhs.dirMask;
     component.slotSize = lhs.slotSize;
     component.slotNum = lhs.slotNum;
     component.localSlotNum = lhs.localSlotNum;
+    component.globalOnly = lhs.globalOnly;
     component.flagWidth = component.dirMask == kBidirectionalDirMask
                               ? kBidirectionalFlagWidth
                               : kSingleDirectionFlagWidth;
@@ -288,7 +316,8 @@ buildPeerAwareComponents(const SmallVectorImpl<PipeInitInfo> &initInfos,
         component.explicitFlagBase = flagBaseAttr.getInt();
       }
     }
-    if (component.participants.size() != kPeerPipeParticipantCount) {
+    if (!component.globalOnly &&
+        component.participants.size() != kPeerPipeParticipantCount) {
       return component.ops.front()->emitOpError(
           "requires a complete compatible peer init pair when local_addr comes "
           "from pto.reserve_buffer or pto.import_reserved_buffer");

@@ -1,0 +1,108 @@
+// RUN: ptoas --pto-arch=a3 %s 2>&1 | FileCheck %s
+
+module {
+  func.func @cube_kernel(
+      %fifo_mem : !pto.ptr<f32>,
+      %acc_tile : !pto.tile_buf<loc=acc, dtype=f32, rows=128, cols=128, v_row=128, v_col=128, blayout=col_major, slayout=row_major, fractal=1024, pad=0>)
+      attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c4 = arith.constant 4 : index
+    %c128 = arith.constant 128 : index
+    %c16384 = arith.constant 16384 : index
+
+    // SlotGlobal is modeled as four contiguous [128, 128] blocks.
+    %slot_desc = pto.make_tensor_view %fifo_mem,
+      shape = [%c4, %c128, %c128], strides = [%c16384, %c128, %c1]
+      : !pto.tensor_view<4x128x128xf32>
+    pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 262144}
+      (gm_slot_tensor = %slot_desc : !pto.tensor_view<4x128x128xf32>)
+
+    %push_global = pto.talloc_to_aiv {id = 0, split = 0}
+      -> !pto.tensor_view<4x128x128xf32>
+
+    scf.for %n_tile = %c0 to %c4 step %c1 {
+      %store_global = pto.partition_view %push_global,
+        offsets = [%n_tile, %c0, %c0], sizes = [%c1, %c128, %c128]
+        : !pto.tensor_view<4x128x128xf32> -> !pto.partition_tensor_view<1x128x128xf32>
+      pto.tstore ins(%acc_tile : !pto.tile_buf<loc=acc, dtype=f32, rows=128, cols=128, v_row=128, v_col=128, blayout=col_major, slayout=row_major, fractal=1024, pad=0>)
+                 outs(%store_global : !pto.partition_tensor_view<1x128x128xf32>)
+    }
+
+    pto.tpush_to_aiv(%push_global : !pto.tensor_view<4x128x128xf32>) {id = 0, split = 0}
+    func.return
+  }
+
+  func.func @vector_kernel(%fifo_mem : !pto.ptr<f32>,
+                           %out : !pto.ptr<f32>)
+      attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c4 = arith.constant 4 : index
+    %c16 = arith.constant 16 : index
+    %c64 = arith.constant 64 : index
+    %c128 = arith.constant 128 : index
+    %c512 = arith.constant 512 : index
+    %c16384 = arith.constant 16384 : index
+    %alpha = arith.constant 3.14 : f32
+    %subblock_idx_i64 = pto.get_subblock_idx
+    %subblock_idx = arith.index_cast %subblock_idx_i64 : i64 to index
+    %base_row = arith.muli %subblock_idx, %c64 : index
+
+    %slot_desc = pto.make_tensor_view %fifo_mem,
+      shape = [%c4, %c128, %c128], strides = [%c16384, %c128, %c1]
+      : !pto.tensor_view<4x128x128xf32>
+    pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 262144}
+      (gm_slot_tensor = %slot_desc : !pto.tensor_view<4x128x128xf32>)
+
+    %out_desc = pto.make_tensor_view %out,
+      shape = [%c4, %c128, %c128], strides = [%c128, %c512, %c1]
+      : !pto.tensor_view<4x128x128xf32>
+
+    %vec_tile = pto.alloc_tile
+      : !pto.tile_buf<loc=vec, dtype=f32, rows=64, cols=128, v_row=64, v_col=128, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %dst_tile = pto.alloc_tile
+      : !pto.tile_buf<loc=vec, dtype=f32, rows=64, cols=128, v_row=64, v_col=128, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+
+    %pop_global = pto.tpop_from_aic {id = 0, split = 0}
+      -> !pto.tensor_view<4x128x128xf32>
+
+    scf.for %row_offset = %c0 to %c64 step %c16 {
+      %global_row = arith.addi %base_row, %row_offset : index
+      %load_global_3d = pto.partition_view %pop_global,
+        offsets = [%c0, %global_row, %c0], sizes = [%c4, %c16, %c128]
+        : !pto.tensor_view<4x128x128xf32> -> !pto.partition_tensor_view<4x16x128xf32>
+      pto.tload ins(%load_global_3d : !pto.partition_tensor_view<4x16x128xf32>)
+                outs(%vec_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=64, cols=128, v_row=64, v_col=128, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+      pto.tadds ins(%vec_tile, %alpha
+          : !pto.tile_buf<loc=vec, dtype=f32, rows=64, cols=128, v_row=64, v_col=128, blayout=row_major, slayout=none_box, fractal=512, pad=0>,
+            f32)
+        outs(%dst_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=64, cols=128, v_row=64, v_col=128, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+      %out_global_3d = pto.partition_view %out_desc,
+        offsets = [%c0, %global_row, %c0], sizes = [%c4, %c16, %c128]
+        : !pto.tensor_view<4x128x128xf32> -> !pto.partition_tensor_view<4x16x128xf32>
+      pto.tstore ins(%dst_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=64, cols=128, v_row=64, v_col=128, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+                 outs(%out_global_3d : !pto.partition_tensor_view<4x16x128xf32>)
+    }
+
+    pto.tfree_from_aic(%pop_global : !pto.tensor_view<4x128x128xf32>) {id = 0, split = 0}
+    func.return
+  }
+}
+
+// CHECK-LABEL: AICORE void cube_kernel
+// CHECK: TPipe<0, Direction::DIR_C2V, 262144, 8, 8, true>
+// CHECK: TALLOC<TPipe<0, Direction::DIR_C2V, 262144, 8, 8, true>, GlobalTensor<float, pto::Shape<1, 1, 4, 128, 128>, pto::Stride<65536, 65536, 16384, 128, 1>, pto::Layout::ND>, TileSplitAxis::TILE_NO_SPLIT>
+// CHECK: for (
+// CHECK: TSTORE
+// CHECK: TPUSH<TPipe<0, Direction::DIR_C2V, 262144, 8, 8, true>, GlobalTensor<float, pto::Shape<1, 1, 4, 128, 128>, pto::Stride<65536, 65536, 16384, 128, 1>, pto::Layout::ND>, TileSplitAxis::TILE_NO_SPLIT>
+// CHECK-LABEL: AICORE void vector_kernel
+// CHECK: get_subblockid
+// CHECK: TPOP<TPipe<0, Direction::DIR_C2V, 262144, 8, 8, true>, GlobalTensor<float, pto::Shape<1, 1, 4, 128, 128>, pto::Stride<65536, 65536, 16384, 128, 1>, pto::Layout::ND>, TileSplitAxis::TILE_NO_SPLIT>
+// CHECK: for (
+// CHECK: GlobalTensor<float, pto::Shape<1, 1, 4, 16, 128>, pto::Stride<65536, 65536, 16384, 128, 1>, pto::Layout::ND>
+// CHECK: TLOAD
+// CHECK: TADDS
+// CHECK: GlobalTensor<float, pto::Shape<1, 1, 4, 16, 128>, pto::Stride<512, 512, 128, 512, 1>, pto::Layout::ND>
+// CHECK: TSTORE
+// CHECK: TFREE<TPipe<0, Direction::DIR_C2V, 262144, 8, 8, true>, GlobalTensor<float, pto::Shape<1, 1, 4, 128, 128>, pto::Stride<65536, 65536, 16384, 128, 1>, pto::Layout::ND>, TileSplitAxis::TILE_NO_SPLIT>

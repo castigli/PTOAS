@@ -32,6 +32,7 @@ constexpr int8_t kV2CDirMask = 2;
 constexpr int8_t kBidirectionalDirMask = 3;
 constexpr int32_t kSingleDirectionSlotNum = 8;
 constexpr int32_t kBidirectionalSlotNum = 4;
+constexpr llvm::StringLiteral kFrontendPipeIdAttrName = "__pto.frontend_id";
 
 struct FrontendPipeHandles {
   Value c2vPipe;
@@ -49,6 +50,15 @@ static LogicalResult requireFrontendGmSlotBuffer(InitOpT initOp) {
 }
 
 template <typename InitOpT>
+static void propagateFrontendIdAttr(InitOpT initOp, Operation *pipeOp,
+                                    IRRewriter &rewriter) {
+  if (!pipeOp)
+    return;
+  pipeOp->setAttr(kFrontendPipeIdAttrName,
+                  rewriter.getI32IntegerAttr(initOp.getId()));
+}
+
+template <typename InitOpT>
 static FailureOr<Value> createFrontendPipe(InitOpT initOp, IRRewriter &rewriter,
                                            PTOArch arch, Type pipeTy,
                                            int8_t dirMask, int32_t slotNum,
@@ -60,15 +70,35 @@ static FailureOr<Value> createFrontendPipe(InitOpT initOp, IRRewriter &rewriter,
   auto slotNumAttr = rewriter.getI32IntegerAttr(slotNum);
   auto noSplitAttr = initOp.getNosplitAttr();
 
+  if (initOp.getGmSlotTensor()) {
+    if (arch == PTOArch::A5)
+      return initOp.emitOpError(
+          "globaltensor pipe entries are supported for a2/a3 l2g2l pipes");
+
+    auto pipe = rewriter.create<InitializeL2G2LPipeOp>(
+        loc, pipeTy, dirAttr, slotSizeAttr, slotNumAttr, IntegerAttr{},
+        IntegerAttr{}, noSplitAttr, initOp.getGmSlotTensor(), Value{},
+        Value{});
+    propagateFrontendIdAttr(initOp, pipe.getOperation(), rewriter);
+    return pipe.getPipe();
+  }
+
   if (arch == PTOArch::A5) {
+    if (!localAddr)
+      return initOp.emitOpError(
+          "requires local consumer buffer operands when lowering to a5");
     auto pipe = rewriter.create<InitializeL2LPipeOp>(
         loc, pipeTy, dirAttr, slotSizeAttr, slotNumAttr, IntegerAttr{},
         noSplitAttr, localAddr, peerLocalAddr);
+    propagateFrontendIdAttr(initOp, pipe.getOperation(), rewriter);
     return pipe.getPipe();
   }
 
   if (failed(requireFrontendGmSlotBuffer(initOp)))
     return failure();
+  if (!localAddr)
+    return initOp.emitOpError(
+        "requires local consumer buffer operands for local FIFO pipe lowering");
 
   IntegerAttr localSlotNumAttr = initOp.getLocalSlotNumAttr();
   if (!localSlotNumAttr)
@@ -77,6 +107,7 @@ static FailureOr<Value> createFrontendPipe(InitOpT initOp, IRRewriter &rewriter,
       loc, pipeTy, dirAttr, slotSizeAttr, slotNumAttr, localSlotNumAttr,
       IntegerAttr{}, noSplitAttr, initOp.getGmSlotBuffer(), localAddr,
       peerLocalAddr);
+  propagateFrontendIdAttr(initOp, pipe.getOperation(), rewriter);
   return pipe.getPipe();
 }
 
@@ -245,8 +276,9 @@ static FailureOr<FrontendPipeHandleMap> lowerInitIfPresent(func::FuncOp funcOp,
 static bool hasFrontendPipeOps(func::FuncOp funcOp) {
   bool found = false;
   funcOp.walk([&](Operation *op) {
-    if (isa<AicInitializePipeOp, AivInitializePipeOp, TPushToAivOp, TPushToAicOp,
-            TPopFromAicOp, TPopFromAivOp, TFreeFromAicOp, TFreeFromAivOp>(op)) {
+    if (isa<AicInitializePipeOp, AivInitializePipeOp, TAllocToAivOp,
+            TAllocToAicOp, TPushToAivOp, TPushToAicOp, TPopFromAicOp,
+            TPopFromAivOp, TFreeFromAicOp, TFreeFromAivOp>(op)) {
       found = true;
       return WalkResult::interrupt();
     }
@@ -261,8 +293,8 @@ static LogicalResult lowerFrontendDataOps(func::FuncOp funcOp,
   DominanceInfo dom(funcOp);
   SmallVector<Operation *> frontendOps;
   funcOp.walk([&](Operation *op) {
-    if (isa<TPushToAivOp, TPushToAicOp, TPopFromAicOp, TPopFromAivOp,
-            TFreeFromAicOp, TFreeFromAivOp>(op))
+    if (isa<TAllocToAivOp, TAllocToAicOp, TPushToAivOp, TPushToAicOp,
+            TPopFromAicOp, TPopFromAivOp, TFreeFromAicOp, TFreeFromAivOp>(op))
       frontendOps.push_back(op);
   });
 
@@ -286,6 +318,42 @@ static LogicalResult lowerFrontendDataOps(func::FuncOp funcOp,
 
   for (Operation *op : frontendOps) {
     rewriter.setInsertionPoint(op);
+
+    if (auto alloc = dyn_cast<TAllocToAivOp>(op)) {
+      auto handlesOr = lookupHandles(op, alloc.getId());
+      if (failed(handlesOr))
+        return failure();
+      const FrontendPipeHandles &handles = **handlesOr;
+      if (!handles.c2vPipe) {
+        op->emitOpError() << "requires initialize_pipe(id = " << alloc.getId()
+                          << ") to enable C2V";
+        return failure();
+      }
+      auto decl = rewriter.create<DeclareGlobalOp>(alloc.getLoc(),
+                                                   alloc.getEntry().getType());
+      rewriter.create<TAllocOp>(alloc.getLoc(), decl.getEntry(),
+                                handles.c2vPipe, alloc.getSplitAttr());
+      rewriter.replaceOp(alloc, decl.getEntry());
+      continue;
+    }
+
+    if (auto alloc = dyn_cast<TAllocToAicOp>(op)) {
+      auto handlesOr = lookupHandles(op, alloc.getId());
+      if (failed(handlesOr))
+        return failure();
+      const FrontendPipeHandles &handles = **handlesOr;
+      if (!handles.v2cPipe) {
+        op->emitOpError() << "requires initialize_pipe(id = " << alloc.getId()
+                          << ") to enable V2C";
+        return failure();
+      }
+      auto decl = rewriter.create<DeclareGlobalOp>(alloc.getLoc(),
+                                                   alloc.getEntry().getType());
+      rewriter.create<TAllocOp>(alloc.getLoc(), decl.getEntry(),
+                                handles.v2cPipe, alloc.getSplitAttr());
+      rewriter.replaceOp(alloc, decl.getEntry());
+      continue;
+    }
 
     if (auto push = dyn_cast<TPushToAivOp>(op)) {
       auto handlesOr = lookupHandles(op, push.getId());
@@ -327,15 +395,23 @@ static LogicalResult lowerFrontendDataOps(func::FuncOp funcOp,
                           << ") to enable C2V";
         return failure();
       }
-      auto decl = rewriter.create<DeclareTileOp>(pop.getLoc(),
-                                                 pop.getTile().getType());
-      if (pop.getValidRow() && pop.getValidCol()) {
-        rewriter.create<SetValidShapeOp>(pop.getLoc(), decl.getTile(),
-                                         pop.getValidRow(), pop.getValidCol());
+      Value entry;
+      if (isa<TensorViewType>(pop.getTile().getType())) {
+        auto decl = rewriter.create<DeclareGlobalOp>(pop.getLoc(),
+                                                     pop.getTile().getType());
+        entry = decl.getEntry();
+      } else {
+        auto decl = rewriter.create<DeclareTileOp>(pop.getLoc(),
+                                                   pop.getTile().getType());
+        entry = decl.getTile();
+        if (pop.getValidRow() && pop.getValidCol()) {
+          rewriter.create<SetValidShapeOp>(pop.getLoc(), entry,
+                                           pop.getValidRow(), pop.getValidCol());
+        }
       }
-      rewriter.create<TPopOp>(pop.getLoc(), decl.getTile(), handles.c2vPipe,
+      rewriter.create<TPopOp>(pop.getLoc(), entry, handles.c2vPipe,
                               pop.getSplitAttr());
-      rewriter.replaceOp(pop, decl.getTile());
+      rewriter.replaceOp(pop, entry);
       continue;
     }
 
@@ -349,15 +425,23 @@ static LogicalResult lowerFrontendDataOps(func::FuncOp funcOp,
                           << ") to enable V2C";
         return failure();
       }
-      auto decl = rewriter.create<DeclareTileOp>(pop.getLoc(),
-                                                 pop.getTile().getType());
-      if (pop.getValidRow() && pop.getValidCol()) {
-        rewriter.create<SetValidShapeOp>(pop.getLoc(), decl.getTile(),
-                                         pop.getValidRow(), pop.getValidCol());
+      Value entry;
+      if (isa<TensorViewType>(pop.getTile().getType())) {
+        auto decl = rewriter.create<DeclareGlobalOp>(pop.getLoc(),
+                                                     pop.getTile().getType());
+        entry = decl.getEntry();
+      } else {
+        auto decl = rewriter.create<DeclareTileOp>(pop.getLoc(),
+                                                   pop.getTile().getType());
+        entry = decl.getTile();
+        if (pop.getValidRow() && pop.getValidCol()) {
+          rewriter.create<SetValidShapeOp>(pop.getLoc(), entry,
+                                           pop.getValidRow(), pop.getValidCol());
+        }
       }
-      rewriter.create<TPopOp>(pop.getLoc(), decl.getTile(), handles.v2cPipe,
+      rewriter.create<TPopOp>(pop.getLoc(), entry, handles.v2cPipe,
                               pop.getSplitAttr());
-      rewriter.replaceOp(pop, decl.getTile());
+      rewriter.replaceOp(pop, entry);
       continue;
     }
 
@@ -371,7 +455,8 @@ static LogicalResult lowerFrontendDataOps(func::FuncOp funcOp,
                           << ") to enable C2V";
         return failure();
       }
-      rewriter.replaceOpWithNewOp<TFreeOp>(free, handles.c2vPipe,
+      rewriter.replaceOpWithNewOp<TFreeOp>(free, free.getEntry(),
+                                           handles.c2vPipe,
                                            free.getSplitAttr());
       continue;
     }
@@ -386,7 +471,8 @@ static LogicalResult lowerFrontendDataOps(func::FuncOp funcOp,
                         << ") to enable V2C";
       return failure();
     }
-    rewriter.replaceOpWithNewOp<TFreeOp>(free, handles.v2cPipe,
+    rewriter.replaceOpWithNewOp<TFreeOp>(free, free.getEntry(),
+                                         handles.v2cPipe,
                                          free.getSplitAttr());
   }
 

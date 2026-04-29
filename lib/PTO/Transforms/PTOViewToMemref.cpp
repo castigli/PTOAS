@@ -534,6 +534,12 @@ static Type convertPTOTypeToMemRef(Type t) {
   // 2. 处理 !pto.tile_buf<...>
   if (auto tbTy = dyn_cast<mlir::pto::TileBufType>(t))
     return convertTileBufTypeToMemRef(tbTy);
+  if (auto tvTy = dyn_cast<mlir::pto::TensorViewType>(t))
+    return MemRefType::get(tvTy.getShape(), tvTy.getElementType(),
+                           MemRefLayoutAttrInterface(), Attribute());
+  if (auto partTy = dyn_cast<mlir::pto::PartitionTensorViewType>(t))
+    return MemRefType::get(partTy.getShape(), partTy.getElementType(),
+                           MemRefLayoutAttrInterface(), Attribute());
   // 其他类型透传
   return t;
 }
@@ -872,6 +878,8 @@ static LogicalResult lowerPartitionViewOps(func::FuncOp func, MLIRContext *ctx) 
     Location loc = op.getLoc();
     Value src = op.getOperand(0);
     auto srcMrTy = dyn_cast<MemRefType>(src.getType());
+    if (!srcMrTy)
+      continue;
     int64_t rank = srcMrTy.getRank();
 
     SmallVector<int64_t> staticSizes;

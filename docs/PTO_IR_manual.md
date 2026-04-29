@@ -7834,8 +7834,9 @@ pto.section.vector {
 ### 4.18 Frontend Pipe Communication Operations
 
 PTOAS exposes a frontend-facing pipe communication interface for Cube/Vector
-FIFO-style tile exchange. These operations are intended for frontend/framework
-generated IR. The detailed design document is:
+FIFO-style exchange. A pipe entry can be either a local tile buffer or a
+GlobalTensor-like GM view descriptor. These operations are intended for
+frontend/framework generated IR. The detailed design document is:
 
 - `docs/designs/ptoas-tpush-tpop-design.md`
 
@@ -7847,18 +7848,46 @@ generated IR. The detailed design document is:
   - `3`: both directions at frontend level
 - `id` is a compile-time integer attribute used to bind
   `pto.aic_initialize_pipe` / `pto.aiv_initialize_pipe` with the matching
-  `pto.tpush_*` / `pto.tpop_*` / `pto.tfree_*` ops in the same function.
-- `slot_size` is expressed in bytes and uses the pre-split logical tile size.
+  `pto.talloc_*` / `pto.tpush_*` / `pto.tpop_*` / `pto.tfree_*` ops in the same
+  function.
+- `slot_size` is expressed in bytes and uses the pre-split logical pipe-entry
+  size.
 - `local_slot_num` is an optional compile-time integer attribute on
   `pto.aic_initialize_pipe` / `pto.aiv_initialize_pipe`.
-  On A2/A3 it overrides the default consumer-side local FIFO slot count used
-  when lowering to `pto.initialize_l2g2l_pipe`.
+  On A2/A3 it overrides the default consumer-side local FIFO slot count only
+  when the pipe uses a local consumer FIFO buffer. Global-only GM FIFO pipes
+  omit it.
 - `nosplit` is an optional compile-time boolean attribute on
   `pto.aic_initialize_pipe` / `pto.aiv_initialize_pipe`.
 - `split` is a compile-time attribute, not a runtime SSA operand.
 - `split = 0/1/2` corresponds to `TILE_NO_SPLIT`, `TILE_UP_DOWN`, and
   `TILE_LEFT_RIGHT`.
 - `pto.tpop_from_aic` and `pto.tpop_from_aiv` are result-valued frontend ops.
+- Pipe entries support two forms:
+  - tile entry: `!pto.tile_buf<...>` or the equivalent local memref after view
+    lowering.
+  - global entry: `!pto.tensor_view<...>` or the equivalent GM descriptor after
+    lowering. This maps to pto-isa `GlobalTensor` overloads and only manages
+    FIFO synchronization plus GM slot address assignment. Use
+    `pto.partition_view` to derive a `!pto.partition_tensor_view<...>` window
+    when a `pto.tload` / `pto.tstore` needs a sub-view of the entry.
+- Global-entry pipe communication currently applies to the A2/A3 GM FIFO path
+  (`pto.initialize_l2g2l_pipe`). It does not implicitly execute `pto.tstore` or
+  `pto.tload`; callers move data explicitly before `tpush` or after `tpop`.
+- When every transfer op bound to one pipe id uses a global entry, the pipe is
+  a global-only GM FIFO. Its frontend initialize op carries only
+  `gm_slot_tensor`; `gm_slot_buffer`, `c2v_consumer_buf`, `v2c_consumer_buf`, `local_slot_num`,
+  `pto.reserve_buffer`, and `pto.import_reserved_buffer` are not used.
+- For global entries, the matched initialize op's `gm_slot_tensor` describes
+  one FIFO slot entry, not the full multi-slot FIFO buffer. Its dtype, shape,
+  stride, and layout must match the `tensor_view` returned by `talloc` /
+  `tpop` and form the pto-isa `GlobalData` template argument. `TILE_UP_DOWN` and
+  `TILE_LEFT_RIGHT` split modes derive sub-core GM address offsets from that
+  single-slot descriptor's static rows, columns, and element dtype.
+- If a global-entry result op does not carry explicit stride/layout metadata,
+  PTOAS treats it as a row-major contiguous GM view. Non-contiguous cases must
+  preserve stride/layout through the producing op metadata, the source view, or
+  the lowered GM memref layout.
 - A single logical pipe cannot mix `split = 0` with `split = 1` / `2`.
   `nosplit = true` requires all bound data-transfer ops to use `split = 0`;
   `nosplit = false` requires all bound data-transfer ops to use `split = 1`
@@ -7879,15 +7908,18 @@ generated IR. The detailed design document is:
   may execute the pipe sequence on a single vector core.
 - On A2/A3, `nosplit` follows the hardware `1C:2V` synchronization
   configuration. The two vector cores must run the same code for the same
-  logical pipe, and the `tpush` / `tpop` / `tfree` sequence for that pipe must
-  be identical in order on both vector cores. They do not need to reach each
-  operation at the same time; only the relative order must remain consistent.
+  logical pipe, and the `talloc` / `tpush` / `tpop` / `tfree` sequence for that
+  pipe must be identical in order on both vector cores. They do not need to
+  reach each operation at the same time; only the relative order must remain
+  consistent.
 
 ##### `pto.reserve_buffer` - Reserve Local Consumer FIFO Buffer
 
 **Summary:** Declares a local reserved FIFO buffer region for the consumer side
-of one frontend logical pipe. The valid way to write this op depends on
-whether the active PTOAS compilation flow enables local address planning.
+of one frontend logical pipe when that pipe uses a local consumer FIFO buffer.
+Global-only GM FIFO pipes do not use this op. The valid way to write this op
+depends on whether the active PTOAS compilation flow enables local address
+planning.
 
 **Syntax:**
 
@@ -7941,7 +7973,8 @@ When the address is already fixed in the input IR:
 ##### `pto.import_reserved_buffer` - Import Peer Reserved FIFO Buffer
 
 **Summary:** Imports the resolved local FIFO base address from the peer
-function's reserved buffer declaration.
+function's reserved buffer declaration. Global-only GM FIFO pipes do not use
+this op.
 
 **Syntax:**
 
@@ -7983,6 +8016,13 @@ pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 1024, local_slot_num 
    c2v_consumer_buf = %c2v_import : i32,
    v2c_consumer_buf = %c0_i32 : i32)
 
+// A2/A3 global-only GM FIFO (GlobalTensor pipe entry):
+%gm_slots = pto.make_tensor_view %gm_slot_buffer,
+  shape = [%c16, %c16], strides = [%c16, %c1]
+  : !pto.tensor_view<16x16xf32>
+pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 1024}
+  (gm_slot_tensor = %gm_slots : !pto.tensor_view<16x16xf32>)
+
 // A5 (without GM slot buffer):
 pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 1024, nosplit = true}
   (c2v_consumer_buf = %c2v_import : i32,
@@ -7996,11 +8036,19 @@ pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 1024, nosplit = true}
 - `dir_mask`: communication direction encoding
 - `slot_size`: logical slot size in bytes
 - `local_slot_num`: optional A2/A3-only local FIFO slot count override for the
-  lowered `pto.initialize_l2g2l_pipe`
+  lowered `pto.initialize_l2g2l_pipe`; omitted for global-only GM FIFO
 - `nosplit`: optional compile-time boolean controlling no-split pipe mode
-- `gm_slot_buffer`: optional GM pointer (`!pto.ptr<T>`), required on A2/A3, omitted on A5
-- `c2v_consumer_buf`: C2V consumer local base address
-- `v2c_consumer_buf`: V2C consumer local base address
+- `gm_slot_buffer`: optional GM pointer (`!pto.ptr<T>`), used by A2/A3 GM FIFO
+  paths that also use a local consumer FIFO buffer
+- `gm_slot_tensor`: optional single-slot entry descriptor
+  (`!pto.tensor_view<...>`), required by global-only GM FIFO. Its type describes
+  the `tensor_view` returned by `talloc` / `tpop`. This descriptor is retained
+  in IR for entry type validation; EmitC lowers the `TPipe` constructor
+  argument to only the GM FIFO start address
+- `c2v_consumer_buf`: optional C2V consumer local base address; omitted for
+  global-only GM FIFO
+- `v2c_consumer_buf`: optional V2C consumer local base address; omitted for
+  global-only GM FIFO
 
 **Results:** None.
 
@@ -8012,6 +8060,13 @@ pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 1024, nosplit = true}
 - If `local_slot_num` is present, it must be greater than `0` and no greater
   than the legacy slot count implied by `dir_mask`
   (`8` for `dir_mask = 1/2`, `4` for `dir_mask = 3`)
+- A global-only GM FIFO initialize carries only `gm_slot_tensor`; it must not
+  carry `gm_slot_buffer`, `local_slot_num`, `c2v_consumer_buf`, or
+  `v2c_consumer_buf`
+- For global-only GM FIFO, `slot_size` must match the byte size of
+  `gm_slot_tensor`
+- Global-entry `talloc` / `tpush` / `tpop` / `tfree` entry types must match the
+  `gm_slot_tensor` descriptor in element type, rank, static shape, and byte size
 - The lowered pipes for one function must fit within 16 hardware flag ids in
   total
 - If `nosplit = true`, all frontend data-transfer ops bound to the same logical
@@ -8031,6 +8086,13 @@ pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 1024, local_slot_num 
   (gm_slot_buffer = %gm_buf : !pto.ptr<f32>,
    c2v_consumer_buf = %c2v_local : i32,
    v2c_consumer_buf = %c0_i32 : i32)
+
+// A2/A3 global-only GM FIFO (GlobalTensor pipe entry):
+%gm_slots = pto.make_tensor_view %gm_slot_buffer,
+  shape = [%c16, %c16], strides = [%c16, %c1]
+  : !pto.tensor_view<16x16xf32>
+pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 1024}
+  (gm_slot_tensor = %gm_slots : !pto.tensor_view<16x16xf32>)
 
 // A5 (without GM slot buffer):
 pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 1024, nosplit = true}
@@ -8055,19 +8117,144 @@ pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 1024, nosplit = true}
 - If `nosplit = false`, all frontend data-transfer ops bound to the same
   logical pipe must use `split = 1` or `split = 2`
 
+**Basic Example: GlobalTensor Pipe Entry Without Reserve/Import**
+
+This C2V global-only GM FIFO example intentionally has no
+`pto.reserve_buffer` and no `pto.import_reserved_buffer`. Both function
+signatures keep the FIFO buffer as `!pto.ptr<f32>`, then use
+`pto.make_tensor_view` before initialize_pipe to build the `gm_slot_tensor`
+descriptor for one FIFO slot entry.
+
+```mlir
+func.func @cube_kernel(%gm_slot_buffer : !pto.ptr<f32>,
+                       %src : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=1024, pad=0>)
+    attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c16 = arith.constant 16 : index
+  %gm_slots = pto.make_tensor_view %gm_slot_buffer,
+    shape = [%c16, %c16], strides = [%c16, %c1]
+    : !pto.tensor_view<16x16xf32>
+  pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 1024}
+    (gm_slot_tensor = %gm_slots : !pto.tensor_view<16x16xf32>)
+
+  %entry = pto.talloc_to_aiv {id = 0, split = 0}
+    -> !pto.tensor_view<16x16xf32>
+  %entry_partition = pto.partition_view %entry,
+    offsets = [%c0, %c0], sizes = [%c16, %c16]
+    : !pto.tensor_view<16x16xf32> -> !pto.partition_tensor_view<16x16xf32>
+  pto.tstore ins(%src : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=1024, pad=0>)
+             outs(%entry_partition : !pto.partition_tensor_view<16x16xf32>)
+  pto.tpush_to_aiv(%entry : !pto.tensor_view<16x16xf32>) {id = 0, split = 0}
+  func.return
+}
+
+func.func @vector_kernel(%gm_slot_buffer : !pto.ptr<f32>,
+                         %dst : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=1024, pad=0>)
+    attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c16 = arith.constant 16 : index
+  %gm_slots = pto.make_tensor_view %gm_slot_buffer,
+    shape = [%c16, %c16], strides = [%c16, %c1]
+    : !pto.tensor_view<16x16xf32>
+  pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 1024}
+    (gm_slot_tensor = %gm_slots : !pto.tensor_view<16x16xf32>)
+
+  %entry = pto.tpop_from_aic {id = 0, split = 0}
+    -> !pto.tensor_view<16x16xf32>
+  %entry_partition = pto.partition_view %entry,
+    offsets = [%c0, %c0], sizes = [%c16, %c16]
+    : !pto.tensor_view<16x16xf32> -> !pto.partition_tensor_view<16x16xf32>
+  pto.tload ins(%entry_partition : !pto.partition_tensor_view<16x16xf32>)
+            outs(%dst : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=1024, pad=0>)
+  pto.tfree_from_aic(%entry : !pto.tensor_view<16x16xf32>) {id = 0, split = 0}
+  func.return
+}
+```
+
+##### `pto.talloc_to_aiv` - Frontend C2V Producer Global Entry Allocate
+
+**Summary:** Allocates the next C2V GM FIFO slot for a GlobalTensor-like entry
+in a Cube kernel.
+
+**Syntax:**
+
+```mlir
+%entry = pto.talloc_to_aiv {id = 0, split = 1}
+  -> !pto.tensor_view<128x512xf32>
+```
+
+**Arguments:**
+
+- compile-time `id` attribute
+- compile-time `split` attribute
+
+**Results:** one `!pto.tensor_view<...>` global entry describing the
+currently allocated FIFO slot.
+
+**Constraints & Verification:**
+
+- Must appear in Cube kernels
+- Represents producer-side allocation for a C2V global-entry transaction
+- `id` must match exactly one frontend initialize_pipe op in the same function
+  with `dir_mask = 1` or `dir_mask = 3`
+- Requires the matched pipe to lower to the A2/A3 GM FIFO path
+- The result type must match the single-slot descriptor derived from the matched
+  initialize op's `gm_slot_tensor`; element type, rank, static shape, and byte
+  size are checked against the initialize op
+- Does not write data and does not notify the consumer; callers must write the
+  returned GM entry explicitly before the matching `pto.tpush_to_aiv`
+
+##### `pto.talloc_to_aic` - Frontend V2C Producer Global Entry Allocate
+
+**Summary:** Allocates the next V2C GM FIFO slot for a GlobalTensor-like entry
+in a Vector kernel.
+
+**Syntax:**
+
+```mlir
+%entry = pto.talloc_to_aic {id = 0, split = 1}
+  -> !pto.tensor_view<128x512xf32>
+```
+
+**Arguments:**
+
+- compile-time `id` attribute
+- compile-time `split` attribute
+
+**Results:** one `!pto.tensor_view<...>` global entry describing the
+currently allocated FIFO slot.
+
+**Constraints & Verification:**
+
+- Must appear in Vector kernels
+- Represents producer-side allocation for a V2C global-entry transaction
+- `id` must match exactly one frontend initialize_pipe op in the same function
+  with `dir_mask = 2` or `dir_mask = 3`
+- Requires the matched pipe to lower to the A2/A3 GM FIFO path
+- The result type must match the single-slot descriptor derived from the matched
+  initialize op's `gm_slot_tensor`; element type, rank, static shape, and byte
+  size are checked against the initialize op
+- Does not write data and does not notify the consumer; callers must write the
+  returned GM entry explicitly before the matching `pto.tpush_to_aic`
+
 ##### `pto.tpush_to_aiv` - Frontend C2V Producer Push
 
-**Summary:** Pushes one tile from a Cube kernel to the C2V logical pipe.
+**Summary:** Pushes one C2V pipe entry from a Cube kernel. For tile entries this
+keeps the existing tile-transfer behavior; for global entries this commits a GM
+FIFO slot previously allocated by `pto.talloc_to_aiv`.
 
 **Syntax:**
 
 ```mlir
 pto.tpush_to_aiv(%tile : !pto.tile_buf<...>) {id = 0, split = 1}
+pto.tpush_to_aiv(%entry : !pto.tensor_view<...>) {id = 0, split = 1}
 ```
 
 **Arguments:**
 
-- one tile operand
+- one pipe-entry operand: either a tile entry or a global entry
 - compile-time `id` attribute
 - compile-time `split` attribute
 
@@ -8079,20 +8266,28 @@ pto.tpush_to_aiv(%tile : !pto.tile_buf<...>) {id = 0, split = 1}
 - Represents the producer side of a C2V transfer
 - `id` must match exactly one frontend initialize_pipe op in the same function
   with `dir_mask = 1` or `dir_mask = 3`
+- A global-entry operand requires a dominating matching `pto.talloc_to_aiv`
+- A global-entry operand type must match the single-slot descriptor derived from
+  the matched initialize op's `gm_slot_tensor`
+- A global-entry push does not perform `TSTORE`; it only notifies the consumer
+  that the GM FIFO slot is ready
 
 ##### `pto.tpush_to_aic` - Frontend V2C Producer Push
 
-**Summary:** Pushes one tile from a Vector kernel to the V2C logical pipe.
+**Summary:** Pushes one V2C pipe entry from a Vector kernel. For tile entries
+this keeps the existing tile-transfer behavior; for global entries this commits
+a GM FIFO slot previously allocated by `pto.talloc_to_aic`.
 
 **Syntax:**
 
 ```mlir
 pto.tpush_to_aic(%tile : !pto.tile_buf<...>) {id = 0, split = 1}
+pto.tpush_to_aic(%entry : !pto.tensor_view<...>) {id = 0, split = 1}
 ```
 
 **Arguments:**
 
-- one tile operand
+- one pipe-entry operand: either a tile entry or a global entry
 - compile-time `id` attribute
 - compile-time `split` attribute
 
@@ -8104,20 +8299,31 @@ pto.tpush_to_aic(%tile : !pto.tile_buf<...>) {id = 0, split = 1}
 - Represents the producer side of a V2C transfer
 - `id` must match exactly one frontend initialize_pipe op in the same function
   with `dir_mask = 2` or `dir_mask = 3`
+- A global-entry operand requires a dominating matching `pto.talloc_to_aic`
+- A global-entry operand type must match the single-slot descriptor derived from
+  the matched initialize op's `gm_slot_tensor`
+- A global-entry push does not perform `TSTORE`; it only notifies the consumer
+  that the GM FIFO slot is ready
 
 ##### `pto.tpop_from_aic` - Frontend C2V Consumer Pop
 
-**Summary:** Pops one tile from a C2V logical pipe in a Vector kernel.
+**Summary:** Pops one C2V pipe entry in a Vector kernel. For tile entries this
+keeps the existing tile-pop behavior; for global entries this waits for producer
+ready and assigns the current GM FIFO slot address into the returned
+GlobalTensor-like descriptor.
 
 **Syntax:**
 
 ```mlir
 %tile = pto.tpop_from_aic {id = 0, split = 1} -> !pto.tile_buf<...>
+%entry = pto.tpop_from_aic {id = 0, split = 1}
+  -> !pto.tensor_view<128x512xf32>
 ```
 
 **Arguments:** compile-time `id` and `split` attributes.
 
-**Results:** one `!pto.tile_buf<...>` result tile.
+**Results:** one pipe entry. The result may be a `!pto.tile_buf<...>` tile entry
+or a GlobalTensor-like `!pto.tensor_view<...>` GM entry.
 
 **Constraints & Verification:**
 
@@ -8125,20 +8331,32 @@ pto.tpush_to_aic(%tile : !pto.tile_buf<...>) {id = 0, split = 1}
 - Represents the consumer side of a C2V transfer
 - `id` must match exactly one frontend initialize_pipe op in the same function
   with `dir_mask = 1` or `dir_mask = 3`
+- A global-entry result requires the matched pipe to lower to the A2/A3 GM FIFO
+  path
+- A global-entry result type must match the single-slot descriptor derived from
+  the matched initialize op's `gm_slot_tensor`
+- A global-entry pop does not perform `TLOAD`; callers explicitly load from the
+  returned GM entry or from views derived from it
 
 ##### `pto.tpop_from_aiv` - Frontend V2C Consumer Pop
 
-**Summary:** Pops one tile from a V2C logical pipe in a Cube kernel.
+**Summary:** Pops one V2C pipe entry in a Cube kernel. For tile entries this
+keeps the existing tile-pop behavior; for global entries this waits for producer
+ready and assigns the current GM FIFO slot address into the returned
+GlobalTensor-like descriptor.
 
 **Syntax:**
 
 ```mlir
 %tile = pto.tpop_from_aiv {id = 0, split = 1} -> !pto.tile_buf<...>
+%entry = pto.tpop_from_aiv {id = 0, split = 1}
+  -> !pto.tensor_view<128x512xf32>
 ```
 
 **Arguments:** compile-time `id` and `split` attributes.
 
-**Results:** one `!pto.tile_buf<...>` result tile.
+**Results:** one pipe entry. The result may be a `!pto.tile_buf<...>` tile entry
+or a GlobalTensor-like `!pto.tensor_view<...>` GM entry.
 
 **Constraints & Verification:**
 
@@ -8146,6 +8364,12 @@ pto.tpush_to_aic(%tile : !pto.tile_buf<...>) {id = 0, split = 1}
 - Represents the consumer side of a V2C transfer
 - `id` must match exactly one frontend initialize_pipe op in the same function
   with `dir_mask = 2` or `dir_mask = 3`
+- A global-entry result requires the matched pipe to lower to the A2/A3 GM FIFO
+  path
+- A global-entry result type must match the single-slot descriptor derived from
+  the matched initialize op's `gm_slot_tensor`
+- A global-entry pop does not perform `TLOAD`; callers explicitly load from the
+  returned GM entry or from views derived from it
 
 ##### `pto.tfree_from_aic` - Frontend C2V Consumer Free
 
@@ -8155,9 +8379,11 @@ pto.tpush_to_aic(%tile : !pto.tile_buf<...>) {id = 0, split = 1}
 
 ```mlir
 pto.tfree_from_aic {id = 0, split = 1}
+pto.tfree_from_aic(%entry : !pto.tensor_view<...>) {id = 0, split = 1}
 ```
 
-**Arguments:** compile-time `id` and `split` attributes.
+**Arguments:** compile-time `id` and `split` attributes. A global-entry free
+also carries the entry descriptor returned by the matching `pto.tpop_from_aic`.
 
 **Results:** None.
 
@@ -8167,6 +8393,11 @@ pto.tfree_from_aic {id = 0, split = 1}
 - Represents the consumer free side of a C2V transfer
 - `id` must match exactly one frontend initialize_pipe op in the same function
   with `dir_mask = 1` or `dir_mask = 3`
+- Tile-entry frees use the no-operand form
+- Global-entry frees use the entry operand and must run after all explicit reads
+  from that GM FIFO slot are complete; the entry operand type must match the
+  single-slot descriptor derived from the matched initialize op's
+  `gm_slot_tensor`
 
 ##### `pto.tfree_from_aiv` - Frontend V2C Consumer Free
 
@@ -8176,9 +8407,11 @@ pto.tfree_from_aic {id = 0, split = 1}
 
 ```mlir
 pto.tfree_from_aiv {id = 0, split = 1}
+pto.tfree_from_aiv(%entry : !pto.tensor_view<...>) {id = 0, split = 1}
 ```
 
-**Arguments:** compile-time `id` and `split` attributes.
+**Arguments:** compile-time `id` and `split` attributes. A global-entry free
+also carries the entry descriptor returned by the matching `pto.tpop_from_aiv`.
 
 **Results:** None.
 
@@ -8188,6 +8421,11 @@ pto.tfree_from_aiv {id = 0, split = 1}
 - Represents the consumer free side of a V2C transfer
 - `id` must match exactly one frontend initialize_pipe op in the same function
   with `dir_mask = 2` or `dir_mask = 3`
+- Tile-entry frees use the no-operand form
+- Global-entry frees use the entry operand and must run after all explicit reads
+  from that GM FIFO slot are complete; the entry operand type must match the
+  single-slot descriptor derived from the matched initialize op's
+  `gm_slot_tensor`
 
 ---
 

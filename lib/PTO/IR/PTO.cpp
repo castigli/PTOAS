@@ -2162,7 +2162,8 @@ LogicalResult pto::TAbsOp::verify() {
 
 static bool isPTOShapedLike(Type ty) {
   return ty.isa<MemRefType, RankedTensorType,
-                pto::TileBufType, pto::PartitionTensorViewType>();
+                pto::TensorViewType, pto::TileBufType,
+                pto::PartitionTensorViewType>();
 }
 
 static bool isTileLikeType(Type ty) {
@@ -2172,6 +2173,7 @@ static bool isTileLikeType(Type ty) {
 static Type getElemTy(Type ty) {
   if (auto mr = ty.dyn_cast<MemRefType>()) return mr.getElementType();
   if (auto tt = ty.dyn_cast<RankedTensorType>()) return tt.getElementType();
+  if (auto tv = ty.dyn_cast<pto::TensorViewType>()) return tv.getElementType();
   if (auto tb = ty.dyn_cast<pto::TileBufType>()) return tb.getElementType();
   if (auto tv = ty.dyn_cast<pto::PartitionTensorViewType>()) return tv.getElementType();
   return Type();
@@ -2183,6 +2185,8 @@ static SmallVector<int64_t, 4> getShapeVec(Type ty) {
     return SmallVector<int64_t,4>(mr.getShape().begin(), mr.getShape().end());
   if (auto tt = ty.dyn_cast<RankedTensorType>())
     return SmallVector<int64_t,4>(tt.getShape().begin(), tt.getShape().end());
+  if (auto tv = ty.dyn_cast<pto::TensorViewType>())
+    return SmallVector<int64_t,4>(tv.getShape().begin(), tv.getShape().end());
   if (auto tb = ty.dyn_cast<pto::TileBufType>())
     return SmallVector<int64_t,4>(tb.getShape().begin(), tb.getShape().end());
   if (auto tv = ty.dyn_cast<pto::PartitionTensorViewType>())
@@ -10206,37 +10210,87 @@ static ParseResult parseFrontendInitializePipeOp(OpAsmParser &parser,
     attrs.set("id", parser.getBuilder().getI32IntegerAttr(0));
 
   OpAsmParser::UnresolvedOperand gmSlotBuffer;
+  OpAsmParser::UnresolvedOperand gmSlotTensor;
   OpAsmParser::UnresolvedOperand c2vConsumerBuf;
   OpAsmParser::UnresolvedOperand v2cConsumerBuf;
   Type gmSlotBufferTy;
+  Type gmSlotTensorTy;
   Type c2vConsumerBufTy;
   Type v2cConsumerBufTy;
   bool hasGmSlotBuffer = false;
+  bool hasGmSlotTensor = false;
+  bool hasC2vConsumerBuf = false;
+  bool hasV2cConsumerBuf = false;
 
   if (parser.parseLParen())
     return failure();
-  if (succeeded(parser.parseOptionalKeyword("gm_slot_buffer"))) {
-    if (parser.parseEqual() || parser.parseOperand(gmSlotBuffer) ||
-        parser.parseColonType(gmSlotBufferTy) || parser.parseComma())
+  while (failed(parser.parseOptionalRParen())) {
+    StringRef keyword;
+    if (parser.parseKeyword(&keyword) || parser.parseEqual())
       return failure();
-    hasGmSlotBuffer = true;
+
+    if (keyword == "gm_slot_buffer") {
+      if (hasGmSlotBuffer)
+        return parser.emitError(parser.getCurrentLocation(),
+                                "duplicate 'gm_slot_buffer' operand");
+      if (parser.parseOperand(gmSlotBuffer) ||
+          parser.parseColonType(gmSlotBufferTy))
+        return failure();
+      hasGmSlotBuffer = true;
+    } else if (keyword == "gm_slot_tensor") {
+      if (hasGmSlotTensor)
+        return parser.emitError(parser.getCurrentLocation(),
+                                "duplicate 'gm_slot_tensor' operand");
+      if (parser.parseOperand(gmSlotTensor) ||
+          parser.parseColonType(gmSlotTensorTy))
+        return failure();
+      hasGmSlotTensor = true;
+    } else if (keyword == "c2v_consumer_buf") {
+      if (hasC2vConsumerBuf)
+        return parser.emitError(parser.getCurrentLocation(),
+                                "duplicate 'c2v_consumer_buf' operand");
+      if (parser.parseOperand(c2vConsumerBuf) ||
+          parser.parseColonType(c2vConsumerBufTy))
+        return failure();
+      hasC2vConsumerBuf = true;
+    } else if (keyword == "v2c_consumer_buf") {
+      if (hasV2cConsumerBuf)
+        return parser.emitError(parser.getCurrentLocation(),
+                                "duplicate 'v2c_consumer_buf' operand");
+      if (parser.parseOperand(v2cConsumerBuf) ||
+          parser.parseColonType(v2cConsumerBufTy))
+        return failure();
+      hasV2cConsumerBuf = true;
+    } else {
+      return parser.emitError(parser.getCurrentLocation())
+             << "unexpected initialize_pipe operand '" << keyword << "'";
+    }
+
+    if (succeeded(parser.parseOptionalRParen()))
+      break;
+    if (parser.parseComma())
+      return failure();
   }
-  if (parser.parseKeyword("c2v_consumer_buf") || parser.parseEqual() ||
-      parser.parseOperand(c2vConsumerBuf) ||
-      parser.parseColonType(c2vConsumerBufTy) || parser.parseComma() ||
-      parser.parseKeyword("v2c_consumer_buf") || parser.parseEqual() ||
-      parser.parseOperand(v2cConsumerBuf) ||
-      parser.parseColonType(v2cConsumerBufTy) || parser.parseRParen())
-    return failure();
 
   if (parser.parseOptionalAttrDict(attrs))
     return failure();
 
   result.addAttributes(attrs);
+  result.addAttribute("operandSegmentSizes",
+                      parser.getBuilder().getDenseI32ArrayAttr(
+                          {hasGmSlotBuffer ? 1 : 0, hasGmSlotTensor ? 1 : 0,
+                           hasC2vConsumerBuf ? 1 : 0,
+                           hasV2cConsumerBuf ? 1 : 0}));
   if (hasGmSlotBuffer &&
       parser.resolveOperand(gmSlotBuffer, gmSlotBufferTy, result.operands))
     return failure();
-  if (parser.resolveOperand(c2vConsumerBuf, c2vConsumerBufTy, result.operands) ||
+  if (hasGmSlotTensor &&
+      parser.resolveOperand(gmSlotTensor, gmSlotTensorTy, result.operands))
+    return failure();
+  if (hasC2vConsumerBuf &&
+      parser.resolveOperand(c2vConsumerBuf, c2vConsumerBufTy, result.operands))
+    return failure();
+  if (hasV2cConsumerBuf &&
       parser.resolveOperand(v2cConsumerBuf, v2cConsumerBufTy, result.operands))
     return failure();
   return success();
@@ -10264,18 +10318,66 @@ static void printFrontendInitializePipeOp(InitOpT op, OpAsmPrinter &p) {
   p << "}";
 
   p << "(";
+  bool needsOperandComma = false;
+  auto printOperandClause = [&](StringRef keyword, Value value) {
+    if (needsOperandComma)
+      p << ", ";
+    p << keyword << " = " << value << " : " << value.getType();
+    needsOperandComma = true;
+  };
   if (op.getGmSlotBuffer()) {
-    p << "gm_slot_buffer = " << op.getGmSlotBuffer() << " : "
-      << op.getGmSlotBuffer().getType() << ", ";
+    printOperandClause("gm_slot_buffer", op.getGmSlotBuffer());
   }
-  p << "c2v_consumer_buf = " << op.getC2vConsumerBuf() << " : "
-    << op.getC2vConsumerBuf().getType() << ", ";
-  p << "v2c_consumer_buf = " << op.getV2cConsumerBuf() << " : "
-    << op.getV2cConsumerBuf().getType() << ")";
+  if (op.getGmSlotTensor())
+    printOperandClause("gm_slot_tensor", op.getGmSlotTensor());
+  if (op.getC2vConsumerBuf())
+    printOperandClause("c2v_consumer_buf", op.getC2vConsumerBuf());
+  if (op.getV2cConsumerBuf())
+    printOperandClause("v2c_consumer_buf", op.getV2cConsumerBuf());
+  p << ")";
   p.printOptionalAttrDict(
       op->getAttrs(),
       /*elidedAttrs=*/{"id", "dir_mask", "slot_size", "local_slot_num",
-                       "nosplit"});
+                       "nosplit", "operandSegmentSizes"});
+}
+
+static std::optional<uint64_t>
+getStaticElementCount(ArrayRef<int64_t> shape) {
+  uint64_t count = 1;
+  for (int64_t dim : shape) {
+    if (dim == ShapedType::kDynamic || dim < 0)
+      return std::nullopt;
+    count *= static_cast<uint64_t>(dim);
+  }
+  return count;
+}
+
+static LogicalResult verifyFrontendGlobalSlotTensor(Operation *op, Value tensor,
+                                                    int8_t dirMask,
+                                                    int32_t slotSize) {
+  (void)dirMask;
+  auto tvTy = dyn_cast<TensorViewType>(tensor.getType());
+  if (!tvTy)
+    return op->emitOpError("expects 'gm_slot_tensor' to be !pto.tensor_view");
+
+  ArrayRef<int64_t> shape = tvTy.getShape();
+  if (shape.empty())
+    return op->emitOpError(
+        "expects 'gm_slot_tensor' to describe one slot entry tensor");
+
+  if (auto elemCount = getStaticElementCount(shape)) {
+    uint64_t elemBytes = getElemByteSize(tvTy.getElementType());
+    if (elemBytes != 0 && *elemCount * elemBytes !=
+                              static_cast<uint64_t>(slotSize)) {
+      return op->emitOpError()
+             << "expects 'slot_size' to equal gm_slot_tensor byte size "
+                "(got slot_size = "
+             << slotSize << ", gm_slot_tensor byte size = "
+             << (*elemCount * elemBytes) << ")";
+    }
+  }
+
+  return success();
 }
 
 template <typename InitOpT>
@@ -10313,6 +10415,37 @@ static LogicalResult verifyFrontendInitCommon(InitOpT op,
     return op.emitOpError("expects 'dir_mask' to be 1, 2, or 3");
   if (op.getSlotSize() <= 0)
     return op.emitOpError("expects 'slot_size' to be greater than 0");
+
+  bool hasGlobalSlotTensor = static_cast<bool>(op.getGmSlotTensor());
+  bool hasC2vConsumerBuf = static_cast<bool>(op.getC2vConsumerBuf());
+  bool hasV2cConsumerBuf = static_cast<bool>(op.getV2cConsumerBuf());
+  if (hasGlobalSlotTensor) {
+    if (op.getGmSlotBuffer() || hasC2vConsumerBuf || hasV2cConsumerBuf) {
+      return op.emitOpError(
+          "globaltensor pipe init expects only 'gm_slot_tensor' and no "
+          "'gm_slot_buffer', 'c2v_consumer_buf', or 'v2c_consumer_buf'");
+    }
+    if (op.getLocalSlotNumAttr())
+      return op.emitOpError(
+          "globaltensor pipe init does not use 'local_slot_num'");
+    if (getTargetArch(op.getOperation()) == PTOArch::A5) {
+      return op.emitOpError(
+          "globaltensor pipe entries are supported for a2/a3 l2g2l pipes");
+    }
+    return verifyFrontendGlobalSlotTensor(
+        op.getOperation(), op.getGmSlotTensor(), dirMask, op.getSlotSize());
+  }
+
+  if (hasC2vConsumerBuf != hasV2cConsumerBuf) {
+    return op.emitOpError(
+        "expects 'c2v_consumer_buf' and 'v2c_consumer_buf' to be provided together");
+  }
+  if (!hasC2vConsumerBuf) {
+    return op.emitOpError(
+        "expects local pipe init to provide 'c2v_consumer_buf' and "
+        "'v2c_consumer_buf'; use 'gm_slot_tensor' for globaltensor pipe entries");
+  }
+
   if (auto localSlotNumAttr = op.getLocalSlotNumAttr()) {
     int32_t localSlotNum = localSlotNumAttr.getInt();
     if (localSlotNum <= 0)
@@ -10415,34 +10548,22 @@ LogicalResult ImportReservedBufferOp::verify() {
   return success();
 }
 
-static LogicalResult verifyFrontendSplitOp(Operation *op,
-                                           FunctionKernelKind expected,
-                                           StringRef kernelName,
-                                           int32_t id,
-                                           int64_t split) {
-  if (failed(verifyFrontendKernelKind(op, expected, kernelName)))
-    return failure();
-  if (id < 0)
-    return op->emitOpError("expects 'id' to be non-negative");
-  return verifySplitAttr(op, split);
-}
-
-static FailureOr<int8_t> lookupFrontendInitDirMaskById(Operation *op,
+static FailureOr<Operation *> lookupFrontendInitOpById(Operation *op,
                                                        func::FuncOp funcOp,
                                                        int32_t id) {
-  int8_t matchedDirMask = 0;
+  Operation *matchedInit = nullptr;
   unsigned matchedInitCount = 0;
   funcOp.walk([&](Operation *candidate) {
     if (auto aic = dyn_cast<AicInitializePipeOp>(candidate)) {
       if (aic.getId() == id) {
-        matchedDirMask = aic.getDirMask();
+        matchedInit = candidate;
         ++matchedInitCount;
       }
       return WalkResult::advance();
     }
     if (auto aiv = dyn_cast<AivInitializePipeOp>(candidate)) {
       if (aiv.getId() == id) {
-        matchedDirMask = aiv.getDirMask();
+        matchedInit = candidate;
         ++matchedInitCount;
       }
       return WalkResult::advance();
@@ -10460,7 +10581,30 @@ static FailureOr<int8_t> lookupFrontendInitDirMaskById(Operation *op,
                       << " to match exactly one frontend initialize_pipe op in the same function";
     return failure();
   }
-  return matchedDirMask;
+  return matchedInit;
+}
+
+static LogicalResult verifyFrontendSplitOp(Operation *op,
+                                           FunctionKernelKind expected,
+                                           StringRef kernelName,
+                                           int32_t id,
+                                           int64_t split) {
+  if (failed(verifyFrontendKernelKind(op, expected, kernelName)))
+    return failure();
+  if (id < 0)
+    return op->emitOpError("expects 'id' to be non-negative");
+  return verifySplitAttr(op, split);
+}
+
+static FailureOr<int8_t> lookupFrontendInitDirMaskById(Operation *op,
+                                                       func::FuncOp funcOp,
+                                                       int32_t id) {
+  auto initOr = lookupFrontendInitOpById(op, funcOp, id);
+  if (failed(initOr))
+    return failure();
+  if (auto aic = dyn_cast<AicInitializePipeOp>(*initOr))
+    return aic.getDirMask();
+  return cast<AivInitializePipeOp>(*initOr).getDirMask();
 }
 
 static LogicalResult verifyFrontendDataOpDirection(Operation *op, int32_t id,
@@ -10487,6 +10631,60 @@ static LogicalResult verifyFrontendDataOpDirection(Operation *op, int32_t id,
   return success();
 }
 
+static Value getFrontendInitGmSlotTensor(Operation *initOp) {
+  if (auto aic = dyn_cast<AicInitializePipeOp>(initOp))
+    return aic.getGmSlotTensor();
+  return cast<AivInitializePipeOp>(initOp).getGmSlotTensor();
+}
+
+static LogicalResult verifyFrontendTensorEntryMatchesInit(Operation *op,
+                                                          int32_t id,
+                                                          Type entryTy) {
+  auto entryViewTy = dyn_cast<TensorViewType>(entryTy);
+  if (!entryViewTy)
+    return success();
+
+  auto funcOp = op->getParentOfType<func::FuncOp>();
+  if (!funcOp)
+    return op->emitOpError("must be nested under a func.func");
+
+  auto initOr = lookupFrontendInitOpById(op, funcOp, id);
+  if (failed(initOr))
+    return failure();
+  Value gmSlotTensor = getFrontendInitGmSlotTensor(*initOr);
+  if (!gmSlotTensor) {
+    return op->emitOpError()
+           << "expects 'id' = " << id
+           << " to reference initialize_pipe with 'gm_slot_tensor' when the "
+              "pipe entry is !pto.tensor_view";
+  }
+
+  auto slotTensorTy = dyn_cast<TensorViewType>(gmSlotTensor.getType());
+  if (!slotTensorTy)
+    return op->emitOpError("expects 'gm_slot_tensor' to be !pto.tensor_view");
+  if (slotTensorTy.getElementType() != entryViewTy.getElementType()) {
+    return op->emitOpError()
+           << "expects pipe entry element type to match gm_slot_tensor element type";
+  }
+  if (slotTensorTy.getRank() != entryViewTy.getRank()) {
+    return op->emitOpError()
+           << "expects pipe entry rank to match gm_slot_tensor rank";
+  }
+
+  ArrayRef<int64_t> slotShape = slotTensorTy.getShape();
+  ArrayRef<int64_t> entryShape = entryViewTy.getShape();
+  for (auto [idx, entryDim] : llvm::enumerate(entryShape)) {
+    int64_t slotDim = slotShape[idx];
+    if (slotDim == ShapedType::kDynamic ||
+        entryDim == ShapedType::kDynamic || slotDim == entryDim)
+      continue;
+    return op->emitOpError()
+           << "expects pipe entry dimension " << idx
+           << " to match gm_slot_tensor dimension " << slotDim;
+  }
+  return success();
+}
+
 template <typename FrontendPopOpT>
 static LogicalResult verifyFrontendPopOp(FrontendPopOpT op,
                                          FunctionKernelKind expected,
@@ -10499,6 +10697,9 @@ static LogicalResult verifyFrontendPopOp(FrontendPopOpT op,
   if (failed(verifyFrontendDataOpDirection(op.getOperation(), op.getId(),
                                            expectC2V)))
     return failure();
+  if (failed(verifyFrontendTensorEntryMatchesInit(op.getOperation(), op.getId(),
+                                                  op.getTile().getType())))
+    return failure();
 
   bool hasValidRow = static_cast<bool>(op.getValidRow());
   bool hasValidCol = static_cast<bool>(op.getValidCol());
@@ -10507,6 +10708,10 @@ static LogicalResult verifyFrontendPopOp(FrontendPopOpT op,
         "expects valid_row and valid_col operands to be provided together");
   if (!hasValidRow)
     return success();
+
+  if (isa<TensorViewType>(op.getTile().getType()))
+    return op.emitOpError(
+        "does not accept valid_row/valid_col when result is !pto.tensor_view");
 
   auto tileTy = dyn_cast<TileBufType>(op.getTile().getType());
   if (!tileTy)
@@ -10551,6 +10756,87 @@ static LogicalResult verifyPipeHandleProducer(Operation *op, Value pipeHandle) {
         "pipe_handle must be produced by pto.initialize_l2l_pipe or "
         "pto.initialize_l2g2l_pipe");
   }
+  return success();
+}
+
+static bool getTensorLikeElementAndShape(Type ty, Type &elementType,
+                                         ArrayRef<int64_t> &shape) {
+  if (auto tvTy = dyn_cast<TensorViewType>(ty)) {
+    elementType = tvTy.getElementType();
+    shape = tvTy.getShape();
+    return true;
+  }
+  if (auto memrefTy = dyn_cast<MemRefType>(ty)) {
+    elementType = memrefTy.getElementType();
+    shape = memrefTy.getShape();
+    return true;
+  }
+  return false;
+}
+
+static LogicalResult verifyTensorEntryMatchesInternalPipeInit(Operation *op,
+                                                              Value pipeHandle,
+                                                              Type entryTy) {
+  auto entryViewTy = dyn_cast<TensorViewType>(entryTy);
+  if (!entryViewTy)
+    return success();
+
+  auto initOp = pipeHandle.getDefiningOp<InitializeL2G2LPipeOp>();
+  if (!initOp) {
+    return op->emitOpError()
+           << "expects !pto.tensor_view pipe entry to use a pipe produced by "
+              "pto.initialize_l2g2l_pipe";
+  }
+  if (initOp.getLocalAddr()) {
+    return op->emitOpError()
+           << "expects !pto.tensor_view pipe entry to use global-only "
+              "pto.initialize_l2g2l_pipe without local_addr";
+  }
+
+  Type slotElementType;
+  ArrayRef<int64_t> slotShape;
+  if (!getTensorLikeElementAndShape(initOp.getGmAddr().getType(),
+                                    slotElementType, slotShape)) {
+    return op->emitOpError()
+           << "expects !pto.tensor_view pipe entry to use "
+              "pto.initialize_l2g2l_pipe gm_addr with tensor/memref slot type";
+  }
+
+  if (slotElementType != entryViewTy.getElementType()) {
+    return op->emitOpError()
+           << "expects pipe entry element type to match initialize_l2g2l_pipe "
+              "gm_addr element type";
+  }
+  if (slotShape.size() != entryViewTy.getRank()) {
+    return op->emitOpError()
+           << "expects pipe entry rank to match initialize_l2g2l_pipe gm_addr "
+              "rank";
+  }
+
+  ArrayRef<int64_t> entryShape = entryViewTy.getShape();
+  for (auto [idx, entryDim] : llvm::enumerate(entryShape)) {
+    int64_t slotDim = slotShape[idx];
+    if (slotDim == ShapedType::kDynamic ||
+        entryDim == ShapedType::kDynamic || slotDim == entryDim)
+      continue;
+    return op->emitOpError()
+           << "expects pipe entry dimension " << idx
+           << " to match initialize_l2g2l_pipe gm_addr dimension "
+           << slotDim;
+  }
+
+  if (auto entryElemCount = getStaticElementCount(entryShape)) {
+    uint64_t elemBytes = getElemByteSize(entryViewTy.getElementType());
+    uint64_t entryBytes = *entryElemCount * elemBytes;
+    if (elemBytes != 0 && entryBytes !=
+                              static_cast<uint64_t>(initOp.getSlotSize())) {
+      return op->emitOpError()
+             << "expects pipe entry byte size to match initialize_l2g2l_pipe "
+                "slot_size (got entry byte size = "
+             << entryBytes << ", slot_size = " << initOp.getSlotSize() << ")";
+    }
+  }
+
   return success();
 }
 
@@ -10650,20 +10936,48 @@ LogicalResult AivInitializePipeOp::verify() {
   return verifyFrontendInitCommon(*this, FunctionKernelKind::Vector, "vector");
 }
 
+LogicalResult TAllocToAivOp::verify() {
+  if (failed(verifyFrontendSplitOp(getOperation(), FunctionKernelKind::Cube,
+                                   "cube", getId(), getSplit())))
+    return failure();
+  if (failed(verifyFrontendDataOpDirection(getOperation(), getId(),
+                                           /*expectC2V=*/true)))
+    return failure();
+  return verifyFrontendTensorEntryMatchesInit(getOperation(), getId(),
+                                              getEntry().getType());
+}
+
+LogicalResult TAllocToAicOp::verify() {
+  if (failed(verifyFrontendSplitOp(getOperation(), FunctionKernelKind::Vector,
+                                   "vector", getId(), getSplit())))
+    return failure();
+  if (failed(verifyFrontendDataOpDirection(getOperation(), getId(),
+                                           /*expectC2V=*/false)))
+    return failure();
+  return verifyFrontendTensorEntryMatchesInit(getOperation(), getId(),
+                                              getEntry().getType());
+}
+
 LogicalResult TPushToAivOp::verify() {
   if (failed(verifyFrontendSplitOp(getOperation(), FunctionKernelKind::Cube,
                                    "cube", getId(), getSplit())))
     return failure();
-  return verifyFrontendDataOpDirection(getOperation(), getId(),
-                                       /*expectC2V=*/true);
+  if (failed(verifyFrontendDataOpDirection(getOperation(), getId(),
+                                           /*expectC2V=*/true)))
+    return failure();
+  return verifyFrontendTensorEntryMatchesInit(getOperation(), getId(),
+                                              getTile().getType());
 }
 
 LogicalResult TPushToAicOp::verify() {
   if (failed(verifyFrontendSplitOp(getOperation(), FunctionKernelKind::Vector,
                                    "vector", getId(), getSplit())))
     return failure();
-  return verifyFrontendDataOpDirection(getOperation(), getId(),
-                                       /*expectC2V=*/false);
+  if (failed(verifyFrontendDataOpDirection(getOperation(), getId(),
+                                           /*expectC2V=*/false)))
+    return failure();
+  return verifyFrontendTensorEntryMatchesInit(getOperation(), getId(),
+                                              getTile().getType());
 }
 
 LogicalResult TPopFromAicOp::verify() {
@@ -10680,16 +10994,26 @@ LogicalResult TFreeFromAicOp::verify() {
   if (failed(verifyFrontendSplitOp(getOperation(), FunctionKernelKind::Vector,
                                    "vector", getId(), getSplit())))
     return failure();
-  return verifyFrontendDataOpDirection(getOperation(), getId(),
-                                       /*expectC2V=*/true);
+  if (failed(verifyFrontendDataOpDirection(getOperation(), getId(),
+                                           /*expectC2V=*/true)))
+    return failure();
+  if (getEntry())
+    return verifyFrontendTensorEntryMatchesInit(getOperation(), getId(),
+                                                getEntry().getType());
+  return success();
 }
 
 LogicalResult TFreeFromAivOp::verify() {
   if (failed(verifyFrontendSplitOp(getOperation(), FunctionKernelKind::Cube,
                                    "cube", getId(), getSplit())))
     return failure();
-  return verifyFrontendDataOpDirection(getOperation(), getId(),
-                                       /*expectC2V=*/false);
+  if (failed(verifyFrontendDataOpDirection(getOperation(), getId(),
+                                           /*expectC2V=*/false)))
+    return failure();
+  if (getEntry())
+    return verifyFrontendTensorEntryMatchesInit(getOperation(), getId(),
+                                                getEntry().getType());
+  return success();
 }
 
 LogicalResult InitializeL2G2LPipeOp::verify() {
@@ -10699,6 +11023,15 @@ LogicalResult InitializeL2G2LPipeOp::verify() {
                                  ? std::optional<int32_t>(getFlagBaseAttr().getInt())
                                  : std::nullopt)))
     return failure();
+
+  if (!getLocalAddr()) {
+    if (getPeerLocalAddr())
+      return emitOpError("'peer_local_addr' requires 'local_addr'");
+    if (getLocalSlotNumAttr())
+      return emitOpError(
+          "'local_slot_num' is only allowed when 'local_addr' is present");
+    return success();
+  }
 
   if (auto localSlotNumAttr = getLocalSlotNumAttr()) {
     int32_t localSlotNum = localSlotNumAttr.getInt();
@@ -10738,9 +11071,24 @@ LogicalResult TPushOp::verify() {
     return failure();
   if (failed(verifySplitAttr(getOperation(), getSplit())))
     return failure();
-  if (getPipe() == pto::PIPE::PIPE_UNASSIGNED)
+  if (failed(verifyTensorEntryMatchesInternalPipeInit(
+          getOperation(), getPipeHandle(), getTile().getType())))
+    return failure();
+  if (!isa<TensorViewType>(getTile().getType()) &&
+      getPipe() == pto::PIPE::PIPE_UNASSIGNED)
     return emitOpError("tile type must map to a supported producer pipe");
   return success();
+}
+
+LogicalResult TAllocOp::verify() {
+  if (!isInsideSectionOrAttributedKernel(getOperation()))
+    return emitOpError("must be inside pto.section.cube/vector or a kernel_kind function");
+  if (failed(verifyPipeHandleProducer(getOperation(), getPipeHandle())))
+    return failure();
+  if (failed(verifyTensorEntryMatchesInternalPipeInit(
+          getOperation(), getPipeHandle(), getEntry().getType())))
+    return failure();
+  return verifySplitAttr(getOperation(), getSplit());
 }
 
 LogicalResult TPopOp::verify() {
@@ -10750,7 +11098,11 @@ LogicalResult TPopOp::verify() {
     return failure();
   if (failed(verifySplitAttr(getOperation(), getSplit())))
     return failure();
-  if (getPipe() == pto::PIPE::PIPE_UNASSIGNED)
+  if (failed(verifyTensorEntryMatchesInternalPipeInit(
+          getOperation(), getPipeHandle(), getTile().getType())))
+    return failure();
+  if (!isa<TensorViewType>(getTile().getType()) &&
+      getPipe() == pto::PIPE::PIPE_UNASSIGNED)
     return emitOpError(
         "tile type and target arch must map to a supported consumer pipe");
   return success();
@@ -10761,7 +11113,64 @@ LogicalResult TFreeOp::verify() {
     return emitOpError("must be inside pto.section.cube/vector or a kernel_kind function");
   if (failed(verifyPipeHandleProducer(getOperation(), getPipeHandle())))
     return failure();
+  if (getEntry() &&
+      failed(verifyTensorEntryMatchesInternalPipeInit(
+          getOperation(), getPipeHandle(), getEntry().getType())))
+    return failure();
   return verifySplitAttr(getOperation(), getSplit());
+}
+
+ParseResult TFreeOp::parse(OpAsmParser &parser, OperationState &result) {
+  OpAsmParser::UnresolvedOperand first;
+  OpAsmParser::UnresolvedOperand pipe;
+  Type firstTy;
+  Type pipeTy;
+  bool hasEntry = false;
+
+  if (parser.parseLParen() || parser.parseOperand(first))
+    return failure();
+
+  if (succeeded(parser.parseOptionalComma())) {
+    hasEntry = true;
+    if (parser.parseOperand(pipe) || parser.parseColonType(firstTy) ||
+        parser.parseComma() || parser.parseType(pipeTy) || parser.parseRParen())
+      return failure();
+  } else {
+    if (parser.parseColonType(pipeTy) || parser.parseRParen())
+      return failure();
+    pipe = first;
+  }
+
+  NamedAttrList attrs;
+  if (parser.parseLBrace() || parser.parseKeyword("split") ||
+      parser.parseEqual())
+    return failure();
+  IntegerAttr splitAttr;
+  if (parser.parseAttribute(splitAttr, parser.getBuilder().getI8Type(),
+                            "split", attrs) ||
+      parser.parseRBrace() || parser.parseOptionalAttrDict(attrs))
+    return failure();
+
+  result.addAttributes(attrs);
+  if (hasEntry &&
+      parser.resolveOperand(first, firstTy, result.operands))
+    return failure();
+  if (parser.resolveOperand(pipe, pipeTy, result.operands))
+    return failure();
+  return success();
+}
+
+void TFreeOp::print(OpAsmPrinter &p) {
+  p << "(";
+  if (getEntry()) {
+    p << getEntry() << ", " << getPipeHandle() << " : "
+      << getEntry().getType() << ", " << getPipeHandle().getType();
+  } else {
+    p << getPipeHandle() << " : " << getPipeHandle().getType();
+  }
+  p << ") {split = " << static_cast<int32_t>(getSplit()) << "}";
+  p.printOptionalAttrDict((*this)->getAttrs(),
+                          /*elidedAttrs=*/{"split"});
 }
 
 void BuildAsyncSessionOp::getEffects(
@@ -10810,7 +11219,12 @@ void InitializeL2G2LPipeOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   addEffect(effects, &getGmAddrMutable(), MemoryEffects::Read::get());
-  addEffect(effects, &getLocalAddrMutable(), MemoryEffects::Read::get());
+  auto localAddr = getLocalAddrMutable();
+  if (!localAddr.empty())
+    addEffect(effects, &*localAddr.begin(), MemoryEffects::Read::get());
+  auto peerLocalAddr = getPeerLocalAddrMutable();
+  if (!peerLocalAddr.empty())
+    addEffect(effects, &*peerLocalAddr.begin(), MemoryEffects::Read::get());
   addEffect(effects, getOperation()->getOpResult(0), MemoryEffects::Write::get());
 }
 
@@ -10829,6 +11243,14 @@ void TPushOp::getEffects(
   addEffect(effects, &getPipeHandleMutable(), MemoryEffects::Write::get());
 }
 
+void TAllocOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  addEffect(effects, &getEntryMutable(), MemoryEffects::Write::get());
+  addEffect(effects, &getPipeHandleMutable(), MemoryEffects::Read::get());
+  addEffect(effects, &getPipeHandleMutable(), MemoryEffects::Write::get());
+}
+
 void TPopOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
@@ -10840,6 +11262,9 @@ void TPopOp::getEffects(
 void TFreeOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
+  auto entry = getEntryMutable();
+  if (!entry.empty())
+    addEffect(effects, &*entry.begin(), MemoryEffects::Read::get());
   addEffect(effects, &getPipeHandleMutable(), MemoryEffects::Read::get());
   addEffect(effects, &getPipeHandleMutable(), MemoryEffects::Write::get());
 }

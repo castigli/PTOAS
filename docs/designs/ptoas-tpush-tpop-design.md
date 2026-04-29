@@ -1,14 +1,16 @@
-# TPUSH/TPOP 前端接口与 PTOAS 实现设计
+# TALLOC/TPUSH/TPOP 前端接口与 PTOAS 实现设计
 
 ## 1. 文档范围
 
-本文定义PTOAS TPUSH/TPOP 前端IR接口，以及其在 PTOAS 内部的 lowering、地址传播、flag 分配和 EmitC 映射规则。
+本文定义PTOAS TALLOC/TPUSH/TPOP 前端IR接口，以及其在 PTOAS 内部的 lowering、地址传播、flag 分配和 EmitC 映射规则。
 
 本文覆盖两层接口：
 
 - 前端接口
   - `pto.aic_initialize_pipe`
   - `pto.aiv_initialize_pipe`
+  - `pto.talloc_to_aiv`
+  - `pto.talloc_to_aic`
   - `pto.tpush_to_aiv`
   - `pto.tpush_to_aic`
   - `pto.tpop_from_aic`
@@ -20,8 +22,10 @@
 - PTOAS 内部统一接口
   - `pto.initialize_l2g2l_pipe`
   - `pto.initialize_l2l_pipe`
+  - `pto.talloc`
   - `pto.tpush`
   - `pto.declare_tile`
+  - `pto.declare_global`
   - `pto.tpop`
   - `pto.tfree`
 
@@ -31,10 +35,13 @@
 
 本设计的目标如下：
 
-- 对前端提供\*\_initialize_pipe/tpush_to_\*/tpop_from_\*/tfree_from_\*IR接口。
-- 在 PTOAS 内部统一为 pipe/tpush/tpop/tfree 指令，便于复用已有 pass。
+- 对前端提供\*\_initialize_pipe/talloc_to_\*/tpush_to_\*/tpop_from_\*/tfree_from_\*IR接口。
+- 在 PTOAS 内部统一为 pipe/talloc/tpush/tpop/tfree 指令，便于复用已有 pass。
 - 支持 A2/A3 与 A5 两个平台使用同一套前端接口。
 - 定义consumer slot buffer的分配地址与producer之间的匹配关系，并传播。
+- 支持两类 pipe entry：
+  - `tile` entry：现有 `!pto.tile_buf` local tile 传输语义。
+  - `global` entry：对应 pto-isa `GlobalTensor` 形式的 GM FIFO entry，只管理 FIFO 同步与 GM slot 地址赋值，实际数据搬运由显式 `TSTORE` / `TLOAD` 对应的 PTO IR 完成。
 
 ## 3. 前端 IR 接口定义
 
@@ -53,17 +60,28 @@ pto.aic_initialize_pipe {id = 0, dir_mask = 3, slot_size = 1024, local_slot_num 
    v2c_consumer_buf = %v2c_consumer_buf : i32)
 ```
 
+若同一 `id` 绑定的 pipe entry 全部是 `global` entry，则该 pipe 是 global-only GM FIFO。此时初始化只需要描述单个 FIFO slot entry 的 `tensor_view`，不需要 consumer 侧 local FIFO buffer：
+
+```mlir
+%gm_slots = pto.make_tensor_view %gm_slot_buffer,
+  shape = [%c16, %c16], strides = [%c16, %c1]
+  : !pto.tensor_view<16x16xf32>
+pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 1024}
+  (gm_slot_tensor = %gm_slots : !pto.tensor_view<16x16xf32>)
+```
+
 #### 参数
 
 | 参数 | 类型 | 说明 |
 |---|---|---|
 | `ID` | 编译期整数常量 | 前端逻辑 pipe 标识，要求 `>= 0` |
 | `DIR_MASK` | 编译期整数常量 | `1`、`2` 或 `3` |
-| `SLOT_SIZE` | 编译期整数常量 | 单 slot 字节数，定义为切分前完整 tile 字节数 |
-| `LOCAL_SLOT_NUM` | 编译期整数常量或空值 | 可选，仅影响 A2/A3 lowering 后 consumer 侧 local slot buffer 槽数 |
-| `GM_SLOT_BUFFER` | `!pto.ptr<T>` 或空值 | A2/A3 路径使用的 GM 指针，A5 路径为空 |
-| `C2V_CONSUMER_BUF` | `i32` | C2V 方向 consumer 的 local slot buffer 基址 |
-| `V2C_CONSUMER_BUF` | `i32` | V2C 方向 consumer 的 local slot buffer 基址 |
+| `SLOT_SIZE` | 编译期整数常量 | 单 slot 字节数，定义为切分前完整 pipe entry 字节数 |
+| `LOCAL_SLOT_NUM` | 编译期整数常量或空值 | 可选，仅在使用 consumer 侧 local FIFO buffer 的 tile-entry 路径影响槽数；global-only GM FIFO 省略 |
+| `GM_SLOT_BUFFER` | `!pto.ptr<T>` 或空值 | 使用 local consumer FIFO buffer 的 A2/A3 GM 路径使用的 GM slot buffer 指针，A5 路径为空 |
+| `GM_SLOT_TENSOR` | `!pto.tensor_view<...>` 或空值 | global-only GM FIFO 使用的单 slot entry descriptor；shape/stride/layout 必须与 `talloc` / `tpop` / `tpush` / `tfree` 使用的 GlobalTensor entry 对齐 |
+| `C2V_CONSUMER_BUF` | `i32` 或空值 | C2V 方向 consumer 的 local slot buffer 基址；global-only GM FIFO 省略 |
+| `V2C_CONSUMER_BUF` | `i32` 或空值 | V2C 方向 consumer 的 local slot buffer 基址；global-only GM FIFO 省略 |
 
 ### 3.2 `pto.aiv_initialize_pipe`
 
@@ -80,74 +98,196 @@ pto.aiv_initialize_pipe {id = 0, dir_mask = 3, slot_size = 1024, local_slot_num 
    v2c_consumer_buf = %v2c_consumer_buf : i32)
 ```
 
+global-only GM FIFO 形式同样只传 `gm_slot_tensor`：
+
+```mlir
+%gm_slots = pto.make_tensor_view %gm_slot_buffer,
+  shape = [%c16, %c16], strides = [%c16, %c1]
+  : !pto.tensor_view<16x16xf32>
+pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 1024}
+  (gm_slot_tensor = %gm_slots : !pto.tensor_view<16x16xf32>)
+```
+
 参数语义与 `pto.aic_initialize_pipe` 相同。
 
 ### 3.3 前端数据传输接口
 
+前端数据传输接口统一面向 pipe entry。当前支持两类 entry：
+
+- `tile` entry：`!pto.tile_buf<...>` 或 lowering 后等价的 local memref。该路径保持既有 `TPUSH(pipe, tile)` / `TPOP(pipe, tile)` 语义。
+- `global` entry：`!pto.tensor_view<...>` 或 lowering 后等价的 GM descriptor。该路径映射到 pto-isa `GlobalTensor` 形式的 `TALLOC` / `TPUSH` / `TPOP` / `TFREE`，只计算并传递 FIFO GM slot 地址，不隐式执行 `TSTORE` 或 `TLOAD`。若要读写 entry 的子区域，先用 `pto.partition_view` 从 `tensor_view` 派生 `!pto.partition_tensor_view<...>`，再交给 `pto.tload` / `pto.tstore`。
+
+`global` entry 当前仅用于 A2/A3 的 GM FIFO 路径，即 lower 到 `pto.initialize_l2g2l_pipe` 的 pipe；A5 `initialize_l2l_pipe` 路径没有 GM slot 地址可赋给 `GlobalTensor`。
+
+当某条 frontend logical pipe 的数据传输 op 全部使用 `global` entry 时，该 pipe 不需要 consumer 侧 local FIFO buffer。对应的 `pto.aic_initialize_pipe` / `pto.aiv_initialize_pipe` 只携带 `gm_slot_tensor`，不携带 `c2v_consumer_buf` / `v2c_consumer_buf`，也不生成或引用 `pto.reserve_buffer` / `pto.import_reserved_buffer`。
+
+`global` entry 的 GM FIFO 单 slot 信息由 initialize op 的 `gm_slot_tensor` 描述；该 `tensor_view` 本身就是单个 GlobalTensor slot descriptor，不包含 FIFO slot 数这一外层维度。`talloc_to_*` / `tpop_from_*` 返回的 `tensor_view` 描述当前分配或弹出的完整单个 slot，dtype、rank、静态 shape 和字节大小必须与 `gm_slot_tensor` 一致。若未显式提供 stride/layout，则按 row-major contiguous GlobalTensor 处理。
+
+#### `pto.talloc_to_aiv`
+
+```mlir
+%entry = pto.talloc_to_aiv {id = 0, split = 0}
+  -> !pto.tensor_view<128x512xf32>
+```
+
+- 仅出现在 Cube kernel 中
+- 表示 C2V 方向 producer 为一个 `global` entry 分配当前 FIFO GM slot
+- 单个 slot 的 dtype、静态 shape 与 stride/layout 来自同 `id` 的 initialize op 所携带的 `gm_slot_tensor`；`talloc_to_aiv` 的返回类型必须与该 slot descriptor 匹配
+- lower 到内部 `pto.talloc`
+- 不写数据、不通知 consumer；后续由用户显式 `pto.tstore` 写入 `%entry` 所描述的 GM slot，再调用 `pto.tpush_to_aiv(%entry)`
+
+#### `pto.talloc_to_aic`
+
+```mlir
+%entry = pto.talloc_to_aic {id = 0, split = 0}
+  -> !pto.tensor_view<128x512xf32>
+```
+
+- 仅出现在 Vector kernel 中
+- 表示 V2C 方向 producer 为一个 `global` entry 分配当前 FIFO GM slot
+- 单个 slot 的 dtype、静态 shape 与 stride/layout 来自同 `id` 的 initialize op 所携带的 `gm_slot_tensor`；`talloc_to_aic` 的返回类型必须与该 slot descriptor 匹配
+- lower 到内部 `pto.talloc`
+- 不写数据、不通知 consumer；后续由用户显式 `pto.tstore` 写入 `%entry` 所描述的 GM slot，再调用 `pto.tpush_to_aic(%entry)`
+
 #### `pto.tpush_to_aiv`
 
 ```mlir
-pto.tpush_to_aiv(%tile) {id = 0, split = 0}
+pto.tpush_to_aiv(%entry : !pto.tile_buf<...>) {id = 0, split = 0}
+pto.tpush_to_aiv(%entry : !pto.tensor_view<...>) {id = 0, split = 0}
 ```
 
 - 仅出现在 Cube kernel 中
 - 表示 C2V 方向 producer push
+- 对 `tile` entry，语义保持现有 tile push
+- 对 `global` entry，表示 producer commit；它只通知 consumer 当前 FIFO GM slot 已就绪，不执行数据写入
 
 #### `pto.tpush_to_aic`
 
 ```mlir
-pto.tpush_to_aic(%tile) {id = 0, split = 0}
+pto.tpush_to_aic(%entry : !pto.tile_buf<...>) {id = 0, split = 0}
+pto.tpush_to_aic(%entry : !pto.tensor_view<...>) {id = 0, split = 0}
 ```
 
 - 仅出现在 Vector kernel 中
 - 表示 V2C 方向 producer push
+- 对 `tile` entry，语义保持现有 tile push
+- 对 `global` entry，表示 producer commit；它只通知 consumer 当前 FIFO GM slot 已就绪，不执行数据写入
 
 #### `pto.tpop_from_aic`
 
 ```mlir
 %tile = pto.tpop_from_aic {id = 0, split = 0} -> !pto.tile_buf<...>
+%entry = pto.tpop_from_aic {id = 0, split = 0}
+  -> !pto.tensor_view<128x512xf32>
 ```
 
 - 仅出现在 Vector kernel 中
 - 表示 C2V 方向 consumer pop
+- 返回 `tile` entry 时保持现有 tile pop 语义
+- 返回 `global` entry 时，单个 slot 的 dtype、静态 shape 与 stride/layout 来自同 `id` 的 initialize op 所携带的 `gm_slot_tensor`
+- 返回 `global` entry 时只等待 producer ready 并把当前 FIFO GM slot 地址赋给返回的 GlobalTensor-like view；后续由用户显式 `pto.tload` 或基于该 view 派生子 view 后加载
 
 #### `pto.tpop_from_aiv`
 
 ```mlir
 %tile = pto.tpop_from_aiv {id = 0, split = 0} -> !pto.tile_buf<...>
+%entry = pto.tpop_from_aiv {id = 0, split = 0}
+  -> !pto.tensor_view<128x512xf32>
 ```
 
 - 仅出现在 Cube kernel 中
 - 表示 V2C 方向 consumer pop
+- 返回 `tile` entry 时保持现有 tile pop 语义
+- 返回 `global` entry 时，单个 slot 的 dtype、静态 shape 与 stride/layout 来自同 `id` 的 initialize op 所携带的 `gm_slot_tensor`
+- 返回 `global` entry 时只等待 producer ready 并把当前 FIFO GM slot 地址赋给返回的 GlobalTensor-like view；后续由用户显式 `pto.tload` 或基于该 view 派生子 view 后加载
 
 #### `pto.tfree_from_aic`
 
 ```mlir
 pto.tfree_from_aic {id = 0, split = 0}
+pto.tfree_from_aic(%entry : !pto.tensor_view<...>) {id = 0, split = 0}
 ```
 
 - 仅出现在 Vector kernel 中
 - 表示 C2V 方向 consumer free
+- `tile` entry 路径不带 operand，保持现有语义
+- `global` entry 路径携带与 `tpop_from_aic` 返回值匹配的 entry descriptor，lower 到 `TFREE(pipe, gmTensor)` 形式
 
 #### `pto.tfree_from_aiv`
 
 ```mlir
 pto.tfree_from_aiv {id = 0, split = 0}
+pto.tfree_from_aiv(%entry : !pto.tensor_view<...>) {id = 0, split = 0}
 ```
 
 - 仅出现在 Cube kernel 中
 - 表示 V2C 方向 consumer free
+- `tile` entry 路径不带 operand，保持现有语义
+- `global` entry 路径携带与 `tpop_from_aiv` 返回值匹配的 entry descriptor，lower 到 `TFREE(pipe, gmTensor)` 形式
 
 以上前端数据传输接口中的 `id` 和 `split` 均为编译期常量属性，不是运行时 SSA operand。
 
 - 取值使用 `TileSplitAxis` 枚举语义：`0/1/2` 分别对应 `TILE_NO_SPLIT`、`TILE_UP_DOWN`、`TILE_LEFT_RIGHT`
 - lowering 到 PTOAS 内部 IR 时，`split` 继续以属性形式保留
+- `global` entry 的 result type 和 matched initialize op 的 `gm_slot_tensor` metadata 是底层 `GlobalData` 模板实参的 IR 描述；其 element type、静态 shape 与 stride/layout 必须描述完整 FIFO slot。若 consumer 只加载 slot 的子区域，应先 pop 完整 slot descriptor，再由该 descriptor 派生更窄的 GM view。
+
+#### GlobalTensor pipe entry 使用示例
+
+下面是 C2V 方向的 global-only GM FIFO 示例。两个 kernel 都只把单 slot entry descriptor `gm_slot_tensor` 传给初始化 op；因为不使用 consumer 侧 local FIFO buffer，IR 中没有对应的 `pto.reserve_buffer` 或 `pto.import_reserved_buffer`。
+
+```mlir
+func.func @cube_kernel(%gm_slot_buffer : !pto.ptr<f32>,
+                       %src : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=1024, pad=0>)
+    attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c16 = arith.constant 16 : index
+  %gm_slots = pto.make_tensor_view %gm_slot_buffer,
+    shape = [%c16, %c16], strides = [%c16, %c1]
+    : !pto.tensor_view<16x16xf32>
+  pto.aic_initialize_pipe {id = 0, dir_mask = 1, slot_size = 1024}
+    (gm_slot_tensor = %gm_slots : !pto.tensor_view<16x16xf32>)
+
+  %entry = pto.talloc_to_aiv {id = 0, split = 0}
+    -> !pto.tensor_view<16x16xf32>
+  %entry_partition = pto.partition_view %entry,
+    offsets = [%c0, %c0], sizes = [%c16, %c16]
+    : !pto.tensor_view<16x16xf32> -> !pto.partition_tensor_view<16x16xf32>
+  pto.tstore ins(%src : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=1024, pad=0>)
+             outs(%entry_partition : !pto.partition_tensor_view<16x16xf32>)
+  pto.tpush_to_aiv(%entry : !pto.tensor_view<16x16xf32>) {id = 0, split = 0}
+  func.return
+}
+
+func.func @vector_kernel(%gm_slot_buffer : !pto.ptr<f32>,
+                         %dst : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=1024, pad=0>)
+    attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c16 = arith.constant 16 : index
+  %gm_slots = pto.make_tensor_view %gm_slot_buffer,
+    shape = [%c16, %c16], strides = [%c16, %c1]
+    : !pto.tensor_view<16x16xf32>
+  pto.aiv_initialize_pipe {id = 0, dir_mask = 1, slot_size = 1024}
+    (gm_slot_tensor = %gm_slots : !pto.tensor_view<16x16xf32>)
+
+  %entry = pto.tpop_from_aic {id = 0, split = 0}
+    -> !pto.tensor_view<16x16xf32>
+  %entry_partition = pto.partition_view %entry,
+    offsets = [%c0, %c0], sizes = [%c16, %c16]
+    : !pto.tensor_view<16x16xf32> -> !pto.partition_tensor_view<16x16xf32>
+  pto.tload ins(%entry_partition : !pto.partition_tensor_view<16x16xf32>)
+            outs(%dst : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=16, v_row=16, v_col=16, blayout=row_major, slayout=none_box, fractal=1024, pad=0>)
+  pto.tfree_from_aic(%entry : !pto.tensor_view<16x16xf32>) {id = 0, split = 0}
+  func.return
+}
+```
 
 ### 3.4 地址提示接口
 
 #### `pto.reserve_buffer`
 
-用于在当前函数内声明一块 consumer slot buffer 预留空间。其合法写法由
+用于在当前函数内声明一块 consumer slot buffer 预留空间，仅服务于需要 consumer 侧 local FIFO buffer 的 tile-entry 路径。global-only GM FIFO 不需要该 op。其合法写法由
 当前编译流程是否启用 local address planning 决定。
 
 ```mlir
@@ -193,7 +333,7 @@ pto.tfree_from_aiv {id = 0, split = 0}
 
 #### `pto.import_reserved_buffer`
 
-用于引用 peer function 中已经定义的 `reserve_buffer` 结果。
+用于引用 peer function 中已经定义的 `reserve_buffer` 结果，仅服务于需要 consumer 侧 local FIFO buffer 的 tile-entry 路径。global-only GM FIFO 不需要该 op。
 
 ```mlir
 %buf = pto.import_reserved_buffer {
@@ -223,7 +363,8 @@ pto.tfree_from_aiv {id = 0, split = 0}
 > 每条 initialize 的 `id` 必须唯一，且数据传输 op 只能引用同函数内一条匹配的 initialize。
 > 若同一函数内存在多条同方向 pipe，它们需要通过不同的 consumer FIFO
 > 标识区分，即绑定到不同的 `reserve_buffer` / `import_reserved_buffer`
->（或显式不同的 local address）。
+>（或显式不同的 local address）。global-only GM FIFO 不使用 consumer local address，
+> 直接由 `id + direction` 区分前端 logical pipe。
 > 硬件 flag 资源总量仍有限制：单向 pipe 占 2 个 hardware flag id，`dir_mask = 3`
 > 的双向 pipe 占 4 个 hardware flag id，因此单函数内所有 lowered pipe 的总占用
 > 必须落在 16 个 hardware flag id 以内。
@@ -231,17 +372,17 @@ pto.tfree_from_aiv {id = 0, split = 0}
 前端 IR 需满足以下约束：
 
 - 前端 initialize 的 `id` 在函数内必须唯一
-- `tpush/tpop/tfree` 的 `id` 必须在同函数内匹配且仅匹配一条 frontend initialize
-- C2V 方向数据 op（`tpush_to_aiv`/`tpop_from_aic`/`tfree_from_aic`）要求匹配的 init `dir_mask` 为 `1` 或 `3`
-- V2C 方向数据 op（`tpush_to_aic`/`tpop_from_aiv`/`tfree_from_aiv`）要求匹配的 init `dir_mask` 为 `2` 或 `3`
+- `talloc/tpush/tpop/tfree` 的 `id` 必须在同函数内匹配且仅匹配一条 frontend initialize
+- C2V 方向数据 op（`talloc_to_aiv`/`tpush_to_aiv`/`tpop_from_aic`/`tfree_from_aic`）要求匹配的 init `dir_mask` 为 `1` 或 `3`
+- V2C 方向数据 op（`talloc_to_aic`/`tpush_to_aic`/`tpop_from_aiv`/`tfree_from_aiv`）要求匹配的 init `dir_mask` 为 `2` 或 `3`
 - 单函数内 lowered pipe 的 hardware flag id 总占用必须不超过 16
 - 单函数允许多条 `reserve_buffer`
 - 单函数允许多条 `import_reserved_buffer`
 - `DIR_MASK` 只允许 `1`、`2`、`3`
 - `SLOT_SIZE > 0`
-- `reserve_buffer.size == SLOT_SIZE * SLOT_NUM`
-- C2V consumer 的 `reserve_buffer.location` 必须是 `VEC`
-- V2C consumer 的 `reserve_buffer.location` 必须是 `MAT`
+- 使用 consumer 侧 local FIFO buffer 时，`reserve_buffer.size == SLOT_SIZE * SLOT_NUM`
+- 使用 consumer 侧 local FIFO buffer 时，C2V consumer 的 `reserve_buffer.location` 必须是 `VEC`
+- 使用 consumer 侧 local FIFO buffer 时，V2C consumer 的 `reserve_buffer.location` 必须是 `MAT`
 - `reserve_buffer.name` 在本函数内必须唯一
 - `import_reserved_buffer` 的 `(name, peer_func)` 在本函数内必须唯一
 - op 级约束：`reserve_buffer.auto = false` 时必须提供 `base`
@@ -249,6 +390,7 @@ pto.tfree_from_aiv {id = 0, split = 0}
 - 启用 local address planning 的编译流程：`reserve_buffer` 只允许 `auto = true`
 - 跳过 local address planning 的编译流程：`reserve_buffer` 只允许 `auto = false` 且显式提供 `base`
 - `import_reserved_buffer` 必须能在 `peer_func` 中找到同名 `reserve_buffer`
+- global-only GM FIFO 的 initialize 只提供 `gm_slot_tensor`，不提供 `gm_slot_buffer`、`local_slot_num`、`c2v_consumer_buf`、`v2c_consumer_buf`，且不要求成对的 `reserve_buffer` / `import_reserved_buffer`
 
 ## 4. 核心约定
 
@@ -262,7 +404,7 @@ pto.tfree_from_aiv {id = 0, split = 0}
 `DIR_MASK=3` 表示前端一个同时包含 C2V 和 V2C 的初始化请求。在 PTOAS lowering
 后，生成单条 `dir_mask = 3` 的 DIR_BOTH 内部 pipe，同时承载 C2V 和 V2C 双向
 通信。该 pipe 携带两个地址操作数：`local_addr`（C2V consumer buf）和
-`peer_local_addr`（V2C consumer buf）。下游 TPUSH/TPOP/TFREE 共享同一 pipe
+`peer_local_addr`（V2C consumer buf）。下游 TALLOC/TPUSH/TPOP/TFREE 共享同一 pipe
 handle。
 
 ### 4.2 `split` 的角色
@@ -275,7 +417,7 @@ handle。
 
 在 PTOAS 设计中，`split` 的角色定义为：
 
-- `split` 是 `tpush/tpop/tfree` 的逐指令执行模式
+- `split` 是 `talloc/tpush/tpop/tfree` 的逐指令执行模式
 - `split` 在 IR 中表示为编译期常量属性，不是运行时 SSA operand
 - `split` 不参与pipe 初始化
 - `split` 不参与 plan memory、地址传播、flag 分配
@@ -283,7 +425,7 @@ handle。
 
 因此：
 
-- 同一条逻辑 pipe 上可以出现不同 `split` 的 `tpush/tpop/tfree`
+- 同一条逻辑 pipe 上可以出现不同 `split` 的 `talloc/tpush/tpop/tfree`
 - PTOAS 不要求同一逻辑 pipe 内所有指令使用同一个 `split`
 - `split` 相关的语义正确性由前端生成逻辑或前端 verifier 保证；PTOAS 仅校验 `split` 枚举合法并向下透传
 
@@ -291,11 +433,19 @@ handle。
 
 `SLOT_SIZE` 的定义固定为：
 
-- 切分前完整 tile 的字节数
+- 切分前完整 pipe entry 的字节数
 
-即使 `split` 为 `TILE_UP_DOWN` 或 `TILE_LEFT_RIGHT`，`SLOT_SIZE` 仍然表示未切分前的逻辑 tile 总字节数。
+即使 `split` 为 `TILE_UP_DOWN` 或 `TILE_LEFT_RIGHT`，`SLOT_SIZE` 仍然表示未切分前的逻辑 pipe entry 总字节数。
 
-`split` 只影响底层 `TPUSH/TPOP/TFREE` 的执行方式，不影响 `SLOT_SIZE` 的含义。
+`split` 只影响底层 `TALLOC/TPUSH/TPOP/TFREE` 的执行方式，不影响 `SLOT_SIZE` 的含义。
+
+对 `global` entry，`split` 还会影响底层 pto-isa 对 GM FIFO slot 地址的计算方式：
+
+- `TILE_NO_SPLIT`：不增加 sub-core offset
+- `TILE_UP_DOWN`：sub-core offset 为 `get_subblockid() * rows * cols * sizeof(dtype)`
+- `TILE_LEFT_RIGHT`：sub-core offset 为 `get_subblockid() * cols * sizeof(dtype)`
+
+其中 `rows`、`cols` 与 `dtype` 来自 entry 对应底层 `GlobalData` 的静态 shape 与 `RawDType`。PTOAS IR 因此要求 `global` entry 的类型和 view metadata 描述完整 FIFO slot，而不是仅描述 consumer 最终要读取的子 tile。
 
 ### 4.4 `SLOT_NUM` 规则
 
@@ -314,7 +464,7 @@ handle。
 
 `!pto.pipe` 的协议信息由其定义 op 上的属性承载，而不是由 type 参数承载。
 
-底层 `pto-isa` 若对 `TPUSH/TPOP` 的模板形态继续演进，不反向约束 `!pto.pipe` 的 type 设计；内部 `!pto.pipe` 仍保持 opaque handle。
+底层 `pto-isa` 若对 `TALLOC/TPUSH/TPOP/TFREE` 的模板形态继续演进，不反向约束 `!pto.pipe` 的 type 设计；内部 `!pto.pipe` 仍保持 opaque handle。
 
 ### 5.2 `pto.initialize_l2g2l_pipe`
 
@@ -329,6 +479,16 @@ handle。
     slot_num = 8,
     local_slot_num = 8
 }(%gm_addr : i32, %local_addr : i32) -> !pto.pipe
+```
+
+global-only GM FIFO 示例：
+
+```mlir
+%pipe = pto.initialize_l2g2l_pipe {
+    dir_mask = 1,
+    slot_size = 1024,
+    slot_num = 8
+}(%gm_slot_tensor : !pto.tensor_view<16x16xf32>) -> !pto.pipe
 ```
 
 DIR_BOTH 示例：
@@ -353,12 +513,13 @@ DIR_BOTH 示例：
 - `local_slot_num`
   - 可直接由 `initialize_l2g2l_pipe` 承载，也可由 legacy 前端
     `pto.aic_initialize_pipe` / `pto.aiv_initialize_pipe` 提供并在 A2/A3 lowering 时转发
-  - 表示 GM 路径下 consumer 侧 local slot buffer 的槽数
+  - 表示 GM 路径下 consumer 侧 local slot buffer 的槽数，仅在存在 local FIFO buffer 的 tile-entry 路径有意义
   - 仅在通过 GM 传递时对底层 `TPipe` 模板参数有意义，不改变 GM FIFO 的 `slot_num`
-  - 缺省值等于该内部 pipe 的 `slot_num`
+  - 存在 local FIFO buffer 且缺省时，默认值等于该内部 pipe 的 `slot_num`
   - 因此当前固定规则下：
     - `DIR_MASK=1/2` 直接 lowering 时，`local_slot_num = 8`
     - `DIR_MASK=3` 单条 DIR_BOTH pipe，`local_slot_num = 4`
+  - global-only GM FIFO 不携带 `local_slot_num`
 - `flag_base`
   - 由 PTOAS flag 分配阶段填写
   - frontend lowering 阶段可以缺省
@@ -366,9 +527,12 @@ DIR_BOTH 示例：
 
 #### 操作数
 
-- `gm_addr`
-- `local_addr`：C2V consumer buf（或单向时唯一方向的 consumer buf）
-- `peer_local_addr`（可选）：V2C consumer buf，仅 `dir_mask = 3` 时出现
+- `gm_addr`：使用 local consumer FIFO buffer 的 A2/A3 GM 路径使用
+- `gm_slot_tensor`：global-only GM FIFO 使用，描述单个 slot entry
+- `local_addr`（可选）：C2V consumer buf（或单向时唯一方向的 consumer buf），仅存在 consumer 侧 local FIFO buffer 时出现
+- `peer_local_addr`（可选）：V2C consumer buf，仅 `dir_mask = 3` 且存在 V2C consumer 侧 local FIFO buffer 时出现
+
+global-only GM FIFO 只携带 `gm_slot_tensor`；`local_addr` / `peer_local_addr` 均省略。
 
 ### 5.3 `pto.initialize_l2l_pipe`
 
@@ -416,29 +580,74 @@ DIR_BOTH 示例：
 
 - `local_addr`
 
-### 5.4 `pto.tpush`
+### 5.4 pipe entry type
+
+内部 `talloc` / `tpush` / `tpop` / `tfree` 统一使用 pipe entry operand。entry 可以是：
+
+- `tile` entry：`!pto.tile_buf<...>` 或 lowering 后等价 local memref。
+- `global` entry：`!pto.tensor_view<...>` 或 lowering 后等价 GM descriptor；`!pto.partition_tensor_view<...>` 只作为从 entry 派生出的 load/store window。
+
+`tile` entry 表示数据本身由底层 `TPUSH/TPOP` 搬运；`global` entry 表示一个 GM FIFO slot descriptor，底层 pipe op 只对该 descriptor 赋 GM 地址或进行同步提交/释放。
+
+### 5.5 `pto.talloc`
+
+```mlir
+%entry = pto.declare_global -> !pto.tensor_view<128x512xf32>
+pto.talloc(%entry, %pipe : !pto.tensor_view<128x512xf32>, !pto.pipe) {split = 0}
+```
+
+`pto.talloc` 只支持 `global` entry，用于 producer 侧开始一次 GM FIFO transaction。它等待并分配 producer 侧空闲 slot，计算 FIFO GM slot 地址，并把该地址绑定到 `%entry`。
+
+`pto.talloc` 不写数据，也不通知 consumer。用户必须在 `pto.talloc` 和对应 `pto.tpush` 之间显式写入该 GM slot。
+
+### 5.6 `pto.tpush`
 
 ```mlir
 pto.tpush(%tile, %pipe) { split = 0 }
+pto.tpush(%entry, %pipe : !pto.tensor_view<128x512xf32>, !pto.pipe) {split = 0}
 ```
 
-### 5.5 `pto.declare_tile`
+`pto.tpush` 支持 `tile` entry 和 `global` entry：
+
+- `tile` entry：保持现有语义，映射到底层 `TPUSH(pipe, tile)`。
+- `global` entry：提交已由 `pto.talloc` 分配并由用户写入的 GM FIFO slot，映射到底层 `TPUSH(pipe, gmTensor)`；不执行 `TSTORE`。
+
+### 5.7 `pto.declare_tile`
 
 ```mlir
 %tile = pto.declare_tile -> !pto.tile_buf<...>
 ```
 
-### 5.6 `pto.tpop`
+用于声明一个地址稍后由 `pto.tpop` 绑定的 tile entry。
+
+### 5.8 `pto.declare_global`
 
 ```mlir
-pto.tpop(%tile, %pipe) { split = 0 }
+%entry = pto.declare_global -> !pto.tensor_view<128x512xf32>
 ```
 
-### 5.7 `pto.tfree`
+用于声明一个地址稍后由 `pto.talloc` 或 `pto.tpop` 绑定的 GlobalTensor-like entry。该 op 不分配 GM 内存，只提供带静态 dtype、shape、stride/layout 信息的 descriptor。
+
+### 5.9 `pto.tpop`
 
 ```mlir
-pto.tfree(%pipe) { split = 0 }
+pto.tpop(%tile, %pipe : !pto.tile_buf<...>, !pto.pipe) {split = 0}
+pto.tpop(%entry, %pipe : !pto.tensor_view<128x512xf32>, !pto.pipe) {split = 0}
 ```
+
+`pto.tpop` 支持 `tile` entry 和 `global` entry：
+
+- `tile` entry：保持现有语义，等待 producer ready 并把 consumer local slot 地址绑定到 tile。
+- `global` entry：等待 producer ready，计算 FIFO GM slot 或 subslot 地址，并把该地址绑定到 GlobalTensor-like descriptor；不执行 `TLOAD`。
+
+### 5.10 `pto.tfree`
+
+```mlir
+pto.tfree(%pipe : !pto.pipe) {split = 0}
+pto.tfree(%entry, %pipe : !pto.tensor_view<128x512xf32>, !pto.pipe) {split = 0}
+```
+
+`tile` entry 路径不携带 entry operand，保持现有 `TFREE(pipe)` 语义。`global` entry 路径携带与 `pto.tpop` 绑定的 entry descriptor，并映射到底层 `TFREE(pipe, gmTensor)`。
 
 `split` 在内部 IR 中必须以编译期常量属性形式保留，不能在 lowering 时擦除或降为运行时 operand。
 
@@ -449,9 +658,10 @@ pto.tfree(%pipe) { split = 0 }
 #### A2/A3
 
 - `pto.aic_initialize_pipe` 和 `pto.aiv_initialize_pipe` lower 为 `pto.initialize_l2g2l_pipe`
-- 若前端提供了 `local_slot_num`，则直接转发到 lowered
+- 若前端 init 只提供 `gm_slot_tensor`，则 lower 为只携带 `gm_slot_tensor` 的 global-only GM FIFO；不补 `local_slot_num`，不生成 local consumer address operand，也不依赖 `reserve_buffer` / `import_reserved_buffer`
+- 若前端提供了 consumer 侧 local FIFO buffer，且提供了 `local_slot_num`，则直接转发到 lowered
   `pto.initialize_l2g2l_pipe`
-- 若前端未提供更具体信息，lowering 默认补上 `local_slot_num = slot_num`
+- 若前端提供了 consumer 侧 local FIFO buffer 但未提供更具体信息，lowering 默认补上 `local_slot_num = slot_num`
 
 #### A5
 
@@ -461,21 +671,23 @@ pto.tfree(%pipe) { split = 0 }
 
 - 只生成一条内部 pipe
 - `slot_num = 8`
-- 对 `initialize_l2g2l_pipe`，默认 `local_slot_num = 8`
+- 对带 consumer 侧 local FIFO buffer 的 `initialize_l2g2l_pipe`，默认 `local_slot_num = 8`
 - 若前端显式提供 `local_slot_num`，则使用显式值
+- global-only GM FIFO 不携带 `local_slot_num`，地址/descriptor 操作数只有 `gm_slot_tensor`
 
 ### 6.3 `DIR_MASK=3`
 
 前端一个 init op 生成**单条** DIR_BOTH 内部 pipe：
 
 - `%pipe`：`dir_mask = 3`，`slot_num = 4`
-- 若 lowering 为 `initialize_l2g2l_pipe`，默认 `local_slot_num = 4`
+- 若 lowering 为带 consumer 侧 local FIFO buffer 的 `initialize_l2g2l_pipe`，默认 `local_slot_num = 4`
 - 若前端显式提供 `local_slot_num`，则使用显式值
 
 地址选择规则：
 
-- `local_addr` = `C2V_CONSUMER_BUF`
-- `peer_local_addr` = `V2C_CONSUMER_BUF`
+- 若存在 consumer 侧 local FIFO buffer，`local_addr` = `C2V_CONSUMER_BUF`
+- 若存在 consumer 侧 local FIFO buffer，`peer_local_addr` = `V2C_CONSUMER_BUF`
+- global-only GM FIFO 只设置 `gm_slot_tensor` = `GM_SLOT_TENSOR`
 
 `FrontendPipeHandles` 中 `c2vPipe` 和 `v2cPipe` 指向同一个 pipe Value。
 
@@ -485,24 +697,43 @@ pto.tfree(%pipe) { split = 0 }
 
 | 前端 op | 所在函数 | 方向 | 使用的内部 pipe |
 |---|---|---|---|
+| `talloc_to_aiv` | Cube | C2V | `c2vPipe` |
 | `tpush_to_aiv` | Cube | C2V | `c2vPipe` |
 | `tpop_from_aic` | Vector | C2V | `c2vPipe` |
 | `tfree_from_aic` | Vector | C2V | `c2vPipe` |
+| `talloc_to_aic` | Vector | V2C | `v2cPipe` |
 | `tpush_to_aic` | Vector | V2C | `v2cPipe` |
+| `tpop_from_aiv` | Cube | V2C | `v2cPipe` |
+| `tfree_from_aiv` | Cube | V2C | `v2cPipe` |
 
-当 `DIR_MASK=3` 时，`c2vPipe` 和 `v2cPipe` 指向同一个 DIR_BOTH pipe，下游 TPUSH/TPOP/TFREE 只关心 pipe handle 是否存在，不关心是否是同一个。
-| `tpop_from_aiv` | Cube | V2C | `dir_mask = 2` |
-| `tfree_from_aiv` | Cube | V2C | `dir_mask = 2` |
+当 `DIR_MASK=3` 时，`c2vPipe` 和 `v2cPipe` 指向同一个 DIR_BOTH pipe，下游 TALLOC/TPUSH/TPOP/TFREE 只关心 pipe handle 是否存在，不关心是否是同一个。
 
 ### 6.5 数据传输 op lowering
+
+#### `talloc_to_aiv` / `talloc_to_aic`
+
+`global` entry producer allocation lower 为：
+
+```mlir
+%decl = pto.declare_global -> !pto.tensor_view<...>
+pto.talloc(%decl, %pipe : !pto.tensor_view<...>, !pto.pipe) {split = 0}
+```
+
+即：
+
+- 前端 `pto.talloc_to_aiv` / `pto.talloc_to_aic` 不接收 GM tensor descriptor operand；它们通过同 `id` 的 initialize op 找到 `gm_slot_tensor`，并返回绑定了当前 FIFO GM slot 地址的 `global` entry
+- PTOAS 内部 `pto.talloc` 是 destination-style 形式，显式接收一个 `pto.declare_global` 结果作为入参；`pto.declare_global` 的 dtype、shape、stride/layout 来自 matched initialize op 的 `gm_slot_tensor` 的单 slot descriptor
+- `pto.talloc` 之后、对应 `pto.tpush` 之前，用户 IR 可以通过普通 `pto.tstore` 写入该 entry 指向的 GM FIFO slot
 
 #### `tpush_to_aiv` / `tpush_to_aic`
 
 lower 为：
 
 ```mlir
-pto.tpush(%tile, %pipe) { split = 0 }
+pto.tpush(%entry, %pipe : !pto.tensor_view<...>, !pto.pipe) {split = 0}
 ```
+
+其中 `%entry` 可以是 `tile` entry 或 `global` entry。`global` entry 路径要求同一 producer transaction 中存在支配该 `tpush` 的对应 `pto.talloc`。
 
 #### `tpop_from_aic` / `tpop_from_aiv`
 
@@ -510,21 +741,29 @@ lower 为：
 
 ```mlir
 %decl = pto.declare_tile -> !pto.tile_buf<...>
-pto.tpop(%decl, %pipe) { split = 0 }
+pto.tpop(%decl, %pipe : !pto.tile_buf<...>, !pto.pipe) {split = 0}
+
+%gdecl = pto.declare_global -> !pto.tensor_view<...>
+pto.tpop(%gdecl, %pipe : !pto.tensor_view<...>, !pto.pipe) {split = 0}
 ```
 
 即：
 
-- 前端 `pto.tpop_from_aic` / `pto.tpop_from_aiv` 是返回 tile 结果值的接口
-- PTOAS 内部 `pto.tpop` 才是 destination-style 形式，显式接收一个 `pto.declare_tile` 结果作为入参
+- 前端 `pto.tpop_from_aic` / `pto.tpop_from_aiv` 是返回 pipe entry 结果值的接口
+- 对 `global` entry，前端 `pto.tpop_from_aic` / `pto.tpop_from_aiv` 不接收 GM tensor descriptor operand；它们通过同 `id` 的 initialize op 找到 `gm_slot_tensor`，并返回绑定了当前 FIFO GM slot 地址的 `global` entry
+- PTOAS 内部 `pto.tpop` 才是 destination-style 形式，显式接收一个 `pto.declare_tile` 或 `pto.declare_global` 结果作为入参；`pto.declare_global` 的 dtype、shape、stride/layout 来自 matched initialize op 的 `gm_slot_tensor` 的单 slot descriptor
+- `global` entry 路径下，`pto.tpop` 之后、对应 `pto.tfree` 之前，用户 IR 可以直接使用该 entry 或从该 entry 派生子 view，再通过普通 `pto.tload` 读取 GM FIFO slot
 
 #### `tfree_from_aic` / `tfree_from_aiv`
 
 lower 为：
 
 ```mlir
-pto.tfree(%pipe) { split = 0 }
+pto.tfree(%pipe : !pto.pipe) {split = 0}
+pto.tfree(%entry, %pipe : !pto.tensor_view<...>, !pto.pipe) {split = 0}
 ```
+
+其中无 entry operand 的形式用于 `tile` entry 路径；带 entry operand 的形式用于 `global` entry 路径，且 `%entry` 必须来自对应 consumer transaction 的 `pto.tpop` 结果。
 
 ## 7. `reserve_buffer` 与地址传播
 
@@ -651,11 +890,12 @@ pass 在模块级按两步执行：
 其中第一步的实现方式是：
 
 - 遍历模块内所有 `pto.initialize_l2l_pipe` / `pto.initialize_l2g2l_pipe`
-- 对每条 init op 的每个地址操作数，以”函数 + reserve 名字 + 方向”构建 PipePeerKey 并归入逻辑 pipe 分组：
+- 对每条 init op 的每个 local consumer 地址操作数，以”函数 + reserve 名字 + 方向”构建 PipePeerKey 并归入逻辑 pipe 分组：
   - `dir_mask = 1/2`：只有 `local_addr`，方向即 `dir_mask`
   - `dir_mask = 3`（DIR_BOTH）：一条 pipe 携带两个地址，分别归入两个逻辑方向——`local_addr` 归入 C2V（方向 1），`peer_local_addr` 归入 V2C（方向 2）
+- global-only GM FIFO init 没有 local consumer 地址操作数，不参与 `reserve_buffer` / `import_reserved_buffer` 地址物化；它的 peer pipe 与 `flag_base` 对齐由 frontend lowering 保留的 logical pipe 绑定关系（`id + direction`）建立
 - 将 peer 两侧引用到同一逻辑 pipe 的内部 init op 归并到同一组
-- 若某条 init 未显式提供 `flag_base`，则其 `local_addr` 必须来自 `reserve_buffer` 或 `import_reserved_buffer`
+- 若某条带 local consumer 地址操作数的 init 未显式提供 `flag_base`，则其 `local_addr` 必须来自 `reserve_buffer` 或 `import_reserved_buffer`
 - 以这些逻辑 pipe 分组为边建立 peer component；每个 component 必须恰好包含两条、且分别来自 peer 两侧函数的兼容 init op，否则直接报错
 - “兼容”指两侧 init 的 `dir_mask`、`slot_size`、`slot_num` 以及 `local_slot_num` 一致；因此 `DIR_BOTH` 与拆分后的单向 pipe 不能在同一条 peer 通道上混用
 - 在同一 component 内，若任一侧已显式提供 `flag_base`，则该值作为该 component 最终值；若两侧显式值冲突则报错
@@ -678,7 +918,7 @@ pass 在模块级按两步执行：
 地址传播 pass 之后：
 
 - IR 中不再保留 `reserve_buffer` / `import_reserved_buffer`
-- 内部 pipe init op 的 `local_addr` 只再引用普通 SSA 常量地址
+- 内部 pipe init op 的 `local_addr` 只再引用普通 SSA 常量地址；global-only GM FIFO init 没有 `local_addr`
 - 因而后续 EmitC 无需理解 frontend 预留地址语义，只需透传解析后的地址值
 
 #### 7.7.5 失败条件
@@ -690,7 +930,7 @@ pass 在模块级按两步执行：
 - 跳过规划的编译流程却出现 `reserve_buffer.auto = true`
 - `peer_func` 无法解析到函数
 - 在 peer function 中找不到同名 `reserve_buffer`
-- 某条未显式提供 `flag_base` 的内部 init，其 `local_addr` 不来自 `reserve_buffer` / `import_reserved_buffer`
+- 某条未显式提供 `flag_base` 且带 local consumer 地址操作数的内部 init，其 `local_addr` 不来自 `reserve_buffer` / `import_reserved_buffer`
 - 基于 `reserve_buffer` / `import_reserved_buffer` 建立的某个 peer component，未形成完整兼容的 peer init pair
 - peer `flag_base` 已显式给定但两侧取值冲突
 - 同一函数内两个不同 pipe component 的 flag 区间重叠
@@ -743,8 +983,8 @@ pass 在模块级按两步执行：
 - 每个函数 `reserve_buffer` / `import_reserved_buffer` 数量是否合法
 - `DIR_MASK` 取值是否合法
 - `SLOT_SIZE > 0`
-- `reserve_buffer.size == SLOT_SIZE * SLOT_NUM`
-- `reserve_buffer.location` 与 consumer 函数类型匹配
+- 使用 consumer 侧 local FIFO buffer 时，`reserve_buffer.size == SLOT_SIZE * SLOT_NUM`
+- 使用 consumer 侧 local FIFO buffer 时，`reserve_buffer.location` 与 consumer 函数类型匹配
 - `reserve_buffer.name` 在函数内唯一
 - `import_reserved_buffer` 的 `(name, peer_func)` 在函数内唯一
 - `reserve_buffer.auto = false` 时必须带 `base`
@@ -754,6 +994,14 @@ pass 在模块级按两步执行：
 - `import_reserved_buffer` 能在 `peer_func` 中找到同名 `reserve_buffer`
 - 方向相关 op 只能出现在合法 kernel 中
 - 前端数据传输 op 的 `split` 必须是合法的编译期常量属性
+- `global` entry 形式的 `talloc_to_*` / `tpush_to_*` / `tpop_from_*` / `tfree_from_*` 只能绑定到 GM FIFO pipe（A2/A3 `initialize_l2g2l_pipe` 路径）
+- 绑定到 global-only GM FIFO 的 initialize 只允许携带 `gm_slot_tensor`，不得携带 `gm_slot_buffer`、`local_slot_num`、`c2v_consumer_buf`、`v2c_consumer_buf`；该路径不要求 `reserve_buffer` / `import_reserved_buffer`
+- `gm_slot_tensor` 本身描述单个 slot entry；其字节数必须匹配 `slot_size`
+- `talloc_to_*` / `tpop_from_*` 返回的 `tensor_view` 类型必须匹配 `gm_slot_tensor`
+- `global` entry 的 dtype、shape 与 stride/layout 必须足以生成底层 `GlobalTensor<RawDType, Shape, Stride, Layout>` 类型
+- `global` entry transaction 中，producer 侧 `tpush_to_*` 必须有同 pipe、同 entry 的支配性 `talloc_to_*`
+- `global` entry transaction 中，consumer 侧 `tfree_from_*` 必须携带对应 `tpop_from_*` 返回的 entry；`tile` entry 路径保持无 operand `tfree_from_*`
+- 同一次 logical transaction 不允许混用 `tile` entry 和 `global` entry
 
 ### 9.2 内部 IR verifier
 
@@ -764,13 +1012,18 @@ pass 在模块级按两步执行：
 - `DIR_MASK=1/2` 时，`slot_num` 必须与单向/双向 lowering 规则一致
 - `local_slot_num` 若出现，可出现在 `pto.initialize_l2g2l_pipe` 或 legacy 前端
   `pto.aic_initialize_pipe` / `pto.aiv_initialize_pipe` 上，且必须大于 `0`
-  且不大于其对应 lowering 规则下的 `slot_num`
+  且不大于其对应 lowering 规则下的 `slot_num`；global-only GM FIFO 不携带 `local_slot_num`
 - `flag_base` 若出现，必须满足基本合法性；是否已填写以及具体分配值由 flag 分配保证
-- `pto.initialize_l2g2l_pipe` 必须提供 `gm_addr` 和 `local_addr`
+- `pto.initialize_l2g2l_pipe` 必须提供 `gm_addr` 或 `gm_slot_tensor`；只有存在 consumer 侧 local FIFO buffer 时才提供 `local_addr` / `peer_local_addr`
 - `pto.initialize_l2l_pipe` 必须提供 `local_addr`
 - `dir_mask = 1` 的 pipe 只能被 C2V 方向 lowering 使用
 - `dir_mask = 2` 的 pipe 只能被 V2C 方向 lowering 使用
-- `tpush/tpop/tfree` 的 `split` 必须是合法的编译期常量属性
+- `talloc/tpush/tpop/tfree` 的 `split` 必须是合法的编译期常量属性
+- `pto.talloc` 只接受 `global` entry，且只能使用 `initialize_l2g2l_pipe` 产生的 pipe
+- `pto.tpush` / `pto.tpop` 接受 `tile` entry 或 `global` entry；`global` entry 只能使用 `initialize_l2g2l_pipe` 产生的 pipe
+- `pto.tfree(%pipe : !pto.pipe)` 仅用于 `tile` entry 路径；`pto.tfree(%entry, %pipe : !pto.tensor_view<...>, !pto.pipe)` 仅用于 `global` entry 路径
+- `global` entry 的 `pto.tpush` 必须匹配同 pipe、同 entry 的 producer-side `pto.talloc`
+- `global` entry 的 `pto.tfree` 必须匹配同 pipe、同 entry 的 consumer-side `pto.tpop`
 
 ### 9.3 关于 `split` 的校验边界
 
@@ -778,7 +1031,7 @@ PTOAS 对 `split` 的处理边界如下：
 
 - PTOAS 验证 `split` 是合法枚举值
 - PTOAS 要求 `split` 以编译期常量属性形式出现
-- PTOAS 不验证同一逻辑 pipe 上多个 `tpush/tpop/tfree` 的 `split` 是否一致
+- PTOAS 不验证同一逻辑 pipe 上多个 `talloc/tpush/tpop/tfree` 的 `split` 是否一致
 - PTOAS 不根据 `split` 改变地址分配、flag 分配或 pipe 配对
 
 因此：
@@ -794,6 +1047,7 @@ PTOAS 对 `split` 的处理边界如下：
 在进入 EmitC 前：
 
 - 前端 `pto.aic_initialize_pipe` / `pto.aiv_initialize_pipe`
+- 前端 `pto.talloc_to_aiv` / `pto.talloc_to_aic`
 - 前端 `pto.tpush_to_aiv` / `pto.tpush_to_aic`
 - 前端 `pto.tpop_from_aic` / `pto.tpop_from_aiv`
 - 前端 `pto.tfree_from_aic` / `pto.tfree_from_aiv`
@@ -815,7 +1069,7 @@ EmitC 将以下内部 init op 映射到底层 `TPipe`：
 - `slot_num`
 - `local_slot_num`
 - `flag_base`
-- `gm_addr`（仅 `initialize_l2g2l_pipe`）
+- `gm_addr` 或 `gm_slot_tensor`（仅 `initialize_l2g2l_pipe`）
 - `local_addr`
 - `peer_local_addr`（仅 `dir_mask = 3` 时）
 
@@ -827,6 +1081,8 @@ EmitC 将以下内部 init op 映射到底层 `TPipe`：
 | 2 | `Direction::DIR_V2C` |
 | 3 | `Direction::DIR_BOTH` |
 
+当 `initialize_l2g2l_pipe` 来自 global-only GM FIFO 时，IR 中保留完整 `gm_slot_tensor` / tensor-like `gm_addr` 类型用于校验 slot descriptor；EmitC 构造底层 `TPipe` 时只传 GM FIFO 的起始地址。如果 `gm_addr` 仍是 `tensor_view` 形式，EmitC 先取 `PTOAS__GLOBAL_TENSOR_DATA(gm_addr)`；如果前端函数入参是 `!pto.ptr` 并通过 `pto.make_tensor_view` 描述形状，则最终仍直接把该 ptr 起始地址传给 `TPipe`。
+
 当 `dir_mask = 3` 时，EmitC 将 `local_addr` 作为 C2V consumer buf、`peer_local_addr` 作为 V2C consumer buf 传入 `TPipe` 构造函数。
 
 其中：
@@ -837,20 +1093,25 @@ EmitC 将以下内部 init op 映射到底层 `TPipe`：
 
 EmitC 将以下内部数据传输 op 映射到底层：
 
+- `pto.talloc` -> `TALLOC`
 - `pto.tpush` -> `TPUSH`
 - `pto.tpop` -> `TPOP`
 - `pto.tfree` -> `TFREE`
 
 映射时需要使用以下信息：
 
-- `tile`
+- pipe entry（`tile` 或 `global`）
 - `split`
 - `pipe`
 
 其中：
 
 - `split` 不在 PTOAS 内部解释
-- `split` 作为底层 `TPUSH/TPOP/TFREE` 的编译期模板实参透传
+- `split` 作为底层 `TALLOC/TPUSH/TPOP/TFREE` 的编译期模板实参透传
+- `tile` entry 映射到 `TPUSH<Pipe, Tile, Split>` / `TPOP<Pipe, Tile, Split>` / `TFREE<Pipe, Split>`
+- `global` entry 映射到 `TALLOC<Pipe, GlobalData, Split>` / `TPUSH<Pipe, GlobalData, Split>` / `TPOP<Pipe, GlobalData, Split>` / `TFREE<Pipe, GlobalData, Split>`
+- `GlobalData` 的类型来自单个 slot 的 `tensor_view` entry，必须与 pipe init 的 `gm_slot_tensor` descriptor 匹配；`TPipe` 构造函数本身只接收 GM FIFO 起始地址和两个 consumer buffer 地址
+- `global` entry 的 `TPUSH` / `TFREE` 不执行 `TSTORE` / `TLOAD`；它们只使用 entry descriptor 作为底层 transaction 描述符
 
 ### 10.3 InsertSync
 
@@ -885,4 +1146,4 @@ InsertSync 只依赖：
 - 启用规划的编译流程中，plan memory 先按既有逻辑规划普通 local buffer，再为 `reserve_buffer` 在目标地址空间中分配 hole
 - 跳过规划的编译流程中，不运行 plan memory；`reserve_buffer.base` 必须已由前端给定
 - 地址传播 pass 负责 `import_reserved_buffer` 常量替换与 peer pipe 的 `flag_base` 对齐
-- EmitC 只负责将内部 `initialize_l2l_pipe` / `initialize_l2g2l_pipe` / `tpush` / `tpop` / `tfree` 及其属性透传到底层
+- EmitC 只负责将内部 `initialize_l2l_pipe` / `initialize_l2g2l_pipe` / `talloc` / `tpush` / `tpop` / `tfree` 及其属性透传到底层

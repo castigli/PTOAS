@@ -1,0 +1,26 @@
+// RUN: ptoas --pto-arch=a3 %s 2>&1 | FileCheck %s
+
+module {
+  func.func @cube_globaltensor_internal()
+      attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %gm_slots = pto.declare_global -> !pto.tensor_view<16x16xf32>
+    %pipe = "pto.initialize_l2g2l_pipe"(%gm_slots) <{
+      dir_mask = 1 : i8,
+      slot_size = 1024 : i32,
+      slot_num = 8 : i32,
+      flag_base = 0 : i32,
+      operandSegmentSizes = array<i32: 1, 0, 0>
+    }> : (!pto.tensor_view<16x16xf32>) -> !pto.pipe
+
+    %entry = pto.declare_global -> !pto.tensor_view<16x16xf32>
+    pto.talloc(%entry, %pipe : !pto.tensor_view<16x16xf32>, !pto.pipe) {split = 0}
+    pto.tpush(%entry, %pipe : !pto.tensor_view<16x16xf32>, !pto.pipe) {split = 0}
+    func.return
+  }
+}
+
+// CHECK-LABEL: AICORE void cube_globaltensor_internal(
+// CHECK: __gm__ float* [[GM_DATA:v[0-9]+]] = PTOAS__GLOBAL_TENSOR_DATA(
+// CHECK: TPipe<0, Direction::DIR_C2V, 1024, 8, 8, true>([[GM_DATA]], {{.*}}, {{.*}});
+// CHECK: TALLOC<TPipe<0, Direction::DIR_C2V, 1024, 8, 8, true>, GlobalTensor<float, pto::Shape<1, 1, 1, 16, 16>, pto::Stride<256, 256, 256, 16, 1>, pto::Layout::ND>, TileSplitAxis::TILE_NO_SPLIT>(
+// CHECK: TPUSH<TPipe<0, Direction::DIR_C2V, 1024, 8, 8, true>, GlobalTensor<float, pto::Shape<1, 1, 1, 16, 16>, pto::Stride<256, 256, 256, 16, 1>, pto::Layout::ND>, TileSplitAxis::TILE_NO_SPLIT>(

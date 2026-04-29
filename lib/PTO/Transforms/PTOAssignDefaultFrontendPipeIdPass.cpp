@@ -46,6 +46,14 @@ struct PTOAssignDefaultFrontendPipeIdPass
         assignDefaultIdIfMissing(init, zeroAttr);
         return WalkResult::advance();
       }
+      if (auto alloc = dyn_cast<TAllocToAivOp>(op)) {
+        assignDefaultIdIfMissing(alloc, zeroAttr);
+        return WalkResult::advance();
+      }
+      if (auto alloc = dyn_cast<TAllocToAicOp>(op)) {
+        assignDefaultIdIfMissing(alloc, zeroAttr);
+        return WalkResult::advance();
+      }
       if (auto push = dyn_cast<TPushToAivOp>(op)) {
         assignDefaultIdIfMissing(push, zeroAttr);
         return WalkResult::advance();
