@@ -8,11 +8,14 @@
 
 #include "PTO/IR/PTO.h"
 #include "PTO/Transforms/Passes.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/Dominance.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/IR/PatternMatch.h"
 #include "llvm/ADT/DenseMap.h"
+#include <optional>
 
 namespace mlir {
 namespace pto {
@@ -33,10 +36,14 @@ constexpr int8_t kBidirectionalDirMask = 3;
 constexpr int32_t kSingleDirectionSlotNum = 8;
 constexpr int32_t kBidirectionalSlotNum = 4;
 constexpr llvm::StringLiteral kFrontendPipeIdAttrName = "__pto.frontend_id";
+constexpr llvm::StringLiteral kGlobalTensorStridesAttrName =
+    "__pto.globaltensor_strides";
 
 struct FrontendPipeHandles {
   Value c2vPipe;
   Value v2cPipe;
+  SmallVector<int64_t> c2vSlotStrides;
+  SmallVector<int64_t> v2cSlotStrides;
   Operation *anchorOp = nullptr;
 };
 
@@ -56,6 +63,49 @@ static void propagateFrontendIdAttr(InitOpT initOp, Operation *pipeOp,
     return;
   pipeOp->setAttr(kFrontendPipeIdAttrName,
                   rewriter.getI32IntegerAttr(initOp.getId()));
+}
+
+static std::optional<int64_t> getStaticIndexLikeValue(Value value) {
+  if (auto cst = value.getDefiningOp<arith::ConstantIndexOp>())
+    return cst.value();
+  if (auto cst = value.getDefiningOp<arith::ConstantOp>()) {
+    if (auto intAttr = dyn_cast<IntegerAttr>(cst.getValue()))
+      return intAttr.getInt();
+  }
+  return std::nullopt;
+}
+
+static SmallVector<int64_t> getStaticTensorViewStrides(Value tensor) {
+  SmallVector<int64_t> strides;
+  if (!tensor)
+    return strides;
+
+  auto makeView = tensor.getDefiningOp<MakeTensorViewOp>();
+  if (!makeView)
+    return strides;
+
+  auto tvTy = dyn_cast<TensorViewType>(makeView.getResult().getType());
+  if (!tvTy ||
+      makeView.getStrides().size() != static_cast<size_t>(tvTy.getRank()))
+    return {};
+
+  strides.reserve(makeView.getStrides().size());
+  for (Value stride : makeView.getStrides()) {
+    auto staticStride = getStaticIndexLikeValue(stride);
+    if (!staticStride)
+      return {};
+    strides.push_back(*staticStride);
+  }
+  return strides;
+}
+
+static void propagateGlobalTensorStrides(DeclareGlobalOp decl,
+                                         ArrayRef<int64_t> strides,
+                                         IRRewriter &rewriter) {
+  if (strides.empty())
+    return;
+  decl->setAttr(kGlobalTensorStridesAttrName,
+                rewriter.getDenseI64ArrayAttr(strides));
 }
 
 template <typename InitOpT>
@@ -123,10 +173,15 @@ lowerSingleDirectionFrontendInit(InitOpT initOp, IRRewriter &rewriter,
     return failure();
 
   FrontendPipeHandles handles;
-  if (dirMask == kC2VDirMask)
+  SmallVector<int64_t> slotStrides =
+      getStaticTensorViewStrides(initOp.getGmSlotTensor());
+  if (dirMask == kC2VDirMask) {
     handles.c2vPipe = *pipeOr;
-  else
+    handles.c2vSlotStrides = std::move(slotStrides);
+  } else {
     handles.v2cPipe = *pipeOr;
+    handles.v2cSlotStrides = std::move(slotStrides);
+  }
   handles.anchorOp = pipeOr->getDefiningOp();
   return handles;
 }
@@ -146,6 +201,10 @@ lowerBidirectionalFrontendInit(InitOpT initOp, IRRewriter &rewriter,
   FrontendPipeHandles handles;
   handles.c2vPipe = *pipeOr;
   handles.v2cPipe = *pipeOr;
+  SmallVector<int64_t> slotStrides =
+      getStaticTensorViewStrides(initOp.getGmSlotTensor());
+  handles.c2vSlotStrides = slotStrides;
+  handles.v2cSlotStrides = std::move(slotStrides);
   handles.anchorOp = pipeOr->getDefiningOp();
   return handles;
 }
@@ -331,6 +390,7 @@ static LogicalResult lowerFrontendDataOps(func::FuncOp funcOp,
       }
       auto decl = rewriter.create<DeclareGlobalOp>(alloc.getLoc(),
                                                    alloc.getEntry().getType());
+      propagateGlobalTensorStrides(decl, handles.c2vSlotStrides, rewriter);
       rewriter.create<TAllocOp>(alloc.getLoc(), decl.getEntry(),
                                 handles.c2vPipe, alloc.getSplitAttr());
       rewriter.replaceOp(alloc, decl.getEntry());
@@ -349,6 +409,7 @@ static LogicalResult lowerFrontendDataOps(func::FuncOp funcOp,
       }
       auto decl = rewriter.create<DeclareGlobalOp>(alloc.getLoc(),
                                                    alloc.getEntry().getType());
+      propagateGlobalTensorStrides(decl, handles.v2cSlotStrides, rewriter);
       rewriter.create<TAllocOp>(alloc.getLoc(), decl.getEntry(),
                                 handles.v2cPipe, alloc.getSplitAttr());
       rewriter.replaceOp(alloc, decl.getEntry());
@@ -399,6 +460,7 @@ static LogicalResult lowerFrontendDataOps(func::FuncOp funcOp,
       if (isa<TensorViewType>(pop.getTile().getType())) {
         auto decl = rewriter.create<DeclareGlobalOp>(pop.getLoc(),
                                                      pop.getTile().getType());
+        propagateGlobalTensorStrides(decl, handles.c2vSlotStrides, rewriter);
         entry = decl.getEntry();
       } else {
         auto decl = rewriter.create<DeclareTileOp>(pop.getLoc(),
@@ -429,6 +491,7 @@ static LogicalResult lowerFrontendDataOps(func::FuncOp funcOp,
       if (isa<TensorViewType>(pop.getTile().getType())) {
         auto decl = rewriter.create<DeclareGlobalOp>(pop.getLoc(),
                                                      pop.getTile().getType());
+        propagateGlobalTensorStrides(decl, handles.v2cSlotStrides, rewriter);
         entry = decl.getEntry();
       } else {
         auto decl = rewriter.create<DeclareTileOp>(pop.getLoc(),

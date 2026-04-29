@@ -120,6 +120,8 @@ static constexpr llvm::StringLiteral kLoweredSetValidShapeConfigAttrName =
     "__pto.lowered_set_validshape_config";
 static constexpr llvm::StringLiteral kForceDynamicValidShapeAttrName =
     "__pto.force_dynamic_valid_shape";
+static constexpr llvm::StringLiteral kGlobalTensorStridesAttrName =
+    "__pto.globaltensor_strides";
 
 static Value peelUnrealized(Value v) {
   if (auto castOp = v.getDefiningOp<UnrealizedConversionCastOp>())
@@ -5716,6 +5718,18 @@ struct PTODeclareGlobalToEmitC
     if (!convertedType)
       return rewriter.notifyMatchFailure(
           op, "failed to convert declare_global result type");
+    if (auto tvTy = dyn_cast<TensorViewType>(op.getEntry().getType())) {
+      if (auto stridesAttr =
+              op->getAttrOfType<DenseI64ArrayAttr>(kGlobalTensorStridesAttrName)) {
+        auto strides = stridesAttr.asArrayRef();
+        if (strides.size() == static_cast<size_t>(tvTy.getRank())) {
+          convertedType = emitc::OpaqueType::get(
+              rewriter.getContext(),
+              getGlobalTensorTypeStringFromShapeAndStrides(
+                  tvTy.getElementType(), tvTy.getShape(), strides));
+        }
+      }
+    }
     auto var = rewriter.create<emitc::VariableOp>(
         op.getLoc(), convertedType,
         emitc::OpaqueAttr::get(rewriter.getContext(), ""));
