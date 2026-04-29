@@ -10352,6 +10352,10 @@ getStaticElementCount(ArrayRef<int64_t> shape) {
   return count;
 }
 
+static bool isSameOrHalfSlotByteSize(uint64_t tensorBytes, uint64_t slotBytes) {
+  return tensorBytes == slotBytes || tensorBytes * 2 == slotBytes;
+}
+
 static LogicalResult verifyFrontendGlobalSlotTensor(Operation *op, Value tensor,
                                                     int8_t dirMask,
                                                     int32_t slotSize) {
@@ -10367,13 +10371,17 @@ static LogicalResult verifyFrontendGlobalSlotTensor(Operation *op, Value tensor,
 
   if (auto elemCount = getStaticElementCount(shape)) {
     uint64_t elemBytes = getElemByteSize(tvTy.getElementType());
-    if (elemBytes != 0 && *elemCount * elemBytes !=
-                              static_cast<uint64_t>(slotSize)) {
-      return op->emitOpError()
-             << "expects 'slot_size' to equal gm_slot_tensor byte size "
-                "(got slot_size = "
-             << slotSize << ", gm_slot_tensor byte size = "
-             << (*elemCount * elemBytes) << ")";
+    if (elemBytes != 0) {
+      uint64_t tensorBytes = *elemCount * elemBytes;
+      if (!isSameOrHalfSlotByteSize(tensorBytes,
+                                    static_cast<uint64_t>(slotSize))) {
+        return op->emitOpError()
+               << "expects 'slot_size' to equal gm_slot_tensor byte size "
+                  "or twice gm_slot_tensor byte size for split GlobalTensor "
+                  "entries (got slot_size = "
+               << slotSize << ", gm_slot_tensor byte size = " << tensorBytes
+               << ")";
+      }
     }
   }
 
@@ -10828,12 +10836,29 @@ static LogicalResult verifyTensorEntryMatchesInternalPipeInit(Operation *op,
   if (auto entryElemCount = getStaticElementCount(entryShape)) {
     uint64_t elemBytes = getElemByteSize(entryViewTy.getElementType());
     uint64_t entryBytes = *entryElemCount * elemBytes;
-    if (elemBytes != 0 && entryBytes !=
-                              static_cast<uint64_t>(initOp.getSlotSize())) {
-      return op->emitOpError()
-             << "expects pipe entry byte size to match initialize_l2g2l_pipe "
-                "slot_size (got entry byte size = "
-             << entryBytes << ", slot_size = " << initOp.getSlotSize() << ")";
+    if (elemBytes != 0) {
+      int8_t split = 0;
+      if (auto alloc = dyn_cast<TAllocOp>(op))
+        split = alloc.getSplit();
+      else if (auto push = dyn_cast<TPushOp>(op))
+        split = push.getSplit();
+      else if (auto pop = dyn_cast<TPopOp>(op))
+        split = pop.getSplit();
+      else if (auto free = dyn_cast<TFreeOp>(op))
+        split = free.getSplit();
+
+      uint64_t slotBytes = static_cast<uint64_t>(initOp.getSlotSize());
+      bool isSplitEntry = split != 0;
+      bool byteSizeMatches =
+          entryBytes == slotBytes || (isSplitEntry && entryBytes * 2 == slotBytes);
+      if (!byteSizeMatches) {
+        return op->emitOpError()
+               << "expects pipe entry byte size to match initialize_l2g2l_pipe "
+                  "slot_size"
+               << (isSplitEntry ? " or half slot_size for split entries" : "")
+               << " (got entry byte size = " << entryBytes
+               << ", slot_size = " << initOp.getSlotSize() << ")";
+      }
     }
   }
 
