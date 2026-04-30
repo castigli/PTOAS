@@ -170,9 +170,9 @@ public:
   SyncOperation(TYPE type, pto::PipelineType srcPipe, pto::PipelineType dstPipe,
                 unsigned kSyncIndex, unsigned syncIRIndex,
                 std::optional<int> forEndIndex, bool isComp = false)
-      : eventIds({}), type_(type), srcPipe_(srcPipe), dstPipe_(dstPipe),
-        kSyncIndex_(kSyncIndex), syncIRIndex_(syncIRIndex),
-        forEndIndex_(forEndIndex), isCompensation(isComp) {};
+      : isCompensation(isComp), eventIds({}), type_(type), srcPipe_(srcPipe),
+        dstPipe_(dstPipe), kSyncIndex_(kSyncIndex), syncIRIndex_(syncIRIndex),
+        forEndIndex_(forEndIndex) {};
  
   ~SyncOperation() = default;
  

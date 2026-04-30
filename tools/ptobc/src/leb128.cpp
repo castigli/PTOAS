@@ -79,7 +79,7 @@ size_t readSLEB128(const uint8_t* data, size_t size, int64_t& value) {
 
   // sign extend
   if ((shift < kInt64BitWidth) && (byte & kLeb128SignBit)) {
-    value |= (-1ll) << shift;
+    value |= static_cast<int64_t>(~uint64_t(0) << shift);
   }
   return i + 1;
 }

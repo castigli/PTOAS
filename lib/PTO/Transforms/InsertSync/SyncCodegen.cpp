@@ -242,7 +242,6 @@ void SyncCodegen::updatePlaceHolderOpInsertSync(PlaceHolderInstanceElement *plac
   else if (placeHolder->elementOp == placeHolder->parentIfOp) {
       // 之前的 Translator 逻辑把 Normal Placeholder 也映射到了 ifOp
       // 我们需要修正它指向 Yield
-      auto ifOp = dyn_cast<scf::IfOp>(placeHolder->elementOp);
       // 判断是 Then 还是 Else
       // 简单判断：看 index。或者 Translator 里直接存 Yield Op。
       // 这里假设 Translator 存的是 IfOp，我们需要找到对应的 Yield。

@@ -224,7 +224,7 @@ const int64_t *mlirPTOTileTypeGetShape(MlirType type, intptr_t *numDimsOut) {
 }
 
 bool mlirPTOTypeIsATileBufType(MlirType type) {
-  return unwrap(type).isa<mlir::pto::TileBufType>();
+  return mlir::isa<mlir::pto::TileBufType>(unwrap(type));
 }
 
 MlirType mlirPTOTileBufTypeGet(MlirContext ctx, intptr_t rank,
@@ -244,7 +244,7 @@ MlirType mlirPTOTileBufTypeGetWithConfig(MlirContext ctx, intptr_t rank,
                                          MlirAttribute memorySpace, MlirAttribute config) {
   MLIRContext *c = unwrap(ctx);
   auto shp = llvm::ArrayRef<int64_t>(shape, rank);
-  auto cfg = unwrap(config).dyn_cast_or_null<mlir::pto::TileBufConfigAttr>();
+  auto cfg = mlir::dyn_cast_or_null<mlir::pto::TileBufConfigAttr>(unwrap(config));
   if (!cfg) cfg = mlir::pto::TileBufConfigAttr::getDefault(c);
   auto ty = mlir::pto::TileBufType::get(c, shp, unwrap(elementType), unwrap(memorySpace), cfg);
   return wrap(ty);
@@ -543,7 +543,7 @@ MlirPTOCmpMode mlirPTOCmpModeAttrGetValue(MlirAttribute attr) {
 }
 
 bool mlirPTOAttrIsATileBufConfigAttr(MlirAttribute attr) {
-  return unwrap(attr).isa<mlir::pto::TileBufConfigAttr>();
+  return mlir::isa<mlir::pto::TileBufConfigAttr>(unwrap(attr));
 }
 
 MlirAttribute mlirPTOTileBufConfigAttrGetDefault(MlirContext ctx) {
@@ -580,7 +580,7 @@ static mlir::pto::CompactModeAttr toCompactModeAttr(mlir::MLIRContext *c,
 }
 
 bool mlirPTOAttrIsACompactModeAttr(MlirAttribute attr) {
-  return unwrap(attr).isa<mlir::pto::CompactModeAttr>();
+  return mlir::isa<mlir::pto::CompactModeAttr>(unwrap(attr));
 }
 
 MlirAttribute mlirPTOCompactModeAttrGet(MlirContext ctx, int32_t value) {
@@ -595,7 +595,7 @@ int32_t mlirPTOCompactModeAttrGetValue(MlirAttribute attr) {
 }
 
 bool mlirPTOAttrIsAAccToVecModeAttr(MlirAttribute attr) {
-  return unwrap(attr).isa<mlir::pto::AccToVecModeAttr>();
+  return mlir::isa<mlir::pto::AccToVecModeAttr>(unwrap(attr));
 }
 
 MlirAttribute mlirPTOAccToVecModeAttrGet(MlirContext ctx, int32_t value) {
@@ -610,7 +610,7 @@ int32_t mlirPTOAccToVecModeAttrGetValue(MlirAttribute attr) {
 }
 
 bool mlirPTOAttrIsAReluPreModeAttr(MlirAttribute attr) {
-  return unwrap(attr).isa<mlir::pto::ReluPreModeAttr>();
+  return mlir::isa<mlir::pto::ReluPreModeAttr>(unwrap(attr));
 }
 
 MlirAttribute mlirPTOReluPreModeAttrGet(MlirContext ctx, int32_t value) {

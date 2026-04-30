@@ -9,6 +9,9 @@
 //===- PTOToEmitC.cpp - PTO to EmitC conversion pass ----------------------===//
 //===----------------------------------------------------------------------===//
 
+#pragma GCC diagnostic ignored "-Woverloaded-virtual"
+// https://discourse.llvm.org/t/matchandrewrite-hiding-virtual-functions/84933/8
+
 #include <cassert>
 #include <climits>
 
@@ -1263,8 +1266,6 @@ struct ArithExtUIToEmitC : public OpConversionPattern<arith::ExtUIOp> {
       return success();
     }
 
-    auto uSrcTy =
-        getUnsignedIntOpaqueType(rewriter.getContext(), srcIntTy.getWidth());
     auto uDstTy =
         getUnsignedIntOpaqueType(rewriter.getContext(), dstIntTy.getWidth());
     Value srcU =
@@ -1379,8 +1380,6 @@ struct ArithUIToFPToEmitC : public OpConversionPattern<arith::UIToFPOp> {
       rewriter.replaceOpWithNewOp<emitc::CastOp>(op, dstTy, adaptor.getIn());
       return success();
     }
-    auto uSrcTy =
-        getUnsignedIntOpaqueType(rewriter.getContext(), srcIntTy.getWidth());
     Value srcU =
         castSignlessIntToUnsignedSameWidth(rewriter, loc, adaptor.getIn(),
                                            srcIntTy.getWidth());
@@ -2548,7 +2547,7 @@ struct AffineApplyMulConstToEmitC
 
 enum class KernelKind { VecAdd, Matmul, Unknown };
 
-static KernelKind inferKernelKind(func::FuncOp f) {
+[[maybe_unused]] static KernelKind inferKernelKind(func::FuncOp f) {
   bool hasAdd = false;
   bool hasMM  = false;
   f.walk([&](Operation *op) {
@@ -2561,7 +2560,7 @@ static KernelKind inferKernelKind(func::FuncOp f) {
   return KernelKind::Unknown;
 }
 
-static void inferTileMNK(func::FuncOp f, int &M, int &N, int &K) {
+[[maybe_unused]] static void inferTileMNK(func::FuncOp f, int &M, int &N, int &K) {
   M = 32; N = 32; K = 32;
   SmallVector<memref::SubViewOp, 4> subs;
   f.walk([&](memref::SubViewOp sv) { subs.push_back(sv); });
@@ -2745,7 +2744,7 @@ static std::optional<Role> inferSubviewRoleFromUser(Operation *user, Value resul
   return std::nullopt;
 }
 
-static Role inferSubviewRole(memref::SubViewOp sv) {
+[[maybe_unused]] static Role inferSubviewRole(memref::SubViewOp sv) {
   Value result = sv.getResult();
   for (Operation *user : result.getUsers()) {
     if (auto role = inferSubviewRoleFromUser(user, result))
@@ -4096,7 +4095,7 @@ struct PTOTStoreToTSTORE : public OpConversionPattern<pto::TStoreOp> {
     const bool reluNonDefault = reluPreMode != pto::ReluPreMode::NoRelu;
 
     auto getOpaqueTok = [&](Value v, StringRef name) -> FailureOr<std::string> {
-      if (auto ot = v.getType().dyn_cast<emitc::OpaqueType>())
+      if (auto ot = mlir::dyn_cast<emitc::OpaqueType>(v.getType()))
         return ot.getValue().str();
       return rewriter.notifyMatchFailure(op, (name + " must be emitc::OpaqueType").str());
     };
@@ -4410,7 +4409,7 @@ static std::string getAutoSyncTailModeToken(Operation *op) {
   return kAutoSyncTailModeBarrierAllToken.str();
 }
 
-static std::string getPipeName(pto::PIPE pipe) {
+[[maybe_unused]] static std::string getPipeName(pto::PIPE pipe) {
   switch (pipe) {
     case pto::PIPE::PIPE_S: return "PIPE_S";
     case pto::PIPE::PIPE_V: return "PIPE_V";
@@ -5568,7 +5567,7 @@ struct PTOBuildAsyncSessionToEmitC
                         .getResult();
 
     auto u32Ty = emitc::OpaqueType::get(ctx, "uint32_t");
-    auto u64Ty = emitc::OpaqueType::get(ctx, "uint64_t");
+    [[maybe_unused]] auto u64Ty = emitc::OpaqueType::get(ctx, "uint64_t");
 
     auto makeU32Const = [&](uint64_t value) -> Value {
       return makeEmitCOpaqueConstant(rewriter, loc, u32Ty,
@@ -5935,8 +5934,8 @@ struct PTOPartitionViewToEmitC
       return rewriter.notifyMatchFailure(
           op, "expected tensor_view source and partition_tensor_view result");
 
-    if (op.getOffsets().size() != srcTy.getRank() ||
-        op.getSizes().size() != srcTy.getRank())
+    if (op.getOffsets().size() != static_cast<size_t>(srcTy.getRank()) ||
+        op.getSizes().size() != static_cast<size_t>(srcTy.getRank()))
       return rewriter.notifyMatchFailure(op, "rank mismatch");
 
     for (auto [idx, value] : llvm::enumerate(op.getSizes())) {
@@ -6249,6 +6248,10 @@ struct ReinterpretCastToEmitC : public OpConversionPattern<memref::ReinterpretCa
     case pto::AddressSpace::GM:
       roleTok = "TileType::Vec";
       break;
+    case pto::AddressSpace::Zero:
+    case pto::AddressSpace::SCALING:
+      roleTok = "TileType::Vec";
+      break;
     }
 
     // Shape (fallback to 32x32).
@@ -6512,7 +6515,7 @@ struct PTOTCIToEmitC : public OpConversionPattern<pto::TCIOp> {
     std::string descTok = op.getDescending() ? "1" : "0";
 
     ArrayAttr targs;
-    if (auto ot = dst.getType().dyn_cast<emitc::OpaqueType>()) {
+    if (auto ot = mlir::dyn_cast<emitc::OpaqueType>(dst.getType())) {
       std::string tileTok = ot.getValue().str(); // "Tile<...>"
       targs = rewriter.getArrayAttr({
           emitc::OpaqueAttr::get(ctx, tileTok),
@@ -6552,7 +6555,6 @@ struct PTOColExpandToEmitC : public OpConversionPattern<pto::TColExpandOp> {
   LogicalResult matchAndRewrite(pto::TColExpandOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     auto loc = op.getLoc();
-    auto *ctx = rewriter.getContext();
 
     Value dst = peelUnrealized(adaptor.getDst());
     Value src = peelUnrealized(adaptor.getSrc());
@@ -6735,7 +6737,7 @@ struct PTOTTriToEmitC : public OpConversionPattern<pto::TTriOp> {
     Value diagonal = peelUnrealized(adaptor.getDiagonal());
 
     ArrayAttr templateArgs;
-    if (auto dstOT = dst.getType().dyn_cast<emitc::OpaqueType>()) {
+    if (auto dstOT = mlir::dyn_cast<emitc::OpaqueType>(dst.getType())) {
       templateArgs = rewriter.getArrayAttr({
           emitc::OpaqueAttr::get(ctx, dstOT.getValue().str()),
           emitc::OpaqueAttr::get(ctx, std::to_string(op.getUpperOrLower())),
@@ -6773,8 +6775,6 @@ struct PTOCmpToEmitC : public OpConversionPattern<pto::TCmpOp> {
     auto modeTy = emitc::OpaqueType::get(ctx, "CmpMode");
     Value modeVal = rewriter.create<emitc::ConstantOp>(
         loc, modeTy, emitc::OpaqueAttr::get(ctx, tok));
-
-    auto argsAttr = rewriter.getArrayAttr({});
 
     rewriter.create<emitc::CallOpaqueOp>(
         loc,
@@ -6829,7 +6829,6 @@ struct PTOColMaxToEmitC : public OpConversionPattern<pto::TColMaxOp> {
   LogicalResult matchAndRewrite(pto::TColMaxOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     auto loc = op.getLoc();
-    auto *ctx = rewriter.getContext();
 
     Value src = peelUnrealized(adaptor.getSrc());
     Value dst = peelUnrealized(adaptor.getDst());
@@ -6874,7 +6873,6 @@ struct PTOColMinToEmitC : public OpConversionPattern<pto::TColMinOp> {
   LogicalResult matchAndRewrite(pto::TColMinOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     auto loc = op.getLoc();
-    auto *ctx = rewriter.getContext();
 
     Value src = peelUnrealized(adaptor.getSrc());
     Value dst = peelUnrealized(adaptor.getDst());
@@ -7370,7 +7368,7 @@ struct PTOFillPadExpandToEmitC
 // - Mask form : TGATHER<dstTileTok, srcTileTok, pto::MaskPattern::Pxxxx>(dst, src0)
 //===----------------------------------------------------------------------===//
 
-static std::string maskPatternTok(mlir::pto::MaskPatternAttr a) {
+[[maybe_unused]] static std::string maskPatternTok(mlir::pto::MaskPatternAttr a) {
 
   auto v = a.getValue(); // enum
   return (std::string("pto::MaskPattern::") + mlir::pto::stringifyMaskPattern(v).str());
@@ -7388,7 +7386,7 @@ struct PTOGatherToEmitC : public OpConversionPattern<pto::TGatherOp> {
     Value src0 = peelUnrealized(adaptor.getSrc());
 
     auto getOpaqueTok = [&](Value v, StringRef name) -> FailureOr<std::string> {
-      if (auto ot = v.getType().dyn_cast<emitc::OpaqueType>())
+      if (auto ot = mlir::dyn_cast<emitc::OpaqueType>(v.getType()))
         return ot.getValue().str();
       return rewriter.notifyMatchFailure(op, (name + " must be emitc::OpaqueType (tile)").str());
     };
@@ -7681,8 +7679,8 @@ struct PTOMovToEmitC : public OpConversionPattern<pto::TMovOp> {
     if (op.getPreQuantScalar())
       preQuantScalar = peelUnrealized(adaptor.getPreQuantScalar());
 
-    auto dstOT = dst.getType().dyn_cast<emitc::OpaqueType>();
-    auto srcOT = src.getType().dyn_cast<emitc::OpaqueType>();
+    auto dstOT = mlir::dyn_cast<emitc::OpaqueType>(dst.getType());
+    auto srcOT = mlir::dyn_cast<emitc::OpaqueType>(src.getType());
     if (!dstOT || !srcOT)
       return rewriter.notifyMatchFailure(
           op, "tmov lowering expects opaque dst/src types");
@@ -7725,7 +7723,7 @@ struct PTOMovToEmitC : public OpConversionPattern<pto::TMovOp> {
     StringRef callee = "TMOV";
 
     if (hasFp) {
-      auto fpOT = fp.getType().dyn_cast<emitc::OpaqueType>();
+      auto fpOT = mlir::dyn_cast<emitc::OpaqueType>(fp.getType());
       if (!fpOT)
         return rewriter.notifyMatchFailure(
             op, "tmov fp lowering expects opaque fp type");
@@ -7790,9 +7788,9 @@ struct PTOMovFPToEmitC : public OpConversionPattern<pto::TMovFPOp> {
 
     // TMOV_FP<DstTileData, AccTile, FbTile>(dstTileData, cTile, fbTile)
     ArrayAttr templateArgs;
-    auto dstOT = dst.getType().dyn_cast<emitc::OpaqueType>();
-    auto srcOT = src.getType().dyn_cast<emitc::OpaqueType>();
-    auto fpOT  = fp.getType().dyn_cast<emitc::OpaqueType>();
+    auto dstOT = mlir::dyn_cast<emitc::OpaqueType>(dst.getType());
+    auto srcOT = mlir::dyn_cast<emitc::OpaqueType>(src.getType());
+    auto fpOT  = mlir::dyn_cast<emitc::OpaqueType>(fp.getType());
     if (dstOT && srcOT && fpOT) {
       templateArgs = rewriter.getArrayAttr({
           emitc::OpaqueAttr::get(ctx, dstOT.getValue().str()),
@@ -7830,7 +7828,7 @@ struct PTOQuantToEmitC : public OpConversionPattern<pto::TQuantOp> {
     Value offsetPtr;
     if (op.getOffset()) {
       Value offset = peelUnrealized(adaptor.getOffset());
-      auto offsetOT = offset.getType().dyn_cast<emitc::OpaqueType>();
+      auto offsetOT = mlir::dyn_cast<emitc::OpaqueType>(offset.getType());
       if (offsetOT) {
         offsetPtr = rewriter
                         .create<emitc::ApplyOp>(
@@ -7845,9 +7843,9 @@ struct PTOQuantToEmitC : public OpConversionPattern<pto::TQuantOp> {
             ? "pto::QuantType::INT8_SYM"
             : "pto::QuantType::INT8_ASYM";
     ArrayAttr templateArgs;
-    auto dstOT = dst.getType().dyn_cast<emitc::OpaqueType>();
-    auto srcOT = src.getType().dyn_cast<emitc::OpaqueType>();
-    auto fpOT  = fp.getType().dyn_cast<emitc::OpaqueType>();
+    auto dstOT = mlir::dyn_cast<emitc::OpaqueType>(dst.getType());
+    auto srcOT = mlir::dyn_cast<emitc::OpaqueType>(src.getType());
+    auto fpOT  = mlir::dyn_cast<emitc::OpaqueType>(fp.getType());
     if (dstOT && srcOT && fpOT) {
       templateArgs = rewriter.getArrayAttr({
           emitc::OpaqueAttr::get(ctx, quantTypeStr),
@@ -7887,9 +7885,9 @@ struct PTODequantToEmitC : public OpConversionPattern<pto::TDequantOp> {
 
     // TDEQUANT<DstTile, SrcTile, ParaTile>(dst, src, scale, offset)
     ArrayAttr templateArgs;
-    auto dstOT   = dst.getType().dyn_cast<emitc::OpaqueType>();
-    auto srcOT   = src.getType().dyn_cast<emitc::OpaqueType>();
-    auto scaleOT = scale.getType().dyn_cast<emitc::OpaqueType>();
+    auto dstOT   = mlir::dyn_cast<emitc::OpaqueType>(dst.getType());
+    auto srcOT   = mlir::dyn_cast<emitc::OpaqueType>(src.getType());
+    auto scaleOT = mlir::dyn_cast<emitc::OpaqueType>(scale.getType());
     if (dstOT && srcOT && scaleOT) {
       templateArgs = rewriter.getArrayAttr({
           emitc::OpaqueAttr::get(ctx, dstOT.getValue().str()),
@@ -7945,8 +7943,8 @@ struct PTOMrgSortToEmitC : public OpConversionPattern<pto::TMrgSortOp> {
       for (Value v : adaptor.getSrcs())
         srcs.push_back(peelUnrealized(v));
 
-      auto dstOT = dst.getType().dyn_cast<emitc::OpaqueType>();
-      auto tmpOT = tmp.getType().dyn_cast<emitc::OpaqueType>();
+      auto dstOT = mlir::dyn_cast<emitc::OpaqueType>(dst.getType());
+      auto tmpOT = mlir::dyn_cast<emitc::OpaqueType>(tmp.getType());
       if (!dstOT || !tmpOT || srcs.size() < 2 || srcs.size() > 4)
         return op.emitOpError("format2 expects dst/tmp tilebufs and 2 to 4 srcs");
 
@@ -7955,7 +7953,7 @@ struct PTOMrgSortToEmitC : public OpConversionPattern<pto::TMrgSortOp> {
       targs.push_back(emitc::OpaqueAttr::get(ctx, dstOT.getValue().str()));
       targs.push_back(emitc::OpaqueAttr::get(ctx, tmpOT.getValue().str()));
       for (Value v : srcs) {
-        auto ot = v.getType().dyn_cast<emitc::OpaqueType>();
+        auto ot = mlir::dyn_cast<emitc::OpaqueType>(v.getType());
         if (!ot)
           return op.emitOpError("format2 expects tilebuf srcs");
         targs.push_back(emitc::OpaqueAttr::get(ctx, ot.getValue().str()));

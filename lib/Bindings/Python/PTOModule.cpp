@@ -810,7 +810,7 @@ static void bindPTOModule(pybind11::module &m) {
                 throw std::runtime_error("valid_shape rank must match shape rank");
             }
             validShape.resize(lst.size());
-            for (ssize_t i = 0; i < lst.size(); ++i) {
+            for (py::ssize_t i = 0; i < static_cast<py::ssize_t>(lst.size()); ++i) {
                 py::object e = lst[i];
                 if (e.is_none()) {
                 validShape[i] = -1;  // None -> dynamic

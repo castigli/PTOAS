@@ -573,7 +573,7 @@ void MemLivenessAnalysis::RecursiveIfOp(scf::IfOp ifOp, Liveness live) {
   //        scf.yield %alloc0: memref<16xf16, #pto.address_space<ub>>
   //      else:
   //        scf.yield %alloc1 : memref<16xf16, #pto.address_space<ub>>
-  auto curIfThen = UpdateLinearOperation(ifOp.getOperation());
+  UpdateLinearOperation(ifOp.getOperation());
   RecursionIR(&ifOp.getThenRegion(), live);
   auto curIfElse = UpdateLinearOperation(ifOp.getOperation());
   UpdateIfOpBufferAlias(ifOp, ifOp.thenYield());
@@ -1576,6 +1576,9 @@ MemPlan::GetBufferSpaceInfo(pto::AddressSpace &space) const {
     return std::make_pair(biasAlignSize, biasSpaceSize);
   case pto::AddressSpace::SCALING:
     return std::make_pair(scalingAlignSize, scalingSpaceSize);
+  case pto::AddressSpace::Zero:
+  case pto::AddressSpace::GM:
+    return std::make_pair(size_t{0}, size_t{0});
   }
 
   llvm_unreachable("Temporarily unsupported memory buffer space !");
