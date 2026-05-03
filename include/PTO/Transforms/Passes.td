@@ -248,4 +248,22 @@ def PTOViewToMemref : Pass<"pto-view-to-memref", "ModuleOp"> {
   ];
 }
 
+def PTOMaterializeTileHandles : Pass<"pto-materialize-tile-handles", "ModuleOp"> {
+  let summary = "Materialize tile_buf handles from planned memrefs before EmitC";
+  let description = [{
+    Re-wraps local memref values used by tile operations into explicit
+    pto.materialize_tile ops. This keeps PlanMemory and InjectSync in memref IR
+    while making the tile handle boundary visible to EmitC lowering.
+  }];
+
+  let constructor = "mlir::pto::createPTOMaterializeTileHandlesPass()";
+
+  let dependentDialects = [
+    "mlir::pto::PTODialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::func::FuncDialect"
+  ];
+}
+
 #endif // MLIR_DIALECT_PTO_PASSES

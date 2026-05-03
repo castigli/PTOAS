@@ -273,6 +273,34 @@ def BindTileOp : PTO_Op<"bind_tile", [
   }];
 }
 
+def MaterializeTileOp : PTO_Op<"materialize_tile", [
+    Pure,
+    AttrSizedOperandSegments
+  ]> {
+  let summary = "Materializes a tile buffer handle from a planned memref";
+  let description = [{
+    Bridges the memref-based memory-planning/sync IR back into tile-buffer
+    handle IR immediately before EmitC. The source remains the planned memref
+    address, while the result carries the tile type, valid dims, and config
+    expected by tile operations and C++ tile codegen.
+  }];
+
+  let arguments = (ins
+    AnyMemRef:$source,
+    Optional<Index>:$valid_row,
+    Optional<Index>:$valid_col,
+    TileBufConfigAttr:$config
+  );
+
+  let results = (outs TileBufType:$result);
+
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    $source (`,` $valid_row^ `,` $valid_col)? attr-dict `:` qualified(type($source)) `->` qualified(type($result))
+  }];
+}
+
 def SubViewOp : PTO_Op<"subview", [
     Pure,
     ViewLikeOpInterface,

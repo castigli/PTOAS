@@ -198,6 +198,12 @@ static llvm::cl::opt<bool> emitMlirIR(
     llvm::cl::desc("Emit PTO IR after lowering instead of C++"),
     llvm::cl::init(false));
 
+static llvm::cl::opt<bool> dumpPtoIRBeforeEmitC(
+    "dump-pto-ir-before-emitc",
+    llvm::cl::desc("Dump PTO IR after tile handle materialization and before "
+                   "EmitC lowering to stderr"),
+    llvm::cl::init(false));
+
 static llvm::cl::opt<std::string> ptoTargetArch(
     "pto-arch",
     llvm::cl::desc("Target Ascend architecture for codegen: a3 or a5 (default: a3)"),
@@ -894,6 +900,14 @@ static bool shouldDeclareVariablesAtTop(ModuleOp module) {
          llvm::any_of(module.getOps<emitc::FuncOp>(), hasMultiBlockFunc);
 }
 
+static void dumpIRBeforeEmitC(ModuleOp module) {
+  llvm::errs()
+      << "// -----// PTOAS IR before EmitC (after tile handle materialize) "
+         "//----- //\n";
+  module->print(llvm::errs());
+  llvm::errs() << "\n";
+}
+
 int main(int argc, char **argv) {
   DialectRegistry registry;
   registry.insert<mlir::func::FuncDialect>();
@@ -1142,18 +1156,40 @@ int main(int argc, char **argv) {
     return 0;
   }
 
+  pm.addPass(pto::createPTOMaterializeTileHandlesPass());
   pm.addPass(createCSEPass());
-  if (arch == "a3") {
-    pm.addPass(pto::createEmitPTOManualPass(pto::PTOArch::A3));
-  } else {
-    pm.addPass(pto::createEmitPTOManualPass(pto::PTOArch::A5));
-  }
-  pm.addPass(emitc::createFormExpressionsPass());
-  pm.addPass(mlir::createCSEPass());
 
-  if (failed(pm.run(*module))) {
-    llvm::errs() << "Error: Pass execution failed.\n";
-    return 1;
+  auto addEmitCPasses = [&](PassManager &pipeline) {
+    if (arch == "a3") {
+      pipeline.addPass(pto::createEmitPTOManualPass(pto::PTOArch::A3));
+    } else {
+      pipeline.addPass(pto::createEmitPTOManualPass(pto::PTOArch::A5));
+    }
+    pipeline.addPass(emitc::createFormExpressionsPass());
+    pipeline.addPass(mlir::createCSEPass());
+  };
+
+  if (dumpPtoIRBeforeEmitC) {
+    if (failed(pm.run(*module))) {
+      llvm::errs() << "Error: Pass execution failed.\n";
+      return 1;
+    }
+    dumpIRBeforeEmitC(*module);
+
+    PassManager emitPm(&context);
+    if (failed(applyPassManagerCLOptions(emitPm)))
+      return 1;
+    addEmitCPasses(emitPm);
+    if (failed(emitPm.run(*module))) {
+      llvm::errs() << "Error: Pass execution failed.\n";
+      return 1;
+    }
+  } else {
+    addEmitCPasses(pm);
+    if (failed(pm.run(*module))) {
+      llvm::errs() << "Error: Pass execution failed.\n";
+      return 1;
+    }
   }
 
   dropEmptyEmitCExpressions(module.get());

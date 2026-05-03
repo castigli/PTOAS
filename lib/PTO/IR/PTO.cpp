@@ -1744,6 +1744,47 @@ LogicalResult AllocTileOp::verify() {
   return success();
 }
 
+LogicalResult MaterializeTileOp::verify() {
+  auto sourceTy = cast<MemRefType>(getSource().getType());
+  auto resultTy = cast<TileBufType>(getResult().getType());
+
+  if (sourceTy.getRank() != 2)
+    return emitOpError("source memref must be rank-2 to materialize a tile handle");
+  if (resultTy.getRank() != 2)
+    return emitOpError("result tile_buf must be rank-2");
+
+  auto viewSemantics = (*this)->getAttrOfType<StringAttr>("pto.view_semantics");
+  bool isSubview = viewSemantics && viewSemantics.getValue() == "subview";
+  if (!isSubview && sourceTy.getShape() != resultTy.getShape())
+    return emitOpError() << "source/result shape mismatch: source="
+                         << sourceTy << " result=" << resultTy;
+
+  if (sourceTy.getElementType() != resultTy.getElementType())
+    return emitOpError() << "source/result element type mismatch: source="
+                         << sourceTy.getElementType()
+                         << " result=" << resultTy.getElementType();
+
+  if (sourceTy.getMemorySpace() != resultTy.getMemorySpace())
+    return emitOpError() << "source/result memory space mismatch";
+
+  if (getConfig() != resultTy.getConfigAttr())
+    return emitOpError("config attribute must match the result tile_buf config");
+
+  auto shape = resultTy.getShape();
+  auto validShape = resultTy.getValidShape();
+  if (validShape.size() != 2)
+    return emitOpError("result tile_buf must have rank-2 validShape");
+  for (unsigned i = 0; i < 2; ++i) {
+    if (shape[i] != ShapedType::kDynamic &&
+        validShape[i] != ShapedType::kDynamic && validShape[i] > shape[i]) {
+      return emitOpError() << "valid_shape[" << i << "] must be <= shape["
+                           << i << "]";
+    }
+  }
+
+  return success();
+}
+
 LogicalResult TAssignOp::verify() {
   if (getTile().getType() != getResult().getType()) {
     return emitOpError("result type must match tile operand type");
@@ -2221,6 +2262,19 @@ static SmallVector<int64_t, 4> getValidShapeVec(Value value) {
       valid[1] = getConstantIndexOrDynamic(bind.getValidCol());
   }
   return valid;
+}
+
+static SmallVector<int64_t, 4> getMatmulLogicalShapeVec(Type ty) {
+  auto shape = getShapeVec(ty);
+  auto valid = getValidShapeVec(ty);
+  if (!isa<pto::TileBufType>(ty) || shape.size() != valid.size())
+    return shape;
+
+  for (auto [dim, validDim] : llvm::zip(shape, valid)) {
+    if (validDim != ShapedType::kDynamic)
+      dim = validDim;
+  }
+  return shape;
 }
 
 static bool isByteIntegerType(Type ty) {
@@ -2963,9 +3017,9 @@ static LogicalResult verifyMatTileOperandsA2A3(Operation *op, Type lhsTy,
       *dstSpace != pto::AddressSpace::ACC)
     return op->emitOpError(
         "expects lhs, rhs, and dst to use the left, right, and acc address spaces");
-  auto lhsShape = getShapeVec(lhsTy);
-  auto rhsShape = getShapeVec(rhsTy);
-  auto dstShape = getShapeVec(dstTy);
+  auto lhsShape = getMatmulLogicalShapeVec(lhsTy);
+  auto rhsShape = getMatmulLogicalShapeVec(rhsTy);
+  auto dstShape = getMatmulLogicalShapeVec(dstTy);
   if ((lhsShape[0] != dstShape[0] || rhsShape[1] != dstShape[1] || lhsShape[1] != rhsShape[0]))
     return op->emitOpError(
         "expects static matmul tile shapes lhs[M,K], rhs[K,N], and dst[M,N]");
@@ -7000,7 +7054,8 @@ static bool isLocallyBoundTileSource(Value value) {
   if (!value || isa<BlockArgument>(value))
     return false;
 
-  if (isa<AllocTileOp, DeclareTileOp, BindTileOp, PointerCastOp>(
+  if (isa<AllocTileOp, DeclareTileOp, BindTileOp, PointerCastOp,
+          MaterializeTileOp>(
           value.getDefiningOp()))
     return true;
 

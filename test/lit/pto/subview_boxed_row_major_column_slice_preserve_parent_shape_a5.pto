@@ -1,4 +1,5 @@
-// RUN: ptoas --pto-arch=a5 %s 2>&1 | FileCheck %s
+// RUN: ptoas --pto-arch=a5 --dump-pto-ir-before-emitc %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=IR
+// RUN: ptoas --pto-arch=a5 %s 2>&1 | FileCheck %s --check-prefix=EMITC
 
 module {
   func.func @subview_boxed_row_major_column_slice_preserve_parent_shape_a5()
@@ -19,6 +20,11 @@ module {
   }
 }
 
-// CHECK: Tile<TileType::Right, float, 64, 256, BLayout::RowMajor, 64, 128, SLayout::ColMajor, 512, PadValue::Null, CompactMode::Null>
-// CHECK-NOT: Tile<TileType::Right, float, 64, 128, BLayout::RowMajor, 64, 128, SLayout::ColMajor, 512, PadValue::Null, CompactMode::Null>
-// CHECK: TMATMUL(
+// IR: PTOAS IR before EmitC
+// IR: arith.addi
+// IR: pto.alloc_tile addr = %{{.*}} {pto.view_semantics = "subview"} : !pto.tile_buf<right, 64x256xf32, valid=64x128, slayout=col_major>
+// IR-NOT: pto.materialize_tile
+
+// EMITC: Tile<TileType::Right, float, 64, 256, BLayout::RowMajor, 64, 128, SLayout::ColMajor, 512, PadValue::Null, CompactMode::Null>
+// EMITC-NOT: Tile<TileType::Right, float, 64, 128, BLayout::RowMajor, 64, 128, SLayout::ColMajor, 512, PadValue::Null, CompactMode::Null>
+// EMITC: TMATMUL(
