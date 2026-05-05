@@ -5,8 +5,8 @@ on:
   pull_request:
   # Nightly remote-board validation (GitHub cron is UTC).
   # 22:00 CST (UTC+8) == 14:00 UTC.
-  schedule:
-    - cron: "0 14 * * *"
+  # schedule:
+  #   - cron: "0 14 * * *"
   workflow_dispatch:
     inputs:
       stage:
