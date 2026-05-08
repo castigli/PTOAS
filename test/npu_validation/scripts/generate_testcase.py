@@ -1861,6 +1861,8 @@ def generate_testcase(
     kernel_has_tscatter = "TSCATTER" in raw_kernel
     kernel_has_tgather = "TGATHER" in raw_kernel
     kernel_has_tgatherb = "TGATHERB" in raw_kernel
+    kernel_has_mscatter = "MSCATTER" in raw_kernel
+    kernel_has_mgather = "MGATHER" in raw_kernel
     # Some kernels use an integer tensor as "indices". The safe in-range domain
     # depends on the op semantics:
     # - TSCATTER: use a deterministic, collision-free permutation so NPU-vs-NPU
@@ -1872,6 +1874,27 @@ def generate_testcase(
         index_mod = max(elem_count, 1)
     elif kernel_has_tgather and not kernel_has_tgatherb:
         index_mod = max(elem_count, 1)
+    mgather_table_input = None
+    if kernel_has_mgather:
+        for p in init_ptrs:
+            if p.get("role") == "input":
+                mgather_table_input = p
+                break
+    mscatter_indices_input = None
+    mscatter_output = output_ptrs[0] if kernel_has_mscatter and output_ptrs else None
+    if kernel_has_mscatter:
+        for p in reversed(init_ptrs):
+            p_dtype = _np_dtype_for_cpp(p["cpp_type"])
+            if p.get("role") == "input" and (
+                p_dtype.startswith("np.int") or p_dtype.startswith("np.uint")
+            ):
+                mscatter_indices_input = p
+                break
+        if mscatter_output is not None:
+            index_mod = max(
+                int(ptr_elem_counts.get(mscatter_output["name"], logical_elem_count)),
+                1,
+            )
     mrgsort_packed = "TMRGSORT" in raw_kernel
     for p in init_ptrs:
         np_dtype = _np_dtype_for_cpp(p["cpp_type"])
@@ -1880,6 +1903,18 @@ def generate_testcase(
         is_output = p.get("role") == "output"
         is_integer = np_dtype.startswith("np.int") or np_dtype.startswith("np.uint")
         is_tscatter_indices = kernel_has_tscatter and p.get("role") == "input" and is_integer and size == elem_count
+        is_mscatter_indices = (
+            kernel_has_mscatter
+            and mscatter_indices_input is not None
+            and name == mscatter_indices_input["name"]
+        )
+        is_mgather_indices = (
+            kernel_has_mgather
+            and mgather_table_input is not None
+            and p.get("role") == "input"
+            and is_integer
+            and name != mgather_table_input["name"]
+        )
         is_tgatherb_offset = kernel_has_tgatherb and p.get("role") == "input" and is_integer and size < elem_count
         is_tgatherb_src = kernel_has_tgatherb and p.get("role") == "input" and not is_tgatherb_offset
         # If the kernel has both inputs and outputs, default to zero-init for
@@ -1952,6 +1987,26 @@ def generate_testcase(
             input_generate.append(f"    {name}__row_perm = np.random.permutation({rows}).astype(np.int64).reshape({rows}, 1)")
             input_generate.append(
                 f"    {name} = ({name}__row_perm * {cols} + {name}__cols).astype({np_dtype}).reshape(-1)"
+            )
+            input_generate.append(f"    {name}.tofile(\"{name}.bin\")")
+        elif is_mscatter_indices:
+            out_count = (
+                int(ptr_elem_counts.get(mscatter_output["name"], logical_elem_count))
+                if mscatter_output is not None
+                else max(size, 1)
+            )
+            input_generate.append(
+                f"    {name} = (np.arange({size}, dtype=np.int64) % {out_count}).astype({np_dtype}, copy=False)"
+            )
+            input_generate.append(f"    {name}.tofile(\"{name}.bin\")")
+        elif is_mgather_indices:
+            table_count = (
+                int(ptr_elem_counts.get(mgather_table_input['name'], logical_elem_count))
+                if mgather_table_input is not None
+                else max(size, 1)
+            )
+            input_generate.append(
+                f"    {name} = (np.arange({size}, dtype=np.int64) % {table_count}).astype({np_dtype}, copy=False)"
             )
             input_generate.append(f"    {name}.tofile(\"{name}.bin\")")
         elif is_tgatherb_offset:
@@ -2205,13 +2260,15 @@ endif()
     compare_template = (templates_root / "compare_template.py").read_text(encoding="utf-8")
     compare_lines = ["    ok = True"]
     compare_prefix_counts = {}
-    tscatter_indices_input = None
+    scatter_indices_input = None
     if kernel_has_tscatter:
         for p in init_ptrs:
             p_dtype = _np_dtype_for_cpp(p["cpp_type"])
             if p.get("role") == "input" and (p_dtype.startswith("np.int") or p_dtype.startswith("np.uint")):
-                tscatter_indices_input = p
+                scatter_indices_input = p
                 break
+    elif kernel_has_mscatter and mscatter_indices_input is not None:
+        scatter_indices_input = mscatter_indices_input
     for p in output_ptrs:
         name = p["name"]
         req = inferred_counts.get(name)
@@ -2242,16 +2299,16 @@ endif()
         eps = _default_eps_for_cpp_type(p["cpp_type"])
         is_bf16_output = _is_bf16_cpp_type(p["cpp_type"])
         bf16_max_ulp = _default_bf16_max_ulp_for_cpp_type(p["cpp_type"])
-        if kernel_has_tscatter and tscatter_indices_input is not None:
+        if (kernel_has_tscatter or kernel_has_mscatter) and scatter_indices_input is not None:
             if is_bf16_output:
                 compare_lines.append(
                     f"    ok = compare_bf16_bin_at_indices(\"golden_{name}.bin\", \"{name}.bin\", {bf16_max_ulp}, "
-                    f"\"{tscatter_indices_input['name']}.bin\", {_np_dtype_for_cpp(tscatter_indices_input['cpp_type'])}) and ok"
+                    f"\"{scatter_indices_input['name']}.bin\", {_np_dtype_for_cpp(scatter_indices_input['cpp_type'])}) and ok"
                 )
             else:
                 compare_lines.append(
                     f"    ok = compare_bin_at_indices(\"golden_{name}.bin\", \"{name}.bin\", {np_dtype}, {eps}, "
-                    f"\"{tscatter_indices_input['name']}.bin\", {_np_dtype_for_cpp(tscatter_indices_input['cpp_type'])}) and ok"
+                    f"\"{scatter_indices_input['name']}.bin\", {_np_dtype_for_cpp(scatter_indices_input['cpp_type'])}) and ok"
                 )
         elif has_packed_pred_mask and p["cpp_type"] in {"uint8_t", "int8_t"}:
             compare_lines.append(

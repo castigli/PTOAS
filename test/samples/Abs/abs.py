@@ -46,10 +46,7 @@ def build():
                 tv0 = pto.MakeTensorViewOp(tv2_f32, arg0, [c32, c32], [c32, c1]).result
                 tv1 = pto.MakeTensorViewOp(tv2_f32, arg1, [c32, c32], [c32, c1]).result
 
-                # Test pto.get_tensor_view_dim: get dim sizes from tensor_view and use as partition sizes
-                dim0 = pto.GetTensorViewDimOp(tv0, c0).result
-                dim1 = pto.GetTensorViewDimOp(tv0, c1).result
-                sv0 = pto.PartitionViewOp(tile_view_32, tv0, offsets=[c0, c0], sizes=[dim0, dim1]).result
+                sv0 = pto.PartitionViewOp(tile_view_32, tv0, offsets=[c0, c0], sizes=[c32, c32]).result
 
                 tb0 = pto.AllocTileOp(tile_buf_32).result
                 tb1 = pto.AllocTileOp(tile_buf_32).result

@@ -8,10 +8,10 @@
 
 """TQuant INT8_ASYM kernel sample.
 
-  tquant(src_f32, fp_f32, offset_f32) -> dst_ui8
+  tquant(src_f32, scale_f32[row], offset_f32[row]) -> dst_ui8
 
-Loads a 32x32 f32 tile (src), a 32x32 f32 scaling-factor tile (fp), and a
-32x32 f32 offset tile, performs asymmetric UINT8 quantization, and stores the
+Loads a 32x32 f32 tile (src), a 32x1 per-row scaling tile (scale), and a
+32x1 per-row offset tile, performs asymmetric UINT8 quantization, and stores the
 uint8 result tile.
 
 Note: uint8 tiles require Cols*sizeof(T) to be a multiple of 32 bytes
@@ -50,18 +50,27 @@ def _make_common_types(ctx):
     tv2_ui8 = pto.TensorViewType.get(2, ui8, ctx)
 
     ptv_f32 = pto.PartitionTensorViewType.get(_SHAPE, f32, ctx)
+    ptv_param = pto.PartitionTensorViewType.get([_SHAPE[0], 1], f32, ctx)
     ptv_ui8 = pto.PartitionTensorViewType.get(_SHAPE, ui8, ctx)
 
     vec = pto.AddressSpaceAttr.get(pto.AddressSpace.VEC, ctx)
     bl = pto.BLayoutAttr.get(pto.BLayout.RowMajor, ctx)
+    bl_col = pto.BLayoutAttr.get(pto.BLayout.ColMajor, ctx)
     sl = pto.SLayoutAttr.get(pto.SLayout.NoneBox, ctx)
     pd = pto.PadValueAttr.get(pto.PadValue.Null, ctx)
     cfg = pto.TileBufConfigAttr.get(bl, sl, pto.TileConfig.fractalABSize, pd, ctx)
+    cfg_col = pto.TileBufConfigAttr.get(
+        bl_col, sl, pto.TileConfig.fractalABSize, pd, ctx
+    )
 
     tb_f32 = pto.TileBufType.get(_SHAPE, f32, vec, _SHAPE, cfg, ctx)
+    tb_param = pto.TileBufType.get(
+        [_SHAPE[0], 1], f32, vec, [_SHAPE[0], 1], cfg_col, ctx
+    )
     tb_ui8 = pto.TileBufType.get(_SHAPE, ui8, vec, _SHAPE, cfg, ctx)
 
     quant_asym = pto.QuantTypeAttr.get(pto.QuantType.INT8_ASYM, ctx)
+    layout_dn = pto.LayoutAttr.get(pto.Layout.DN, ctx)
 
     class NS:
         pass
@@ -75,10 +84,13 @@ def _make_common_types(ctx):
     ns.tv2_f32 = tv2_f32
     ns.tv2_ui8 = tv2_ui8
     ns.ptv_f32 = ptv_f32
+    ns.ptv_param = ptv_param
     ns.ptv_ui8 = ptv_ui8
     ns.tb_f32 = tb_f32
+    ns.tb_param = tb_param
     ns.tb_ui8 = tb_ui8
     ns.quant_asym = quant_asym
+    ns.layout_dn = layout_dn
     return ns
 
 
@@ -92,7 +104,7 @@ def build():
 
             # ------------------------------------------------------------------
             # @tquant_asym_kernel(src_ptr:    !pto.ptr<f32>,
-            #                     fp_ptr:     !pto.ptr<f32>,
+            #                     scale_ptr:  !pto.ptr<f32>,
             #                     offset_ptr: !pto.ptr<f32>,
             #                     dst_ptr:    !pto.ptr<ui8>)
             # ------------------------------------------------------------------
@@ -113,17 +125,25 @@ def build():
                 c1 = arith.ConstantOp(idx, 1).result
                 c32 = arith.ConstantOp(idx, 32).result
 
-                src_ptr, fp_ptr, off_ptr, dst_ptr = entry_asym.arguments
+                src_ptr, scale_ptr, off_ptr, dst_ptr = entry_asym.arguments
 
                 # Make tensor views over the flat global-memory pointers.
                 tv_src = pto.MakeTensorViewOp(
                     t.tv2_f32, src_ptr, [c32, c32], [c32, c1]
                 ).result
-                tv_fp = pto.MakeTensorViewOp(
-                    t.tv2_f32, fp_ptr, [c32, c32], [c32, c1]
+                tv_scale = pto.MakeTensorViewOp(
+                    t.tv2_f32,
+                    scale_ptr,
+                    [c32, c1],
+                    [c1, c1],
+                    layout=t.layout_dn,
                 ).result
                 tv_off = pto.MakeTensorViewOp(
-                    t.tv2_f32, off_ptr, [c32, c32], [c32, c1]
+                    t.tv2_f32,
+                    off_ptr,
+                    [c32, c1],
+                    [c1, c1],
+                    layout=t.layout_dn,
                 ).result
                 tv_dst = pto.MakeTensorViewOp(
                     t.tv2_ui8, dst_ptr, [c32, c32], [c32, c1]
@@ -133,11 +153,11 @@ def build():
                 sv_src = pto.PartitionViewOp(
                     t.ptv_f32, tv_src, offsets=[c0, c0], sizes=[c32, c32]
                 ).result
-                sv_fp = pto.PartitionViewOp(
-                    t.ptv_f32, tv_fp, offsets=[c0, c0], sizes=[c32, c32]
+                sv_scale = pto.PartitionViewOp(
+                    t.ptv_param, tv_scale, offsets=[c0, c0], sizes=[c32, c1]
                 ).result
                 sv_off = pto.PartitionViewOp(
-                    t.ptv_f32, tv_off, offsets=[c0, c0], sizes=[c32, c32]
+                    t.ptv_param, tv_off, offsets=[c0, c0], sizes=[c32, c1]
                 ).result
                 sv_dst = pto.PartitionViewOp(
                     t.ptv_ui8, tv_dst, offsets=[c0, c0], sizes=[c32, c32]
@@ -145,18 +165,18 @@ def build():
 
                 # Allocate on-chip tile buffers.
                 tb_src = pto.AllocTileOp(t.tb_f32).result
-                tb_fp = pto.AllocTileOp(t.tb_f32).result
-                tb_off = pto.AllocTileOp(t.tb_f32).result
+                tb_scale = pto.AllocTileOp(t.tb_param).result
+                tb_off = pto.AllocTileOp(t.tb_param).result
                 tb_dst = pto.AllocTileOp(t.tb_ui8).result
 
                 # Load tiles from global memory.
                 pto.TLoadOp(None, sv_src, tb_src)
-                pto.TLoadOp(None, sv_fp, tb_fp)
+                pto.TLoadOp(None, sv_scale, tb_scale)
                 pto.TLoadOp(None, sv_off, tb_off)
 
                 # INT8_ASYM quantization (offset operand required).
                 pto.TQuantOp(
-                    tb_src, tb_fp, tb_dst, quant_type=t.quant_asym, offset=tb_off
+                    tb_src, tb_scale, tb_dst, quant_type=t.quant_asym, offset=tb_off
                 )
 
                 # Store result back to global memory.

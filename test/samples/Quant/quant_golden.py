@@ -7,12 +7,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 
-"""Golden reference for the TQuant INT8_SYM kernel.
-
-Formula: dst[i] = clip(round(src[i] * fp[i]), -128, 127)  (→ int8)
-
-Note: fp is a scale multiplier (e.g. fp = 1/step_size), not a divisor.
-"""
+"""Golden reference for the TQuant INT8_SYM kernel."""
 
 import numpy as np
 from pathlib import Path
@@ -20,14 +15,6 @@ import sys
 
 _ROWS = 32
 _COLS = 32
-_r = np.arange(_ROWS)[:, None]
-_c = np.arange(_COLS)[None, :]
-
-
-def _effective_scale(fp_flat):
-    """TRowExpandMul block-broadcast: element [r][c] uses fp_flat[r*8 + c%8]."""
-    return fp_flat[_r * 8 + _c % 8]
-
 for search_root in (
     Path(__file__).resolve().parent,
     Path(__file__).resolve().parents[1],
@@ -49,16 +36,17 @@ from validation_runtime import (
 
 def main():
     meta = load_case_meta()
-    src_name, fp_name = meta.inputs
+    src_name, scale_name = meta.inputs
     generator = rng()
     src = float_values(generator, meta.elem_counts[src_name], style="signed")
-    fp = float_values(generator, meta.elem_counts[fp_name], style="positive")
+    scale = float_values(generator, meta.elem_counts[scale_name], style="positive")
     buffers = default_buffers(meta)
     buffers[src_name] = src
-    buffers[fp_name] = fp
+    buffers[scale_name] = scale
     write_buffers(meta, buffers)
+    scale_2d = scale.reshape(_ROWS, 1)
     out = np.clip(
-        np.round(src.reshape(_ROWS, _COLS) * _effective_scale(fp)),
+        np.round(src.reshape(_ROWS, _COLS) * scale_2d),
         -128, 127,
     ).astype(np.int8)
     write_golden(meta, {single_output(meta): out})

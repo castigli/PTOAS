@@ -21,7 +21,6 @@ def build():
 
             i32 = IntegerType.get_signless(32, ctx)
             ptr_i32 = pto.PtrType.get(i32, ctx)
-
             tv2_i32 = pto.TensorViewType.get(2, i32, ctx)
             tile_view_32 = pto.PartitionTensorViewType.get([32, 32], i32, ctx)
             vec = pto.AddressSpaceAttr.get(pto.AddressSpace.VEC, ctx)
@@ -46,7 +45,6 @@ def build():
 
                 arg0, arg1, arg2 = entry.arguments
 
-                # %0/%1/%2 = pto.make_tensor_view %arg?, shape=[%c32,%c32] strides=[%c32,%c1]
                 tv0 = pto.MakeTensorViewOp(tv2_i32, arg0, [c32, c32], [c32, c1]).result
                 tv1 = pto.MakeTensorViewOp(tv2_i32, arg1, [c32, c32], [c32, c1]).result
                 tv2 = pto.MakeTensorViewOp(tv2_i32, arg2, [c32, c32], [c32, c1]).result
@@ -58,9 +56,8 @@ def build():
                 tb0 = pto.AllocTileOp(tile_buf_i32).result
                 tb1 = pto.AllocTileOp(tile_buf_i32).result
 
-                # pto.load_dps_tb ins(%sv) outs(%tb)
                 pto.TLoadOp(None, sv0, tb0)
-                pto.TLoadOp(None, sv1, tb1)  # result=None
+                pto.TLoadOp(None, sv1, tb1)
 
                 pto.MScatterOp(tb0, tb1, sv2)
 
