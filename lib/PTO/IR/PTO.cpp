@@ -6289,10 +6289,22 @@ mlir::LogicalResult mlir::pto::TMrgSortOp::verify() {
       return emitOpError() << "format2 expects dst/tmp element types to match";
     auto dstShape = getShapeVec(dstTy);
     auto tmpShape = getShapeVec(tmpTy);
-    if (dstShape != tmpShape)
-      return emitOpError() << "format2 expects dst/tmp shapes to match";
+    if (dstShape.size() != 2 || tmpShape.size() != 2)
+      return emitOpError() << "format2 expects dst/tmp to be rank-2 tile-shaped";
+    if ((dstShape[0] != mlir::ShapedType::kDynamic && dstShape[0] != 1) ||
+        (tmpShape[0] != mlir::ShapedType::kDynamic && tmpShape[0] != 1))
+      return emitOpError() << "format2 expects dst/tmp rows == 1";
+    if (dstShape[1] != mlir::ShapedType::kDynamic &&
+        tmpShape[1] != mlir::ShapedType::kDynamic &&
+        tmpShape[1] < dstShape[1])
+      return emitOpError() << "format2 expects tmp.cols >= dst.cols";
     for (Value src : getSrcs()) {
       Type srcTy = src.getType();
+      auto srcShape = getShapeVec(srcTy);
+      if (srcShape.size() != 2)
+        return emitOpError() << "format2 expects src to be rank-2 tile-shaped";
+      if (srcShape[0] != mlir::ShapedType::kDynamic && srcShape[0] != 1)
+        return emitOpError() << "format2 expects src rows == 1";
       if (getElemTy(srcTy) != elemTy)
         return emitOpError() << "format2 expects src/dst/tmp element types to match";
     }
