@@ -1,0 +1,180 @@
+// RUN: ptoas --pto-arch=a3 --pto-level=level3 --enable-insert-sync %s | FileCheck %s
+//
+// Reproducer for issue #622:
+// a mixed 256-wide / 128-wide DIR_C2V pipeline with local_slot_num = 2 can
+// currently reused the same PIPE_V -> PIPE_MTE2 event id across multiple
+// outstanding sync pairs. The loop-tail synthetic wait must be emitted before
+// the post-loop local set so the same-key order stays serialized:
+//
+//   set(E0)
+//   wait(E0)
+//   ...
+//   wait(E0)
+//   set(E0)
+//   wait(E0)
+//
+// This file is intentionally kept small and readable so we can debug event-id
+// lifetime reuse in isolation.
+//
+// CHECK-LABEL: AICORE void vector_kernel(
+// CHECK: TNEG(
+// CHECK-NEXT: set_flag(PIPE_V, PIPE_MTE2, EVENT_ID[[E0:[0-9]+]]);
+// CHECK: wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID[[E0]]);
+// CHECK: wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID[[PRE:[0-9]+]]);
+// CHECK: wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID[[E0]]);
+// CHECK: set_flag(PIPE_V, PIPE_MTE2, EVENT_ID[[E0]]);
+// CHECK: wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID[[E0]]);
+
+module {
+  func.func @cube_kernel(%gm0: !pto.ptr<f32>, %gm1: !pto.ptr<f32>, %gm2: !pto.ptr<f32>)
+      attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+    %c0_i32 = arith.constant 0 : i32
+    %buf0 = pto.import_reserved_buffer {name = "fifo0", peer_func = @vector_kernel} -> i32
+    %pipe0 = pto.initialize_l2g2l_pipe {
+      dir_mask = 1,
+      slot_size = 32768,
+      slot_num = 8,
+      local_slot_num = 2
+    }(%gm0 : !pto.ptr<f32>, %buf0 : i32) -> !pto.pipe
+    %buf1 = pto.import_reserved_buffer {name = "fifo1", peer_func = @vector_kernel} -> i32
+    %pipe1 = pto.initialize_l2g2l_pipe {
+      dir_mask = 1,
+      slot_size = 16384,
+      slot_num = 8,
+      local_slot_num = 2
+    }(%gm1 : !pto.ptr<f32>, %buf1 : i32) -> !pto.pipe
+
+    %v2c_local = pto.reserve_buffer {
+      name = "v2c_fifo",
+      size = 16384,
+      location = #pto.address_space<mat>,
+      auto = false,
+      base = 49152
+    } -> i32
+    pto.aic_initialize_pipe {id = 30, dir_mask = 2, slot_size = 16384, local_slot_num = 1, nosplit = false}
+      (gm_slot_buffer = %gm2 : !pto.ptr<f32>,
+       c2v_consumer_buf = %c0_i32 : i32,
+       v2c_consumer_buf = %v2c_local : i32)
+
+    %c0_i64 = arith.constant 0 : i64
+    %c32768_i64 = arith.constant 32768 : i64
+    %acc256 = pto.alloc_tile addr = %c0_i64 : !pto.tile_buf<loc=acc, dtype=f32, rows=32, cols=256, v_row=32, v_col=256, blayout=col_major, slayout=row_major, fractal=1024, pad=0>
+    %acc128 = pto.alloc_tile addr = %c32768_i64 : !pto.tile_buf<loc=acc, dtype=f32, rows=32, cols=128, v_row=32, v_col=128, blayout=col_major, slayout=row_major, fractal=1024, pad=0>
+
+    // One producer token for each consumer pipe is enough for this reproducer.
+    pto.tpush(%acc256, %pipe0 : !pto.tile_buf<loc=acc, dtype=f32, rows=32, cols=256, v_row=32, v_col=256, blayout=col_major, slayout=row_major, fractal=1024, pad=0>, !pto.pipe) {split = 1}
+    pto.tpush(%acc128, %pipe1 : !pto.tile_buf<loc=acc, dtype=f32, rows=32, cols=128, v_row=32, v_col=128, blayout=col_major, slayout=row_major, fractal=1024, pad=0>, !pto.pipe) {split = 1}
+    return
+  }
+
+  func.func @vector_kernel(%gm0: !pto.ptr<f32>, %gm1: !pto.ptr<f32>, %gm2: !pto.ptr<f32>)
+      attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    %c0_i32 = arith.constant 0 : i32
+    %buf0 = pto.reserve_buffer {
+      name = "fifo0",
+      size = 32768,
+      location = #pto.address_space<vec>,
+      auto = false,
+      base = 0
+    } -> i32
+    %pipe0 = pto.initialize_l2g2l_pipe {
+      dir_mask = 1,
+      slot_size = 32768,
+      slot_num = 8,
+      local_slot_num = 2
+    }(%gm0 : !pto.ptr<f32>, %buf0 : i32) -> !pto.pipe
+    %buf1 = pto.reserve_buffer {
+      name = "fifo1",
+      size = 16384,
+      location = #pto.address_space<vec>,
+      auto = false,
+      base = 32768
+    } -> i32
+    %pipe1 = pto.initialize_l2g2l_pipe {
+      dir_mask = 1,
+      slot_size = 16384,
+      slot_num = 8,
+      local_slot_num = 2
+    }(%gm1 : !pto.ptr<f32>, %buf1 : i32) -> !pto.pipe
+
+    %v2c_import = pto.import_reserved_buffer {name = "v2c_fifo", peer_func = @cube_kernel} -> i32
+    pto.aiv_initialize_pipe {id = 30, dir_mask = 2, slot_size = 16384, local_slot_num = 1, nosplit = false}
+      (gm_slot_buffer = %gm2 : !pto.ptr<f32>,
+       c2v_consumer_buf = %c0_i32 : i32,
+       v2c_consumer_buf = %v2c_import : i32)
+
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c49152_i64 = arith.constant 49152 : i64
+    %c65536_i64 = arith.constant 65536 : i64
+    %c81920_i64 = arith.constant 81920 : i64
+    %c90112_i64 = arith.constant 90112 : i64
+    %c98304_i64 = arith.constant 98304 : i64
+    %v256 = pto.alloc_tile addr = %c49152_i64 : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=256, v_row=16, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %n256 = pto.alloc_tile addr = %c65536_i64 : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=256, v_row=16, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %v128 = pto.alloc_tile addr = %c81920_i64 : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=128, v_row=16, v_col=128, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %n128 = pto.alloc_tile addr = %c90112_i64 : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=128, v_row=16, v_col=128, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %h256 = pto.alloc_tile addr = %c98304_i64 : !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=256, v_row=16, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+
+    // Per outer iteration, keep the smallest known bad shape:
+    //   A A A A B
+    //   for j in [0, 1): A B
+    //   B
+    // A = pop/neg/cvt/push on the 256-wide pipe.
+    // B = pop/neg/free on the 128-wide pipe.
+    scf.for %i = %c0 to %c1 step %c1 {
+      pto.tpop(%v256, %pipe0 : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=256, v_row=16, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>, !pto.pipe) {split = 1}
+      pto.tneg ins(%v256 : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=256, v_row=16, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%n256 : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=256, v_row=16, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+      pto.tcvt ins(%n256 {rmode = #pto<round_mode CAST_RINT>} : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=256, v_row=16, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%h256 : !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=256, v_row=16, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+      pto.tpush_to_aic(%h256 : !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=256, v_row=16, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>) {id = 30, split = 1}
+      pto.tfree(%pipe0 : !pto.pipe) {split = 1}
+
+      pto.tpop(%v256, %pipe0 : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=256, v_row=16, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>, !pto.pipe) {split = 1}
+      pto.tneg ins(%v256 : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=256, v_row=16, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%n256 : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=256, v_row=16, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+      pto.tcvt ins(%n256 {rmode = #pto<round_mode CAST_RINT>} : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=256, v_row=16, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%h256 : !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=256, v_row=16, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+      pto.tpush_to_aic(%h256 : !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=256, v_row=16, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>) {id = 30, split = 1}
+      pto.tfree(%pipe0 : !pto.pipe) {split = 1}
+
+      pto.tpop(%v256, %pipe0 : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=256, v_row=16, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>, !pto.pipe) {split = 1}
+      pto.tneg ins(%v256 : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=256, v_row=16, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%n256 : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=256, v_row=16, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+      pto.tcvt ins(%n256 {rmode = #pto<round_mode CAST_RINT>} : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=256, v_row=16, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%h256 : !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=256, v_row=16, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+      pto.tpush_to_aic(%h256 : !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=256, v_row=16, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>) {id = 30, split = 1}
+      pto.tfree(%pipe0 : !pto.pipe) {split = 1}
+
+      pto.tpop(%v256, %pipe0 : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=256, v_row=16, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>, !pto.pipe) {split = 1}
+      pto.tneg ins(%v256 : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=256, v_row=16, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%n256 : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=256, v_row=16, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+      pto.tcvt ins(%n256 {rmode = #pto<round_mode CAST_RINT>} : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=256, v_row=16, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%h256 : !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=256, v_row=16, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+      pto.tpush_to_aic(%h256 : !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=256, v_row=16, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>) {id = 30, split = 1}
+      pto.tfree(%pipe0 : !pto.pipe) {split = 1}
+
+      pto.tpop(%v128, %pipe1 : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=128, v_row=16, v_col=128, blayout=row_major, slayout=none_box, fractal=512, pad=0>, !pto.pipe) {split = 1}
+      pto.tneg ins(%v128 : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=128, v_row=16, v_col=128, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%n128 : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=128, v_row=16, v_col=128, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+      pto.tfree(%pipe1 : !pto.pipe) {split = 1}
+
+      scf.for %j = %c0 to %c1 step %c1 {
+        pto.tpop(%v256, %pipe0 : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=256, v_row=16, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>, !pto.pipe) {split = 1}
+        pto.tneg ins(%v256 : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=256, v_row=16, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%n256 : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=256, v_row=16, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+        pto.tcvt ins(%n256 {rmode = #pto<round_mode CAST_RINT>} : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=256, v_row=16, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%h256 : !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=256, v_row=16, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+        pto.tpush_to_aic(%h256 : !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=256, v_row=16, v_col=256, blayout=row_major, slayout=none_box, fractal=512, pad=0>) {id = 30, split = 1}
+        pto.tfree(%pipe0 : !pto.pipe) {split = 1}
+
+        pto.tpop(%v128, %pipe1 : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=128, v_row=16, v_col=128, blayout=row_major, slayout=none_box, fractal=512, pad=0>, !pto.pipe) {split = 1}
+        pto.tneg ins(%v128 : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=128, v_row=16, v_col=128, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%n128 : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=128, v_row=16, v_col=128, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+        pto.tfree(%pipe1 : !pto.pipe) {split = 1}
+      }
+
+      pto.tpop(%v128, %pipe1 : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=128, v_row=16, v_col=128, blayout=row_major, slayout=none_box, fractal=512, pad=0>, !pto.pipe) {split = 1}
+      pto.tneg ins(%v128 : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=128, v_row=16, v_col=128, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%n128 : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=128, v_row=16, v_col=128, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+      pto.tfree(%pipe1 : !pto.pipe) {split = 1}
+    }
+    return
+  }
+
+  func.func @call_both(%ffts: memref<256xi64>, %gm0: !pto.ptr<f32>, %gm1: !pto.ptr<f32>, %gm2: !pto.ptr<f32>)
+      attributes {pto.entry} {
+    pto.set_ffts %ffts : memref<256xi64>
+    call @cube_kernel(%gm0, %gm1, %gm2) : (!pto.ptr<f32>, !pto.ptr<f32>, !pto.ptr<f32>) -> ()
+    call @vector_kernel(%gm0, %gm1, %gm2) : (!pto.ptr<f32>, !pto.ptr<f32>, !pto.ptr<f32>) -> ()
+    return
+  }
+}

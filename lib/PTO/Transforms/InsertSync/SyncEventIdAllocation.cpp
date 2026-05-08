@@ -396,7 +396,10 @@ void SyncEventIdAllocation::UpdateBackwardMatchSync(
     syncFront->reallocatedLoopHeadTailSync = true;
     syncEnd->reallocatedLoopHeadTailSync = true;
     syncIR_[ptr->beginId]->pipeBefore.push_back(syncFront.get());
-    syncIR_[ptr->endId]->pipeAfter.push_back(syncEnd.get());
+    // Insert the synthetic tail wait ahead of existing loop-end sets so the
+    // loop tail anchor does not emit a new set before consuming the carried
+    // event of the previous iteration.
+    syncIR_[ptr->endId]->pipeAfter.push_front(syncEnd.get());
   } else {
     syncFront->SetSyncIRIndex(0);
     syncEnd->SetSyncIRIndex(syncIR_.size() - 1);
