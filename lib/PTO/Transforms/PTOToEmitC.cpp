@@ -4300,10 +4300,19 @@ struct PTOTStoreToTSTORE : public OpConversionPattern<pto::TStoreOp> {
 // that does not yet emit an explicit phase attribute.
 static ArrayAttr buildAccPhaseTemplateArgs(ConversionPatternRewriter &rewriter,
                                            pto::AccPhase phase) {
-  if (phase == pto::AccPhase::Unspecified)
+  StringRef tmpl;
+  switch (phase) {
+  case pto::AccPhase::Unspecified:
     return ArrayAttr{};
-  StringRef tmpl = phase == pto::AccPhase::Final ? "AccPhase::Final"
-                                                 : "AccPhase::Partial";
+  case pto::AccPhase::Partial:
+    tmpl = "AccPhase::Partial";
+    break;
+  case pto::AccPhase::Final:
+    tmpl = "AccPhase::Final";
+    break;
+  default:
+    llvm_unreachable("unknown AccPhase");
+  }
   return rewriter.getArrayAttr(
       {emitc::OpaqueAttr::get(rewriter.getContext(), tmpl)});
 }
