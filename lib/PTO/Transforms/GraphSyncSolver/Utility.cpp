@@ -267,7 +267,6 @@ int64_t getHWAvailableEventIdNum(SyncMode syncMode, pto::PIPE setPipe,
     const llvm::DenseMap<std::tuple<PIPE, PIPE>, int64_t> reservedEventIdNum = {
         {{pto::PIPE::PIPE_V, pto::PIPE::PIPE_S}, 1},
         {{pto::PIPE::PIPE_S, pto::PIPE::PIPE_V}, 1},
-        {{pto::PIPE::PIPE_MTE2, pto::PIPE::PIPE_V}, 1},
         {{pto::PIPE::PIPE_M, pto::PIPE::PIPE_FIX}, 1},
         {{pto::PIPE::PIPE_FIX, pto::PIPE::PIPE_M}, 1},
     };
@@ -299,7 +298,6 @@ SmallVector<int64_t> getHWAvailableEventIds(SyncMode syncMode,
     const llvm::DenseMap<std::tuple<PIPE, PIPE>, int64_t> reservedEventIdNum = {
         {{pto::PIPE::PIPE_V, pto::PIPE::PIPE_S}, 1},
         {{pto::PIPE::PIPE_S, pto::PIPE::PIPE_V}, 1},
-        {{pto::PIPE::PIPE_MTE2, pto::PIPE::PIPE_V}, 1},
         {{pto::PIPE::PIPE_M, pto::PIPE::PIPE_FIX}, 1},
         {{pto::PIPE::PIPE_FIX, pto::PIPE::PIPE_M}, 1},
     };

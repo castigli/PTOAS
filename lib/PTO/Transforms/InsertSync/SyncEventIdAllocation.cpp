@@ -730,5 +730,4 @@ const llvm::DenseMap<std::pair<PipelineType, PipelineType>, uint64_t>
     SyncEventIdAllocation::reservedEventIdNum = {
         {{PipelineType::PIPE_V, PipelineType::PIPE_S}, 1},
         {{PipelineType::PIPE_S, PipelineType::PIPE_V}, 1},
-        {{PipelineType::PIPE_MTE2, PipelineType::PIPE_V}, 1},
 };
