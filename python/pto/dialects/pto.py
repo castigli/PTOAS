@@ -14,19 +14,28 @@ from mlir import ir as _ods_ir
 
 from . import _pto_ops_gen as _pto_ops_gen
 
+try:
+    from . import _pto_ssa_ops_gen as _pto_ssa_ops_gen
+except ImportError:
+    _pto_ssa_ops_gen = None
 
-def _load_local_pto_ext():
+
+def _load_local_ext(name: str, module_name: str):
     lib_dir = Path(__file__).resolve().parent.parent / "_mlir_libs"
     for suffix in ("*.so", "*.pyd", "*.dll", "*.dylib"):
-        for so_path in lib_dir.glob(f"_pto{suffix}"):
+        for so_path in lib_dir.glob(f"{name}{suffix}"):
             spec = importlib.util.spec_from_file_location(
-                "mlir._mlir_libs._pto", so_path
+                f"mlir._mlir_libs.{name}", so_path
             )
             if spec and spec.loader:
                 mod = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(mod)
                 return mod
-    raise ImportError("cannot locate local _pto extension in _mlir_libs")
+    raise ImportError(f"cannot locate local {name} extension in _mlir_libs")
+
+
+def _load_local_pto_ext():
+    return _load_local_ext("_pto", "mlir._mlir_libs._pto")
 
 
 try:
@@ -34,12 +43,26 @@ try:
 except Exception:
     _pto_mod = importlib.import_module(".._mlir_libs._pto", __package__)
 
+try:
+    _pto_ssa_mod = _load_local_ext("_pto_ssa", "mlir._mlir_libs._pto_ssa")
+except Exception:
+    try:
+        _pto_ssa_mod = importlib.import_module(".._mlir_libs._pto_ssa", __package__)
+    except ImportError:
+        _pto_ssa_mod = None
+
 
 def _export_generated_symbols():
     for name, obj in _pto_ops_gen.__dict__.items():
         if name.startswith("_"):
             continue
         globals()[name] = obj
+
+    if _pto_ssa_ops_gen is not None:
+        for name, obj in _pto_ssa_ops_gen.__dict__.items():
+            if name.startswith("_"):
+                continue
+            globals()[name] = obj
 
 
 def get_op_result_or_value(value):
@@ -49,6 +72,11 @@ def get_op_result_or_value(value):
 _export_generated_symbols()
 
 register_dialect = _pto_mod.register_dialect
+
+# register_ssa_dialect is available only when _pto_ssa is present.
+if _pto_ssa_mod is not None:
+    register_ssa_dialect = _pto_ssa_mod.register_dialect
+
 PtrType = _pto_mod.PtrType
 AsyncSessionType = _pto_mod.AsyncSessionType
 AsyncEventType = _pto_mod.AsyncEventType

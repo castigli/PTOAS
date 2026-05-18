@@ -6,6 +6,34 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 
-add_subdirectory(IR)
-add_subdirectory(Transforms)
-add_subdirectory(PTOSSA)
+add_mlir_dialect_library(PTOSSAIR
+  PTOSSA.cpp
+
+  ADDITIONAL_HEADER_DIRS
+  ${PROJECT_SOURCE_DIR}/include/PTO
+
+  DEPENDS
+  PTOSSAOpsIncGen
+  PTOOpsIncGen
+
+  LINK_LIBS PUBLIC
+  PTOIR
+  MLIRIR
+  MLIRFuncDialect
+  MLIRSCFDialect
+  MLIRArithDialect
+  MLIRSideEffectInterfaces
+)
+
+install(TARGETS PTOSSAIR
+  EXPORT PTOASTargets
+  LIBRARY DESTINATION lib
+  ARCHIVE DESTINATION lib
+  RUNTIME DESTINATION bin
+)
+
+target_include_directories(PTOSSAIR INTERFACE
+  $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+  $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)

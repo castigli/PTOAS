@@ -102,3 +102,64 @@ add_custom_command(TARGET _pto POST_BUILD
   VERBATIM
 )
 
+# ---- 4) Python native extension: mlir._mlir_libs._pto_ssa ----
+pybind11_add_module(_pto_ssa MODULE
+  PTOSSAModule.cpp
+)
+
+target_include_directories(_pto_ssa PRIVATE
+  ${CMAKE_SOURCE_DIR}/include
+  ${CMAKE_BINARY_DIR}/include
+)
+
+target_link_libraries(_pto_ssa PRIVATE
+  PTOSSAIR
+  PTOIR
+  MLIRIR
+  MLIRCAPIIR
+  MLIRSupport
+  MLIRArithDialect
+  MLIRFuncDialect
+  MLIRSCFDialect
+  MLIRSideEffectInterfaces
+)
+
+set_target_properties(_pto_ssa PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/python/mlir/_mlir_libs"
+  BUILD_RPATH "${LLVM_BUILD_LIBRARY_DIR}"
+  INSTALL_RPATH "${LLVM_BUILD_LIBRARY_DIR}"
+)
+
+if(APPLE)
+  target_link_options(_pto_ssa PRIVATE "LINKER:-undefined,dynamic_lookup")
+endif()
+
+install(TARGETS _pto_ssa
+  LIBRARY DESTINATION "${MLIR_PYTHON_PACKAGE_DIR}/mlir/_mlir_libs"
+)
+
+# ---- 5) Generate ODS Python op bindings: _pto_ssa_ops_gen.py ----
+set(PTO_SSA_TD_DIR "${CMAKE_SOURCE_DIR}/include/PTO/PTOSSA/IR")
+set(LLVM_TARGET_DEFINITIONS ${PTO_SSA_TD_DIR}/PTOSSAOps.td)
+
+mlir_tablegen(_pto_ssa_ops_gen.py
+  -gen-python-op-bindings
+  --bind-dialect=pto_ssa
+)
+
+add_public_tablegen_target(PTOSSAPythonGen)
+add_dependencies(_pto_ssa PTOSSAOpsIncGen PTOSSAPythonGen)
+
+# Copy generated SSA python into build/python
+add_custom_command(TARGET _pto_ssa POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${CMAKE_CURRENT_BINARY_DIR}/_pto_ssa_ops_gen.py"
+          "${CMAKE_BINARY_DIR}/python/mlir/dialects/_pto_ssa_ops_gen.py"
+  VERBATIM
+)
+
+install(FILES
+  "${CMAKE_CURRENT_BINARY_DIR}/_pto_ssa_ops_gen.py"
+  DESTINATION mlir/dialects
+)
+

@@ -220,6 +220,11 @@ static llvm::cl::opt<bool> emitMlirIR(
     llvm::cl::desc("Emit PTO IR after lowering instead of C++"),
     llvm::cl::init(false));
 
+static llvm::cl::opt<bool> parseOnly(
+    "parse-only",
+    llvm::cl::desc("Parse input and print IR without running any passes"),
+    llvm::cl::init(false));
+
 static llvm::cl::opt<std::string> ptoTargetArch(
     "pto-arch",
     llvm::cl::desc("Target Ascend architecture for codegen: a3 or a5 (default: a3)"),
@@ -1190,6 +1195,13 @@ int main(int argc, char **argv) {
       return 1;
     }
     outputOS = &outputFile->os();
+  }
+
+  if (parseOnly) {
+    module->print(*outputOS);
+    if (outputFile)
+      outputFile->keep();
+    return 0;
   }
 
   if (emitMlirIR) {

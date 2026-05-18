@@ -12,10 +12,10 @@
 
 add_custom_target(PTOPythonModules)
 
-# [修改] 依赖必须指向 lib/Bindings/Python 中定义的 Target (_pto)
-add_dependencies(PTOPythonModules _pto) 
+# [修改] 依赖必须指向 lib/Bindings/Python 中定义的 Target (_pto, _pto_ssa)
+add_dependencies(PTOPythonModules _pto _pto_ssa)
 
-# 生成 TableGen 绑定代码
+# 生成 TableGen 绑定代码 (pto)
 set(LLVM_TARGET_DEFINITIONS pto/dialects/PTOOps.td)
 mlir_tablegen(pto/dialects/_pto_ops_gen.py
   -gen-python-op-bindings
@@ -24,4 +24,13 @@ mlir_tablegen(pto/dialects/_pto_ops_gen.py
 )
 add_public_tablegen_target(PTOOpsPyGen)
 
-add_dependencies(PTOPythonModules PTOOpsPyGen)
+# 生成 TableGen 绑定代码 (pto_ssa)
+set(LLVM_TARGET_DEFINITIONS pto/dialects/PTOSSAOps.td)
+mlir_tablegen(pto/dialects/_pto_ssa_ops_gen.py
+  -gen-python-op-bindings
+  -bind-dialect=pto_ssa
+  -I${PROJECT_SOURCE_DIR}/include
+)
+add_public_tablegen_target(PTOSSAOpsPyGen)
+
+add_dependencies(PTOPythonModules PTOOpsPyGen PTOSSAOpsPyGen)

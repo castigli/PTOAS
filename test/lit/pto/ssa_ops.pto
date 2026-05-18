@@ -1,0 +1,30 @@
+// RUN: ptoas --parse-only %s | FileCheck %s
+
+// CHECK-LABEL: func.func @vadd_ssa
+// CHECK: pto_ssa.tload
+// CHECK: pto_ssa.tload
+// CHECK: pto_ssa.tvadd
+// CHECK: pto_ssa.tstore
+
+module {
+  func.func @vadd_ssa(
+      %a : !pto.partition_tensor_view<32x32xf16>,
+      %b : !pto.partition_tensor_view<32x32xf16>,
+      %out : !pto.partition_tensor_view<32x32xf16>) {
+
+    %ta = pto_ssa.tload ins(%a : !pto.partition_tensor_view<32x32xf16>)
+          : !pto.tile_buf<[32, 32], f16, VEC>
+
+    %tb = pto_ssa.tload ins(%b : !pto.partition_tensor_view<32x32xf16>)
+          : !pto.tile_buf<[32, 32], f16, VEC>
+
+    %tc = pto_ssa.tvadd ins(%ta : !pto.tile_buf<[32, 32], f16, VEC>,
+                            %tb : !pto.tile_buf<[32, 32], f16, VEC>)
+          : !pto.tile_buf<[32, 32], f16, VEC>
+
+    pto_ssa.tstore ins(%tc : !pto.tile_buf<[32, 32], f16, VEC>)
+                  outs(%out : !pto.partition_tensor_view<32x32xf16>)
+
+    return
+  }
+}
