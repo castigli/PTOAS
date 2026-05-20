@@ -38,11 +38,11 @@ _MLIR_PY_PKG = (
 
 
 def get_requires_for_build_wheel(config_settings=None):
-    return ["setuptools>=68", "wheel", "pybind11"]
+    return ["setuptools>=68", "wheel", "pybind11<3"]
 
 
 def get_requires_for_build_editable(config_settings=None):
-    return ["setuptools>=68", "wheel", "pybind11"]
+    return ["setuptools>=68", "wheel", "pybind11<3"]
 
 
 def get_requires_for_build_sdist(config_settings=None):
@@ -104,6 +104,10 @@ def _cmake_configure_and_build():
         f"-DMLIR_PYTHON_PACKAGE_DIR={_MLIR_PY_PKG}",
         f"-DCMAKE_INSTALL_PREFIX={_PTO_INSTALL_DIR}",
     ]
+
+    release_version = os.environ.get("PTOAS_RELEASE_VERSION_OVERRIDE", "")
+    if release_version:
+        cmake_cmd.append(f"-DPTOAS_RELEASE_VERSION_OVERRIDE={release_version}")
 
     hardening_cache = _REPO / "cmake" / "LinuxHardeningCache.cmake"
     if hardening_cache.exists():

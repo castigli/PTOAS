@@ -154,22 +154,8 @@ jobs:
 
       - name: Build PTOAS
         run: |
-          cd $PTO_SOURCE_DIR
-          cmake -G Ninja \
-            -S . \
-            -B build \
-            -DLLVM_DIR=$LLVM_BUILD_DIR/lib/cmake/llvm \
-            -DMLIR_DIR=$LLVM_BUILD_DIR/lib/cmake/mlir \
-            -DPython3_ROOT_DIR=${PY_PATH} \
-            -DPython3_EXECUTABLE=$(which python) \
-            -DPython3_FIND_STRATEGY=LOCATION \
-            -Dpybind11_DIR=$(python -m pybind11 --cmakedir) \
-            -DMLIR_PYTHON_PACKAGE_DIR=${LLVM_BUILD_DIR}/tools/mlir/python_packages/mlir_core \
-            -DPTOAS_RELEASE_VERSION_OVERRIDE=${PTOAS_VERSION} \
-            -DCMAKE_INSTALL_PREFIX=${PTO_INSTALL_DIR} \
-            -DCMAKE_BUILD_TYPE=Release
-          ninja -C build
-          ninja -C build install
+          PTOAS_RELEASE_VERSION_OVERRIDE="${PTOAS_VERSION}" \
+          pip install . --no-build-isolation
 
       - name: Create Python wheel
         if: false
