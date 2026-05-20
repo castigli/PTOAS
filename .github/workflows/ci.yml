@@ -199,20 +199,9 @@ jobs:
 
       - name: Build PTOAS
         run: |
-          export PYBIND11_CMAKE_DIR="$(python3 -m pybind11 --cmakedir)"
-          cmake -C "${GITHUB_WORKSPACE}/cmake/LinuxHardeningCache.cmake" -G Ninja -S . -B build \
-            -DLLVM_DIR="${LLVM_DIR}/lib/cmake/llvm" \
-            -DMLIR_DIR="${LLVM_DIR}/lib/cmake/mlir" \
-            -DPython3_EXECUTABLE=python3 \
-            -DPython3_FIND_STRATEGY=LOCATION \
-            -Dpybind11_DIR="${PYBIND11_CMAKE_DIR}" \
-            -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
-            -DMLIR_PYTHON_PACKAGE_DIR="${LLVM_DIR}/tools/mlir/python_packages/mlir_core" \
-            -DCMAKE_INSTALL_PREFIX="${PTO_INSTALL_DIR}" \
-            -DCMAKE_BUILD_TYPE=Release
-          ninja -C build ptoas
-          ninja -C build ptobc
-          ninja -C build install
+          # LLVM_BUILD_DIR is the env var read by the build backend (_ptoas_build_backend.py).
+          # PTO_INSTALL_DIR is already set at the job level.
+          LLVM_BUILD_DIR="${LLVM_DIR}" pip install . --no-build-isolation
 
       - name: Run lit tests
         shell: bash
@@ -397,17 +386,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          export PYBIND11_CMAKE_DIR="$(python3 -m pybind11 --cmakedir)"
-          cmake -G Ninja -S . -B build \
-            -DLLVM_DIR="${LLVM_DIR}/lib/cmake/llvm" \
-            -DMLIR_DIR="${LLVM_DIR}/lib/cmake/mlir" \
-            -DPython3_EXECUTABLE=python3 \
-            -DPython3_FIND_STRATEGY=LOCATION \
-            -Dpybind11_DIR="${PYBIND11_CMAKE_DIR}" \
-            -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
-            -DMLIR_PYTHON_PACKAGE_DIR="${LLVM_DIR}/tools/mlir/python_packages/mlir_core" \
-            -DCMAKE_BUILD_TYPE=Release
-          ninja -C build ptoas
+          # LLVM_BUILD_DIR is the env var read by the build backend (_ptoas_build_backend.py).
+          LLVM_BUILD_DIR="${LLVM_DIR}" pip install . --no-build-isolation
 
       - name: Resolve simulator environment
         shell: bash
