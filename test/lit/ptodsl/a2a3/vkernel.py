@@ -1,7 +1,5 @@
-# RUN: %PYTHON %s | FileCheck %s
+# RUN: %python %s | FileCheck %s
 from ptodsl import pto
-
-# RUN: %PYTHON %s | mlir-opt -split-input-file | FileCheck
 
 # TODO: Move to a test utility class
 def print_module(handle):
@@ -15,7 +13,7 @@ def print_module(handle):
     return handle
 
 # CHECK-LABEL: TEST_FUNCTION: miminal_kernel
-# CHECK: module attributes {pto.kernel_kind = #pto.kddernel_kind<vector>, pto.target_arch = "a2a3"} {
+# CHECK: module attributes {pto.kernel_kind = #pto.kernel_kind<vector>, pto.target_arch = "a2a3"} {
 @print_module
 @pto.jit(
     name="miminal_kernel",
