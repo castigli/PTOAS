@@ -1192,6 +1192,10 @@ static pto::VPTOEmissionOptions buildVPTOEmissionOptions() {
   pto::VPTOEmissionOptions options;
   options.dumpVPTOIR = false;
   options.targetTriple = "hiipu64-hisilicon-cce";
+  std::string arch = ptoTargetArch;
+  for (char &c : arch)
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  options.march = (arch == "a3") ? "dav-m200-vec" : "dav-c310-vec";
   return options;
 }
 
