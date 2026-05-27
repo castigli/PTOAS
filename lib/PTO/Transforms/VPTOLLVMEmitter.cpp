@@ -4256,6 +4256,89 @@ private:
   LoweringState &state;
 };
 
+template <typename UBOp>
+class LowerUBufBinaryOpPattern final : public OpConversionPattern<UBOp> {
+public:
+  explicit LowerUBufBinaryOpPattern(TypeConverter &typeConverter,
+                                    MLIRContext *context, LoweringState &state)
+      : OpConversionPattern<UBOp>(typeConverter, context), state(state) {}
+
+  LogicalResult
+  matchAndRewrite(UBOp op, typename UBOp::Adaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto ptrType = mlir::cast<pto::PtrType>(op.getSrc0().getType());
+    Type elemType = ptrType.getElementType();
+    std::string elemFrag = getElementTypeFragment(elemType);
+    if (elemFrag.empty())
+      return rewriter.notifyMatchFailure(
+          op, "unsupported element type for ubuf binary op");
+
+    std::string calleeName;
+    if constexpr (std::is_same_v<UBOp, pto::UBVaddOp>)
+      calleeName = "llvm.hivm.VADD." + elemFrag;
+    else
+      return rewriter.notifyMatchFailure(op, "unsupported ubuf binary op");
+
+    Value dst = adaptor.getDst();
+    Value src0 = adaptor.getSrc0();
+    Value src1 = adaptor.getSrc1();
+    if (!dst || !src0 || !src1 ||
+        !isa<LLVM::LLVMPointerType>(dst.getType()) ||
+        !isa<LLVM::LLVMPointerType>(src0.getType()) ||
+        !isa<LLVM::LLVMPointerType>(src1.getType()))
+      return rewriter.notifyMatchFailure(
+          op, "unexpected converted ubuf binary operand types");
+
+    // Pack the 7 stride/repeat fields into a single i64 config per
+    // cce_aicore_intrinsics_3101.h:
+    //   ((repeat & 0xff) << 56 | (dstBlockStride & 0xff) << 0  |
+    //    (src0BlockStride & 0xff) << 8  | (src1BlockStride & 0xff) << 16 |
+    //    (dstRepeatStride & 0xff) << 24 | (src0RepeatStride & 0xff) << 32 |
+    //    (src1RepeatStride & 0xff) << 40)
+    Location loc = op.getLoc();
+    auto i64Ty = rewriter.getI64Type();
+    auto getI64 = [&](Value v) -> Value {
+      return castIntegerLikeTo(op, v, i64Ty);
+    };
+    auto shl = [&](Value v, uint64_t amount) -> Value {
+      return rewriter.create<arith::ShLIOp>(
+          loc, v, rewriter.create<arith::ConstantOp>(
+                       loc, rewriter.getI64IntegerAttr(amount)));
+    };
+    Value config = rewriter.create<arith::ConstantOp>(
+        loc, rewriter.getI64IntegerAttr(0));
+    Value repeat = getI64(adaptor.getRepeat());
+    config = rewriter.create<arith::OrIOp>(loc, config, shl(repeat, 56));
+    config = rewriter.create<arith::OrIOp>(
+        loc, config, getI64(adaptor.getDstBlockStride()));
+    config = rewriter.create<arith::OrIOp>(
+        loc, config, shl(getI64(adaptor.getSrc0BlockStride()), 8));
+    config = rewriter.create<arith::OrIOp>(
+        loc, config, shl(getI64(adaptor.getSrc1BlockStride()), 16));
+    config = rewriter.create<arith::OrIOp>(
+        loc, config, shl(getI64(adaptor.getDstRepeatStride()), 24));
+    config = rewriter.create<arith::OrIOp>(
+        loc, config, shl(getI64(adaptor.getSrc0RepeatStride()), 32));
+    config = rewriter.create<arith::OrIOp>(
+        loc, config, shl(getI64(adaptor.getSrc1RepeatStride()), 40));
+
+    auto funcType = rewriter.getFunctionType(
+        TypeRange{dst.getType(), src0.getType(), src1.getType(),
+                  rewriter.getI64Type()},
+        TypeRange{});
+    auto call = rewriter.create<func::CallOp>(
+        op.getLoc(), calleeName, TypeRange{},
+        ValueRange{dst, src0, src1, config});
+    (void)call;
+    state.plannedDecls.push_back(PlannedDecl{calleeName, funcType});
+    rewriter.eraseOp(op);
+    return success();
+  }
+
+private:
+  LoweringState &state;
+};
+
 static LogicalResult lowerMadRawOp(pto::MadRawOpInterface op,
                                    ValueRange convertedOperands,
                                    ConversionPatternRewriter &rewriter,
@@ -9095,7 +9178,8 @@ public:
 
 static void populateVPTOOpLoweringPatterns(VPTOTypeConverter &typeConverter,
                                            RewritePatternSet &patterns,
-                                           LoweringState &state) {
+                                           LoweringState &state,
+                                           const std::string &march) {
   patterns.add<LowerUnaryMaskedOpPattern<pto::VabsOp>,
                LowerUnaryMaskedOpPattern<pto::VexpOp>,
                LowerUnaryMaskedOpPattern<pto::VlnOp>,
@@ -9306,10 +9390,15 @@ static void populateVPTOOpLoweringPatterns(VPTOTypeConverter &typeConverter,
                LowerCopyCbufToUbufOpPattern,
                LowerCopyUbufToCbufOpPattern>(
       typeConverter, patterns.getContext(), state);
+
+  if (march == "dav-m200-vec")
+    patterns.add<LowerUBufBinaryOpPattern<pto::UBVaddOp>>(
+        typeConverter, patterns.getContext(), state);
 }
 
 static void configureVPTOOpLoweringTarget(ConversionTarget &target,
-                                          VPTOTypeConverter &typeConverter) {
+                                          VPTOTypeConverter &typeConverter,
+                                          const std::string &march) {
   (void)typeConverter;
   target.addLegalOp<ModuleOp>();
   target.addLegalDialect<arith::ArithDialect, cf::ControlFlowDialect,
@@ -9407,6 +9496,10 @@ static void configureVPTOOpLoweringTarget(ConversionTarget &target,
                       pto::MadMxAccOp, pto::MadMxBiasOp,
                       pto::MadRawOp, pto::MadBiasRawOp, pto::MadMxRawOp,
                       pto::MadMxBiasRawOp>();
+
+  if (march == "dav-m200-vec")
+    target.addIllegalOp<pto::UBVaddOp>();
+
   target.markUnknownOpDynamicallyLegal([](Operation *) { return true; });
 }
 
@@ -9442,15 +9535,17 @@ static void foldVPTOTypeCasts(ModuleOp module, TypeConverter &typeConverter) {
   }
 }
 
-static LogicalResult lowerVPTOOps(ModuleOp module, llvm::raw_ostream &diagOS) {
+static LogicalResult lowerVPTOOps(ModuleOp module,
+                                  const std::string &march,
+                                  llvm::raw_ostream &diagOS) {
   MLIRContext *context = module.getContext();
   VPTOTypeConverter typeConverter(context);
   ConversionTarget target(*context);
   RewritePatternSet patterns(context);
   LoweringState state;
 
-  configureVPTOOpLoweringTarget(target, typeConverter);
-  populateVPTOOpLoweringPatterns(typeConverter, patterns, state);
+  configureVPTOOpLoweringTarget(target, typeConverter, march);
+  populateVPTOOpLoweringPatterns(typeConverter, patterns, state, march);
 
   if (failed(applyPartialConversion(module, target, std::move(patterns)))) {
     diagOS << "VPTO LLVM emission failed: VPTO op lowering failed\n";
@@ -9596,16 +9691,22 @@ makeDeviceEmissionOptions(const VPTOEmissionOptions &baseOptions,
       "+ATOMIC,+ArchV130,+AregRedefinable,+ArithmeticBf16,+AtomicForB8 ,"
       "+F8e4m3,+F8e5m2,+F8e8m0,+FFTSBlk,+Fp4e1m2x2,+Fp4e2m1x2,+LDExtRefine,"
       "+MOVX8,+SPR7bits,+SyncV,+dav-c310-cube";
-  if (kind == FunctionKernelKind::Vector) {
-    options.march = "dav-c310-vec";
-    options.aicoreArch = "dav-c310-vec";
-    options.defaultTargetCPU = "dav-c310-vec";
+  if (options.march.empty()) {
+    if (kind == FunctionKernelKind::Vector) {
+      options.march = "dav-c310-vec";
+      options.aicoreArch = "dav-c310-vec";
+      options.defaultTargetCPU = "dav-c310-vec";
+      options.defaultTargetFeatures = kVecTargetFeatures.str();
+    } else if (kind == FunctionKernelKind::Cube) {
+      options.march = "dav-c310-cube";
+      options.aicoreArch = "dav-c310-cube";
+      options.defaultTargetCPU = "dav-c310-cube";
+      options.defaultTargetFeatures = kCubeTargetFeatures.str();
+    }
+  } else {
+    options.aicoreArch = options.march;
+    options.defaultTargetCPU = options.march;
     options.defaultTargetFeatures = kVecTargetFeatures.str();
-  } else if (kind == FunctionKernelKind::Cube) {
-    options.march = "dav-c310-cube";
-    options.aicoreArch = "dav-c310-cube";
-    options.defaultTargetCPU = "dav-c310-cube";
-    options.defaultTargetFeatures = kCubeTargetFeatures.str();
   }
   return options;
 }
@@ -9662,13 +9763,17 @@ static LogicalResult renameKernelFunctionsForKernelKind(ModuleOp module,
 
 struct LowerVPTOOpsPass final
     : public PassWrapper<LowerVPTOOpsPass, OperationPass<ModuleOp>> {
-  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LowerVPTOOpsPass)
+  LowerVPTOOpsPass() = default;
+  explicit LowerVPTOOpsPass(std::string m) : march(std::move(m)) {}
 
   void runOnOperation() override {
     materializeVecScopeCarrierLoops(getOperation());
-    if (failed(lowerVPTOOps(getOperation(), llvm::errs())))
+    if (failed(lowerVPTOOps(getOperation(), march, llvm::errs())))
       signalPassFailure();
   }
+
+private:
+  std::string march;
 };
 
 struct LowerVPTOTypesPass final
@@ -9780,6 +9885,7 @@ emitDeviceLLVMModule(ModuleOp deviceModule, StringRef kernelKind,
 
 template <typename EmitFn>
 static LogicalResult runPipeline(ModuleOp module, llvm::raw_ostream &diagOS,
+                                 const llvm::StringSet<llvm::BumpPtrAllocator> &simtEntryNames,
                                  EmitFn &&emit) {
   OwningOpRef<Operation *> clonedOp(module->clone());
   ModuleOp clonedModule = cast<ModuleOp>(*clonedOp);
@@ -9794,7 +9900,7 @@ static LogicalResult runPipeline(ModuleOp module, llvm::raw_ostream &diagOS,
   pm.enableVerifier();
   auto &kernelModulePM = pm.nest<ModuleOp>();
   kernelModulePM.addPass(std::make_unique<PrepareVPTOLLVMLoweringPass>());
-  kernelModulePM.addPass(std::make_unique<LowerVPTOOpsPass>());
+  kernelModulePM.addPass(std::make_unique<LowerVPTOOpsPass>(march));
   kernelModulePM.addPass(std::make_unique<LowerVPTOTypesPass>());
   kernelModulePM.addPass(
       std::make_unique<NormalizeFuncSignaturesForLLVMLoweringPass>());
@@ -9830,7 +9936,7 @@ LogicalResult lowerVPTOModuleToLLVMModulesBeta1(
   cubeModule.module.reset();
   vectorModule.context.reset();
   vectorModule.module.reset();
-  return runPipeline(module, diagOS,
+  return runPipeline(module, diagOS, simtEntryNames,
                      [&](ModuleOp loweredModule) {
     auto vectorDeviceModule =
         getUniqueDeviceModuleByKernelKind(
