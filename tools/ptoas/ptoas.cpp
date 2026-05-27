@@ -119,6 +119,7 @@ void mlir::pto::registerPTOASPassesAndCLOptions() {
   mlir::pto::registerPTOInlineLibCall();
   mlir::pto::registerFoldTileBufIntrinsics();
   mlir::pto::registerExpandTileOp();
+  mlir::pto::registerLowerPTOToUBufOps();
   mlir::registerPassManagerCLOptions();
 }
 
@@ -1487,6 +1488,8 @@ static void lowerPTOToVPTOBackend(PassManager &pm, int argc, char **argv) {
   //   3. FoldTileBufIntrinsics: fold tile_buf_addr / tile_valid_rows /
   //      tile_valid_cols to concrete memref/constant values
   auto &kernelModulePM = pm.nest<ModuleOp>();
+  kernelModulePM.addNestedPass<mlir::func::FuncOp>(
+      pto::createLowerPTOToUBufOpsPass());
   pto::ExpandTileOpOptions expandOpts = resolveExpandTileOpOptions(argc, argv);
   kernelModulePM.addPass(pto::createExpandTileOpPass(expandOpts));
 
