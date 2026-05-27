@@ -87,6 +87,7 @@ std::unique_ptr<Pass> createMemrefToTileBufPass();
 std::unique_ptr<Pass> createExpandTileOpPass();
 std::unique_ptr<Pass> createExpandTileOpPass(const ExpandTileOpOptions &options);
 std::unique_ptr<Pass> createFoldTileBufIntrinsicsPass();
+std::unique_ptr<Pass> createLowerPTOToUBufOpsPass();
 std::unique_ptr<Pass>
 createPTOInlineLibCallPass(const PTOInlineLibCallOptions &options = {});
 void registerPTOViewToMemrefPass();

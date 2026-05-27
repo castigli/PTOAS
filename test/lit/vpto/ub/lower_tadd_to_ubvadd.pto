@@ -1,0 +1,63 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// Test that LowerPTOToUBufOps lowers pto.tadd to pto.ub.vadd on a3 targets.
+// Verifies the IR right after the pass: tile_buf_addr pointer extraction,
+// CCE-derived repeat/strides mapped to the correct ub.vadd argument positions.
+
+// RUN: ( mkdir -p %T && ptoas --pto-arch=a3 --pto-backend=vpto %s -o %t --mlir-print-ir-after=pto-lower-to-ubuf-ops 2>&1 || true ) | FileCheck %s
+
+module attributes {pto.target_arch = "a3", pto.kernel_kind = #pto.kernel_kind<vector>} {
+
+// 16x64xf32 → repeat=32, repStride=8
+  func.func @lower_tadd_f32() attributes {pto.aicore} {
+    %dst = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64, v_row=16, v_col=64, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %src0 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64, v_row=16, v_col=64, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %src1 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64, v_row=16, v_col=64, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tadd ins(%src0, %src1 : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64, v_row=16, v_col=64, blayout=row_major, slayout=none_box, fractal=512, pad=0>, !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64, v_row=16, v_col=64, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%dst : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64, v_row=16, v_col=64, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+    return
+  }
+
+// 16x64xf16 → repeat=16, repStride=4
+  func.func @lower_tadd_f16() attributes {pto.aicore} {
+    %dst = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=64, v_row=16, v_col=64, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %src0 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=64, v_row=16, v_col=64, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %src1 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=64, v_row=16, v_col=64, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tadd ins(%src0, %src1 : !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=64, v_row=16, v_col=64, blayout=row_major, slayout=none_box, fractal=512, pad=0>, !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=64, v_row=16, v_col=64, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%dst : !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=64, v_row=16, v_col=64, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+    return
+  }
+}
+
+// Three tile_buf_addr ops per function extract !pto.ptr<T, ub> from each tile
+// CHECK-DAG: pto.tile_buf_addr {{%.*}} : !pto.tile_buf<vec, 16x64xf32> -> !pto.ptr<f32, ub>
+// CHECK-DAG: pto.tile_buf_addr {{%.*}} : !pto.tile_buf<vec, 16x64xf32> -> !pto.ptr<f32, ub>
+// CHECK-DAG: pto.tile_buf_addr {{%.*}} : !pto.tile_buf<vec, 16x64xf32> -> !pto.ptr<f32, ub>
+// CHECK-DAG: pto.tile_buf_addr {{%.*}} : !pto.tile_buf<vec, 16x64xf16> -> !pto.ptr<f16, ub>
+// CHECK-DAG: pto.tile_buf_addr {{%.*}} : !pto.tile_buf<vec, 16x64xf16> -> !pto.ptr<f16, ub>
+// CHECK-DAG: pto.tile_buf_addr {{%.*}} : !pto.tile_buf<vec, 16x64xf16> -> !pto.ptr<f16, ub>
+
+// Capture the constant definitions and verify they map to the correct
+// ub.vadd argument positions:
+//
+//   ub.vadd(dst, src0, src1,
+//           repeat, dstBlk, src0Blk, src1Blk, dstRep, src0Rep, src1Rep)
+//
+// CHECK-DAG: [[RPT32:%c[0-9]+_i64]] = arith.constant 32 : i64
+// CHECK-DAG: [[RST8:%c[0-9]+_i64]] = arith.constant 8 : i64
+// CHECK-DAG: [[RPT16:%c[0-9]+_i64]] = arith.constant 16 : i64
+// CHECK-DAG: [[RST4:%c[0-9]+_i64]] = arith.constant 4 : i64
+// CHECK-DAG: [[ONE:%c[0-9]+_i64]] = arith.constant 1 : i64
+
+// f32: repeat=32, block strides all 1, repeat strides all 8
+// CHECK-DAG: pto.ub.vadd {{%.*}}, {{%.*}}, {{%.*}}, [[RPT32]], [[ONE]], [[ONE]], [[ONE]], [[RST8]], [[RST8]], [[RST8]] : !pto.ptr<f32, ub>, !pto.ptr<f32, ub>, !pto.ptr<f32, ub>, i64, i64, i64, i64, i64, i64, i64
+
+// f16: repeat=16, block strides all 1, repeat strides all 4
+// CHECK-DAG: pto.ub.vadd {{%.*}}, {{%.*}}, {{%.*}}, [[RPT16]], [[ONE]], [[ONE]], [[ONE]], [[RST4]], [[RST4]], [[RST4]] : !pto.ptr<f16, ub>, !pto.ptr<f16, ub>, !pto.ptr<f16, ub>, i64, i64, i64, i64, i64, i64, i64
+
+// Verify pto.tadd is fully consumed by the pass
+// CHECK-NOT: pto.tadd
