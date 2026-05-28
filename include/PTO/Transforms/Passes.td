@@ -36,8 +36,9 @@ def PTOInsertSync : Pass<"pto-insert-sync", "func::FuncOp"> {
 
   let dependentDialects = [
     "mlir::pto::PTODialect",
-    "mlir::memref::MemRefDialect",
-    "mlir::arith::ArithDialect" 
+    "mlir::func::FuncDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::scf::SCFDialect"
   ];
 }
 

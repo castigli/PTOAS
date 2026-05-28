@@ -1,0 +1,45 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// Test that LowerPTOToUBufOps emits a chunked scf.for lowering when the tile
+// is large enough that totalRepeats exceeds the hardware repeat limit (255).
+
+// RUN: ( mkdir -p %T && ptoas --pto-arch=a3 --pto-backend=vpto %s -o %t --mlir-print-ir-after=pto-lower-to-ubuf-ops 2>&1 || true ) | FileCheck %s
+
+module attributes {pto.target_arch = "a3", pto.kernel_kind = #pto.kernel_kind<vector>} {
+
+// 16x1024xf32 → elementsPerRepeat=32, blockSizeElem=8
+//   totalRepeats = 16*1024/32 = 512 > 255  →  chunked path
+//   repStride = 1024/8 = 128
+//   numChunks = 512/255 = 2, tail = 512 % 255 = 2
+//   elementsPerChunk = 255 * 32 = 8160
+  func.func @lower_tadd_chunked_f32() attributes {pto.aicore} {
+    %dst = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=1024, v_row=16, v_col=1024, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %src0 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=1024, v_row=16, v_col=1024, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %src1 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=1024, v_row=16, v_col=1024, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tadd ins(%src0, %src1 : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=1024, v_row=16, v_col=1024, blayout=row_major, slayout=none_box, fractal=512, pad=0>, !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=1024, v_row=16, v_col=1024, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%dst : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=1024, v_row=16, v_col=1024, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+    return
+  }
+}
+
+// CHECK-LABEL: func.func @lower_tadd_chunked_f32()
+// CHECK-DAG: [[C255:%c[0-9]+_i64]] = arith.constant 255 : i64
+// CHECK-DAG: [[C128:%c[0-9]+_i64]] = arith.constant 128 : i64
+// CHECK-DAG: [[C1:%c[0-9]+_i64]] = arith.constant 1 : i64
+
+// Chunk loop: scf.for body uses repeat=255
+// CHECK: scf.for
+// CHECK: pto.addptr
+// CHECK: pto.ub.vadd {{%.*}}, {{%.*}}, {{%.*}}, [[C255]], [[C1]], [[C1]], [[C1]], [[C128]], [[C128]], [[C128]]
+
+// Tail after loop: repeat = 512 % 255 = 2
+// CHECK: [[C2:%c[0-9]+_i64]] = arith.constant 2 : i64
+// CHECK: pto.addptr
+// CHECK: pto.ub.vadd {{%.*}}, {{%.*}}, {{%.*}}, [[C2]], [[C1]], [[C1]], [[C1]], [[C128]], [[C128]], [[C128]]
+
+// CHECK-NOT: pto.tadd
