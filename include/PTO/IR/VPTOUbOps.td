@@ -82,4 +82,50 @@ def PTO_UBSetMaskOp : PTO_Op<"ub.set_mask", [
   }];
 }
 
+def PTO_UBSetMaskCountOp : PTO_Op<"ub.set_mask_count", [
+    DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
+]> {
+  let summary = "Set count mode for UB buffer pipe operations";
+  let description = [{
+    Toggles the hardware control register into count mode (bit 56 set).
+    In count mode, subsequent `pto.ub.*` operations use `MASK[0]` as an
+    element count rather than a per-lane bitmask. `repeat=0` signals the
+    hardware to use the count register.
+
+    Use `pto.ub.set_mask_norm` to restore normal mask mode.
+  }];
+
+  let arguments = (ins);
+  let results = (outs);
+
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    attr-dict
+  }];
+}
+
+def PTO_UBSetMaskNormOp : PTO_Op<"ub.set_mask_norm", [
+    DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
+]> {
+  let summary = "Restore normal mask mode for UB buffer pipe operations";
+  let description = [{
+    Toggles the hardware control register out of count mode (bit 56 cleared).
+    Subsequent `pto.ub.*` operations interpret `MASK[0..1]` as per-lane
+    bitmasks (normal mode).
+
+    Always pair with a preceding `pto.ub.set_mask_count` or restore after
+    count-mode operations.
+  }];
+
+  let arguments = (ins);
+  let results = (outs);
+
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    attr-dict
+  }];
+}
+
 #endif // MLIR_DIALECT_PTO_IR_VPTOUBOPS

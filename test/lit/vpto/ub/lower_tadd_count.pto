@@ -6,13 +6,13 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// Test Bin1LCountMode: nonVLAligned case.
-// 7x48 f32 — nonVLAligned=true → count mode.
+// Test Bin1LCountMode: nonVLAligned.
+// 7x48 f32 — cols=48, epr=32, nonVLAligned=true → count mode.
 
 // RUN: ( mkdir -p %T && ptoas --pto-arch=a3 --pto-backend=vpto %s -o %t --mlir-print-ir-after=pto-lower-to-ubuf-ops 2>&1 || true ) | FileCheck %s
 
 module attributes {pto.target_arch = "a3", pto.kernel_kind = #pto.kernel_kind<vector>} {
-  func.func @lower_tadd_tail() attributes {pto.aicore} {
+  func.func @lower_tadd_count() attributes {pto.aicore} {
     %dst = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=7, cols=48, v_row=7, v_col=48, blayout=row_major, slayout=none_box, fractal=512, pad=0>
     %src0 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=7, cols=48, v_row=7, v_col=48, blayout=row_major, slayout=none_box, fractal=512, pad=0>
     %src1 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=7, cols=48, v_row=7, v_col=48, blayout=row_major, slayout=none_box, fractal=512, pad=0>
@@ -21,8 +21,8 @@ module attributes {pto.target_arch = "a3", pto.kernel_kind = #pto.kernel_kind<ve
   }
 }
 
-// Count mode: set_mask_count → set_mask(totalV,0) → vadd(repeat=0) → set_mask_norm → restore
-// CHECK-LABEL: func.func @lower_tadd_tail
+// Count mode: set_mask_count → set_mask(totalV,0) → vadd(repeat=0) → set_mask_norm → set_mask(-1,-1)
+// CHECK-LABEL: func.func @lower_tadd_count
 // CHECK: pto.ub.set_mask_count
 // CHECK: pto.ub.set_mask
 // CHECK: pto.ub.vadd
