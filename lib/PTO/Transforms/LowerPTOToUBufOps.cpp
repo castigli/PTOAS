@@ -9,36 +9,8 @@
 //===- LowerPTOToUBufOps.cpp - Lower pto.tadd to pto.ub.vadd on a2a3 -----===//
 //===----------------------------------------------------------------------===//
 //
-// Lowers pto.tadd to pto.ub.vadd on a3 (dav-m200-vec). Uses CCE-derived
-// formulas for repeat count and stride computation from tile shape metadata.
-//
-// Eligibility gates:
-//   1. Target arch is a3
-//   2. Tiles are in UB memory space
-//   3. Row-major layout
-//   4. Supported element type (f16, f32, i16, i32)
-//   5. Shapes are compile-time static
-//   6. Full-width valid region (vCols == cols) or single row (vRows == 1)
-//
-// CCE lowering formula (from TAdd.hpp):
-//   elementsPerRepeat = 128 / sizeof(T)
-//   blockSizeElem     = 32  / sizeof(T)
-//   repeat            = (vRows * vCols) / elementsPerRepeat
-//   repeatStride      = cols / blockSizeElem
-//
-// Lowering modes (emulating CCE strategies):
-//   Single-chunk (repeat <= 255):
-//     pto.ub.vadd dst, src0, src1, repeat, 1,1,1, repStride×3
-//
-//   Chunked (repeat > 255):
-//     scf.for loop over 255-repeat chunks + tail, mirroring Bin2LNormModeHead.
-//
-//   Masked tail (repeat % elementsPerRepeat != 0):
-//     pto.ub.set_mask tailMask + pto.ub.vadd(1) for tail elements,
-//     then pto.ub.set_mask -1 to restore full mask.
-//
-//   No barriers needed — all vadd ops execute in PIPE_V and are
-//   inherently ordered.
+// Lowers pto.tadd to pto.ub.vadd on a3 (dav-m200-vec). Uses the full CCE
+// dispatch tree from TBinOp.hpp with all modes.
 //
 //===----------------------------------------------------------------------===//
 
@@ -58,15 +30,22 @@ using namespace mlir;
 
 namespace mlir {
 namespace pto {
-  #define GEN_PASS_DEF_LOWERPTOTOUBUFOPS
-  #include "PTO/Transforms/Passes.h.inc"
+#define GEN_PASS_DEF_LOWERPTOTOUBUFOPS
+#include "PTO/Transforms/Passes.h.inc"
 } // namespace pto
 } // namespace mlir
 
 namespace {
 
 static constexpr int64_t kRepeatMax = 255;
+static constexpr int64_t kRepeatStrideMax = 255;
+static constexpr int64_t kSmallRptBinOp = 4;
+static constexpr int64_t kDefaultRepeatStride = 8;
 static constexpr unsigned kMaskLen = 64;
+
+//===----------------------------------------------------------------------===//
+// Utilities
+//===----------------------------------------------------------------------===//
 
 static unsigned getElementSize(Type elemTy) {
   if (elemTy.isF16() || elemTy.isBF16())
@@ -100,8 +79,7 @@ static bool isRowMajor(pto::TileBufType tbTy) {
 }
 
 static pto::PtrType getUBPtrType(MLIRContext *ctx, Type elemTy) {
-  auto msAttr =
-      pto::AddressSpaceAttr::get(ctx, pto::AddressSpace::VEC);
+  auto msAttr = pto::AddressSpaceAttr::get(ctx, pto::AddressSpace::VEC);
   return pto::PtrType::get(ctx, elemTy, msAttr);
 }
 
@@ -120,6 +98,7 @@ struct TileShapeInfo {
   int64_t vRows;
   int64_t vCols;
   int64_t cols;
+  int64_t rows;
   unsigned elemSize;
   unsigned elementsPerRepeat;
   unsigned blockSizeElem;
@@ -131,7 +110,6 @@ static std::optional<TileShapeInfo> extractTileShapeInfo(pto::TAddOp op) {
   auto src1Ty = dyn_cast<pto::TileBufType>(op.getSrc1().getType());
   if (!dstTy || !src0Ty || !src1Ty)
     return std::nullopt;
-
   if (!isUBMemorySpace(dstTy) || !isUBMemorySpace(src0Ty) ||
       !isUBMemorySpace(src1Ty))
     return std::nullopt;
@@ -148,36 +126,36 @@ static std::optional<TileShapeInfo> extractTileShapeInfo(pto::TAddOp op) {
   if (shape.size() < 2)
     return std::nullopt;
 
+  int64_t rows = shape[0];
+  int64_t cols = shape[1];
   int64_t vRows = (!validShape.empty() &&
                    validShape[0] != ShapedType::kDynamic)
-                      ? validShape[0]
-                      : shape[0];
+                      ? validShape[0] : rows;
   int64_t vCols = (validShape.size() >= 2 &&
                    validShape[1] != ShapedType::kDynamic)
-                      ? validShape[1]
-                      : shape[1];
-  if (vRows == ShapedType::kDynamic || vCols == ShapedType::kDynamic)
+                      ? validShape[1] : cols;
+  if (vRows == ShapedType::kDynamic || vCols == ShapedType::kDynamic ||
+      rows == ShapedType::kDynamic || cols == ShapedType::kDynamic)
     return std::nullopt;
 
   TileShapeInfo info;
   info.vRows = vRows;
   info.vCols = vCols;
-  info.cols = shape[1];
+  info.cols = cols;
+  info.rows = rows;
   info.elemSize = elemSize;
   info.elementsPerRepeat = 128 / elemSize;
   info.blockSizeElem = 32 / elemSize;
-
-  // Flat lowering requires valid region to be full-width or single-row.
-  // Partial valid columns need row-based lowering (deferred to v3).
-  if (vCols != info.cols && vRows != 1)
-    return std::nullopt;
-
   return info;
 }
 
 static bool canLower(pto::TAddOp op) {
   return extractTileShapeInfo(op).has_value();
 }
+
+//===----------------------------------------------------------------------===//
+// Pass
+//===----------------------------------------------------------------------===//
 
 struct LowerPTOToUBufOpsPass
     : public pto::impl::LowerPTOToUBufOpsBase<LowerPTOToUBufOpsPass> {
@@ -187,7 +165,6 @@ struct LowerPTOToUBufOpsPass
     func::FuncOp func = getOperation();
     if (func.isExternal())
       return;
-
     auto mod = func->getParentOfType<ModuleOp>();
     if (!mod)
       return;
@@ -204,177 +181,428 @@ struct LowerPTOToUBufOpsPass
     for (auto op : taddOps) {
       if (!canLower(op))
         continue;
-
       auto info = extractTileShapeInfo(op);
       if (!info)
         continue;
 
       builder.setInsertionPoint(op);
-
       Type elemTy = cast<pto::TileBufType>(op.getDst().getType())
                         .getElementType();
       auto ptrType = getUBPtrType(ctx, elemTy);
       Location loc = op.getLoc();
 
       auto emitAddr = [&](Value tile) -> Value {
-        auto addrOp =
-            builder.create<pto::TileBufAddrOp>(loc, ptrType, tile);
+        auto addrOp = builder.create<pto::TileBufAddrOp>(loc, ptrType, tile);
         return addrOp.getDst();
       };
 
       Value dstPtr = emitAddr(op.getDst());
       Value src0Ptr = emitAddr(op.getSrc0());
       Value src1Ptr = emitAddr(op.getSrc1());
-
-      int64_t totalV = info->vRows * info->vCols;
-      int64_t headRepeats =
-          totalV / static_cast<int64_t>(info->elementsPerRepeat);
-      int64_t tailElements =
-          totalV % static_cast<int64_t>(info->elementsPerRepeat);
-      int64_t repStride =
-          info->cols / static_cast<int64_t>(info->blockSizeElem);
-
-      if (headRepeats > 0) {
-        if (headRepeats <= kRepeatMax)
-          lowerTAddSingle(loc, builder, dstPtr, src0Ptr, src1Ptr, headRepeats,
-                          repStride);
-        else
-          lowerTAddChunked(loc, builder, dstPtr, src0Ptr, src1Ptr, headRepeats,
-                           repStride, info->elementsPerRepeat);
-      }
-
-      if (tailElements > 0)
-        lowerTAddMaskedTail(loc, builder, dstPtr, src0Ptr, src1Ptr,
-                            headRepeats, tailElements, repStride,
-                            info->elementsPerRepeat);
-
+      dispatch(loc, builder, dstPtr, src0Ptr, src1Ptr, ptrType, *info);
       op.erase();
     }
   }
 
 private:
-  void lowerTAddSingle(Location loc, OpBuilder &builder, Value dstPtr,
-                       Value src0Ptr, Value src1Ptr, int64_t repeat,
-                       int64_t repStride) {
-    auto getI64 = [&](int64_t val) -> Value {
-      return builder.create<arith::ConstantOp>(
-          loc, builder.getI64IntegerAttr(val));
-    };
+  //===--------------------------------------------------------------------===//
+  // Helpers
+  //===--------------------------------------------------------------------===//
 
-    Value cOne = getI64(1);
-    Value cRepeat = getI64(repeat);
-    Value cRepStride = getI64(repStride);
+  Value i64c(int64_t val, Location loc, OpBuilder &b) {
+    return b.create<arith::ConstantOp>(loc, b.getI64IntegerAttr(val));
+  }
+  Value idxc(int64_t val, Location loc, OpBuilder &b) {
+    return b.create<arith::ConstantOp>(
+               loc, b.getIntegerAttr(b.getIndexType(), val))
+        .getResult();
+  }
+  Value i64c0(Location loc, OpBuilder &b) { return i64c(0, loc, b); }
+  Value i64c1(Location loc, OpBuilder &b) { return i64c(1, loc, b); }
+  Value i64cM1(Location loc, OpBuilder &b) { return i64c(-1, loc, b); }
+  Value i64c8(Location loc, OpBuilder &b) { return i64c(kDefaultRepeatStride, loc, b); }
+  Value idxc0(Location loc, OpBuilder &b) { return idxc(0, loc, b); }
+  Value idxc1(Location loc, OpBuilder &b) { return idxc(1, loc, b); }
 
-    builder.create<pto::UBVaddOp>(loc, dstPtr, src0Ptr, src1Ptr, cRepeat, cOne,
-                                  cOne, cOne, cRepStride, cRepStride,
-                                  cRepStride);
+  void vadd(Location loc, OpBuilder &b, Value dst, Value s0, Value s1,
+            Value repeat, Value repStride) {
+    b.create<pto::UBVaddOp>(loc, dst, s0, s1, repeat,
+                            i64c1(loc, b), i64c1(loc, b), i64c1(loc, b),
+                            repStride, repStride, repStride);
   }
 
-  void lowerTAddChunked(Location loc, OpBuilder &builder, Value dstPtr,
-                        Value src0Ptr, Value src1Ptr, int64_t repeat,
-                        int64_t repStride, unsigned elementsPerRepeat) {
-    int64_t numChunks = repeat / kRepeatMax;
-    int64_t tailRepeats = repeat % kRepeatMax;
-    int64_t elementsPerChunk =
-        static_cast<int64_t>(kRepeatMax) * elementsPerRepeat;
+  void setMask(Location loc, OpBuilder &b, unsigned n) {
+    auto [m0, m1] = computeContMaskValues(n);
+    b.create<pto::UBSetMaskOp>(loc, i64c(m0, loc, b), i64c(m1, loc, b));
+  }
 
-    auto getI64 = [&](int64_t val) -> Value {
-      return builder.create<arith::ConstantOp>(
-          loc, builder.getI64IntegerAttr(val));
-    };
-    auto getIndex = [&](int64_t val) -> Value {
-      return builder
-          .create<arith::ConstantOp>(
-              loc, builder.getIntegerAttr(builder.getIndexType(), val))
-          .getResult();
-    };
+  void fullMask(Location loc, OpBuilder &b) {
+    b.create<pto::UBSetMaskOp>(loc, i64cM1(loc, b), i64cM1(loc, b));
+  }
 
-    Value c0 = getIndex(0);
-    Value c1 = getIndex(1);
-    Value cNumChunks = getIndex(numChunks);
-    Value cElemPerChunk = getIndex(elementsPerChunk);
+  Value addPtr(Location loc, OpBuilder &b, Value base, pto::PtrType ptrTy,
+               Value off) {
+    return b.create<pto::AddPtrOp>(loc, ptrTy, base, off);
+  }
 
-    Value c255I64 = getI64(kRepeatMax);
-    Value c1I64 = getI64(1);
-    Value cRepStride = getI64(repStride);
+  //===--------------------------------------------------------------------===//
+  // CCE dispatch tree — mirrors TBinOp.hpp BinaryInstr
+  //===--------------------------------------------------------------------===//
 
-    auto forOp = builder.create<scf::ForOp>(loc, c0, cNumChunks, c1);
-    builder.setInsertionPointToStart(forOp.getBody());
-    Value i = forOp.getInductionVar();
+  void dispatch(Location loc, OpBuilder &b, Value dst, Value s0, Value s1,
+                pto::PtrType ptrTy, const TileShapeInfo &info) {
+    int64_t epr = info.elementsPerRepeat;
+    int64_t cols = info.cols;
+    int64_t rows = info.rows;
+    int64_t vRows = info.vRows;
+    int64_t vCols = info.vCols;
 
-    Value elemOff =
-        builder.create<arith::MulIOp>(loc, i, cElemPerChunk).getResult();
+    // 1. Small tile
+    if (rows <= kRepeatMax && cols < static_cast<int64_t>(epr)) {
+      modeSmall(loc, b, dst, s0, s1, ptrTy, info);
+      return;
+    }
 
-    Value chunkDst =
-        builder.create<pto::AddPtrOp>(loc, dstPtr.getType(), dstPtr, elemOff);
-    Value chunkSrc0 = builder.create<pto::AddPtrOp>(loc, src0Ptr.getType(),
-                                                    src0Ptr, elemOff);
-    Value chunkSrc1 = builder.create<pto::AddPtrOp>(loc, src1Ptr.getType(),
-                                                    src1Ptr, elemOff);
+    // 2. Continuous at compile time
+    if (vCols == cols || vRows == 1) {
+      int64_t totalV = vRows * vCols;
+      int64_t totalRpts = (totalV + epr - 1) / epr;
+      bool nonVLAligned =
+          (vCols > static_cast<int64_t>(epr)) && ((vCols % epr) != 0);
 
-    builder.create<pto::UBVaddOp>(loc, chunkDst, chunkSrc0, chunkSrc1, c255I64,
-                                  c1I64, c1I64, c1I64, cRepStride, cRepStride,
-                                  cRepStride);
+      if (nonVLAligned || totalRpts > kRepeatMax)
+        modeCount1L(loc, b, dst, s0, s1, ptrTy, info);
+      else
+        modeNorm1L(loc, b, dst, s0, s1, ptrTy, info);
+      return;
+    }
 
-    builder.setInsertionPointAfter(forOp);
-
-    if (tailRepeats > 0) {
-      Value cTailRepeats = getI64(tailRepeats);
-      Value tailOffset = getIndex(numChunks * elementsPerChunk);
-
-      Value tailDst =
-          builder.create<pto::AddPtrOp>(loc, dstPtr.getType(), dstPtr,
-                                        tailOffset);
-      Value tailSrc0 = builder.create<pto::AddPtrOp>(
-          loc, src0Ptr.getType(), src0Ptr, tailOffset);
-      Value tailSrc1 = builder.create<pto::AddPtrOp>(
-          loc, src1Ptr.getType(), src1Ptr, tailOffset);
-
-      builder.create<pto::UBVaddOp>(loc, tailDst, tailSrc0, tailSrc1,
-                                    cTailRepeats, c1I64, c1I64, c1I64,
-                                    cRepStride, cRepStride, cRepStride);
+    // 3. Non-continuous
+    int64_t normColRepeat = cols / epr;
+    if (normColRepeat > 1 && vRows * normColRepeat < kSmallRptBinOp) {
+      modeCount2L(loc, b, dst, s0, s1, ptrTy, info);
+    } else if (vRows < normColRepeat + 1) {
+      if (vCols % epr > 0)
+        modeCount2L(loc, b, dst, s0, s1, ptrTy, info);
+      else
+        modeColVLAlign(loc, b, dst, s0, s1, ptrTy, info);
+    } else {
+      modeRowRpt(loc, b, dst, s0, s1, ptrTy, info);
     }
   }
 
-  void lowerTAddMaskedTail(Location loc, OpBuilder &builder, Value dstPtr,
-                           Value src0Ptr, Value src1Ptr, int64_t headRepeats,
-                           unsigned tailElements, int64_t repStride,
-                           unsigned elementsPerRepeat) {
-    auto [mask0Val, mask1Val] = computeContMaskValues(tailElements);
+  //===--------------------------------------------------------------------===//
+  // Bin1LNormModeSmall
+  //===--------------------------------------------------------------------===//
 
-    auto getI64 = [&](int64_t val) -> Value {
-      return builder.create<arith::ConstantOp>(
-          loc, builder.getI64IntegerAttr(val));
-    };
-    auto getIndex = [&](int64_t val) -> Value {
-      return builder
-          .create<arith::ConstantOp>(
-              loc, builder.getIntegerAttr(builder.getIndexType(), val))
-          .getResult();
-    };
+  void modeSmall(Location loc, OpBuilder &b, Value dst, Value s0, Value s1,
+                 pto::PtrType ptrTy, const TileShapeInfo &info) {
+    int64_t rs = info.cols / static_cast<int64_t>(info.blockSizeElem);
+    setMask(loc, b, info.vCols);
+    vadd(loc, b, dst, s0, s1, i64c(info.vRows, loc, b), i64c(rs, loc, b));
+    fullMask(loc, b);
+  }
 
-    Value m0 = getI64(mask0Val);
-    Value m1 = getI64(mask1Val);
-    builder.create<pto::UBSetMaskOp>(loc, m0, m1);
+  //===--------------------------------------------------------------------===//
+  // Bin1LNormMode – flat, stride=8, repeat≤255
+  //===--------------------------------------------------------------------===//
 
-    int64_t tailOffset = headRepeats * elementsPerRepeat;
-    Value off = getIndex(tailOffset);
+  void modeNorm1L(Location loc, OpBuilder &b, Value dst, Value s0, Value s1,
+                  pto::PtrType ptrTy, const TileShapeInfo &info) {
+    int64_t totalV = info.vRows * info.vCols;
+    int64_t epr = info.elementsPerRepeat;
+    int64_t headRepeats = totalV / epr;
+    int64_t tailElements = totalV % epr;
 
-    Value td =
-        builder.create<pto::AddPtrOp>(loc, dstPtr.getType(), dstPtr, off);
-    Value ts0 =
-        builder.create<pto::AddPtrOp>(loc, src0Ptr.getType(), src0Ptr, off);
-    Value ts1 =
-        builder.create<pto::AddPtrOp>(loc, src1Ptr.getType(), src1Ptr, off);
+    if (headRepeats > 0)
+      vadd(loc, b, dst, s0, s1, i64c(headRepeats, loc, b), i64c8(loc, b));
 
-    Value c1 = getI64(1);
-    Value cRS = getI64(repStride);
+    if (tailElements > 0) {
+      Value off = idxc(headRepeats * epr, loc, b);
+      Value td = addPtr(loc, b, dst, ptrTy, off);
+      Value ts0 = addPtr(loc, b, s0, ptrTy, off);
+      Value ts1 = addPtr(loc, b, s1, ptrTy, off);
+      setMask(loc, b, tailElements);
+      vadd(loc, b, td, ts0, ts1, i64c1(loc, b), i64c8(loc, b));
+      fullMask(loc, b);
+    }
+  }
 
-    builder.create<pto::UBVaddOp>(loc, td, ts0, ts1, c1, c1, c1, c1, cRS, cRS,
-                                  cRS);
+  //===--------------------------------------------------------------------===//
+  // Bin1LCountMode
+  //===--------------------------------------------------------------------===//
 
-    Value cFull = getI64(-1);
-    builder.create<pto::UBSetMaskOp>(loc, cFull, cFull);
+  void modeCount1L(Location loc, OpBuilder &b, Value dst, Value s0, Value s1,
+                   pto::PtrType ptrTy, const TileShapeInfo &info) {
+    int64_t totalV = info.vRows * info.vCols;
+    b.create<pto::UBSetMaskCountOp>(loc);
+    b.create<pto::UBSetMaskOp>(loc, i64c(totalV, loc, b), i64c0(loc, b));
+    vadd(loc, b, dst, s0, s1, i64c0(loc, b), i64c8(loc, b));
+    b.create<pto::UBSetMaskNormOp>(loc);
+    fullMask(loc, b);
+  }
+
+  //===--------------------------------------------------------------------===//
+  // Bin2LNormModeColVLAlign
+  //===--------------------------------------------------------------------===//
+
+  void modeColVLAlign(Location loc, OpBuilder &b, Value dst, Value s0,
+                      Value s1, pto::PtrType ptrTy, const TileShapeInfo &info) {
+    int64_t epr = info.elementsPerRepeat;
+    int64_t headRepeats = info.vCols / epr;
+    int64_t rowStride = info.cols;
+
+    auto forOp = b.create<scf::ForOp>(loc, idxc0(loc, b),
+                                      idxc(info.vRows, loc, b), idxc1(loc, b));
+    b.setInsertionPointToStart(forOp.getBody());
+    Value iv = forOp.getInductionVar();
+    Value off = b.create<arith::MulIOp>(loc, iv, idxc(rowStride, loc, b))
+                    .getResult();
+    Value rd = addPtr(loc, b, dst, ptrTy, off);
+    Value rs0 = addPtr(loc, b, s0, ptrTy, off);
+    Value rs1 = addPtr(loc, b, s1, ptrTy, off);
+    vadd(loc, b, rd, rs0, rs1, i64c(headRepeats, loc, b), i64c8(loc, b));
+    b.setInsertionPointAfter(forOp);
+  }
+
+  //===--------------------------------------------------------------------===//
+  // Bin2LCountMode – row-by-row count mode
+  //===--------------------------------------------------------------------===//
+
+  void modeCount2L(Location loc, OpBuilder &b, Value dst, Value s0, Value s1,
+                   pto::PtrType ptrTy, const TileShapeInfo &info) {
+    int64_t rowStride = info.cols;
+    b.create<pto::UBSetMaskCountOp>(loc);
+    b.create<pto::UBSetMaskOp>(loc, i64c(info.vCols, loc, b),
+                               i64c0(loc, b));
+
+    auto forOp = b.create<scf::ForOp>(loc, idxc0(loc, b),
+                                      idxc(info.vRows, loc, b), idxc1(loc, b));
+    b.setInsertionPointToStart(forOp.getBody());
+    Value iv = forOp.getInductionVar();
+    Value off = b.create<arith::MulIOp>(loc, iv, idxc(rowStride, loc, b))
+                    .getResult();
+    Value rd = addPtr(loc, b, dst, ptrTy, off);
+    Value rs0 = addPtr(loc, b, s0, ptrTy, off);
+    Value rs1 = addPtr(loc, b, s1, ptrTy, off);
+    vadd(loc, b, rd, rs0, rs1, i64c0(loc, b), i64c8(loc, b));
+    b.setInsertionPointAfter(forOp);
+
+    b.create<pto::UBSetMaskNormOp>(loc);
+    fullMask(loc, b);
+  }
+
+  //===--------------------------------------------------------------------===//
+  // Bin2LNormModeRowRpt
+  //===--------------------------------------------------------------------===//
+
+  void modeRowRpt(Location loc, OpBuilder &b, Value dst, Value s0, Value s1,
+                   pto::PtrType ptrTy, const TileShapeInfo &info) {
+    int64_t be = info.blockSizeElem;
+    int64_t rowStride = info.cols;
+    int64_t rs = rowStride / be;
+    bool condRowRpt = (info.vRows <= kRepeatMax) && (rs <= kRepeatStrideMax);
+
+    if (condRowRpt)
+      rowRptFast(loc, b, dst, s0, s1, ptrTy, info, rs);
+    else
+      rowRptChunked(loc, b, dst, s0, s1, ptrTy, info, rowStride, rs);
+  }
+
+  void rowRptFast(Location loc, OpBuilder &b, Value dst, Value s0, Value s1,
+                  pto::PtrType ptrTy, const TileShapeInfo &info, int64_t rs) {
+    int64_t epr = info.elementsPerRepeat;
+    int64_t numLoop = info.vCols / epr;
+    int64_t tailElements = info.vCols % epr;
+
+    for (int64_t i = 0; i < numLoop; i++) {
+      Value rd = addPtr(loc, b, dst, ptrTy, idxc(i * epr, loc, b));
+      Value r0 = addPtr(loc, b, s0, ptrTy, idxc(i * epr, loc, b));
+      Value r1 = addPtr(loc, b, s1, ptrTy, idxc(i * epr, loc, b));
+      vadd(loc, b, rd, r0, r1, i64c(info.vRows, loc, b), i64c(rs, loc, b));
+    }
+
+    if (tailElements > 0) {
+      Value off = idxc(numLoop * epr, loc, b);
+      Value rd = addPtr(loc, b, dst, ptrTy, off);
+      Value r0 = addPtr(loc, b, s0, ptrTy, off);
+      Value r1 = addPtr(loc, b, s1, ptrTy, off);
+      setMask(loc, b, tailElements);
+      vadd(loc, b, rd, r0, r1, i64c(info.vRows, loc, b), i64c(rs, loc, b));
+      fullMask(loc, b);
+    }
+  }
+
+  void rowRptChunked(Location loc, OpBuilder &b, Value dst, Value s0,
+                     Value s1, pto::PtrType ptrTy, const TileShapeInfo &info,
+                     int64_t rowStride, int64_t rs) {
+    int64_t epr = info.elementsPerRepeat;
+    int64_t rptPerLine = info.vCols / epr;
+    int64_t remainElem = info.vCols % epr;
+
+    if (info.vRows > static_cast<int64_t>(epr)) {
+      if (rptPerLine > 0)
+        headRows(loc, b, dst, s0, s1, ptrTy, info, rowStride, rptPerLine);
+      if (remainElem > 0) {
+        Value off = idxc(rptPerLine * epr, loc, b);
+        tailRows(loc, b, addPtr(loc, b, dst, ptrTy, off),
+                 addPtr(loc, b, s0, ptrTy, off),
+                 addPtr(loc, b, s1, ptrTy, off), ptrTy, info, rowStride, rs,
+                 remainElem);
+      }
+    } else {
+      if (remainElem == 0) {
+        headRows(loc, b, dst, s0, s1, ptrTy, info, rowStride,
+                 info.vCols / epr);
+      } else if (rptPerLine > 0) {
+        headRows(loc, b, dst, s0, s1, ptrTy, info, rowStride, rptPerLine);
+        Value off = idxc(rptPerLine * epr, loc, b);
+        tailRows(loc, b, addPtr(loc, b, dst, ptrTy, off),
+                 addPtr(loc, b, s0, ptrTy, off),
+                 addPtr(loc, b, s1, ptrTy, off), ptrTy, info, rowStride, rs,
+                 remainElem);
+      } else {
+        tailRows(loc, b, dst, s0, s1, ptrTy, info, rowStride, rs, remainElem);
+      }
+    }
+  }
+
+  //===--------------------------------------------------------------------===//
+  // Bin2LNormModeHead – chunked per-row head
+  //===--------------------------------------------------------------------===//
+
+  void headRows(Location loc, OpBuilder &b, Value dst, Value s0, Value s1,
+                pto::PtrType ptrTy, const TileShapeInfo &info,
+                int64_t rowStride, int64_t rptPerLine) {
+    int64_t epr = info.elementsPerRepeat;
+    int64_t numLoop = rptPerLine / kRepeatMax;
+    int64_t remain = rptPerLine % kRepeatMax;
+    int64_t chunkElems = kRepeatMax * epr;
+
+    auto forOp = b.create<scf::ForOp>(loc, idxc0(loc, b),
+                                      idxc(info.vRows, loc, b),
+                                      idxc1(loc, b));
+    b.setInsertionPointToStart(forOp.getBody());
+    Value iv = forOp.getInductionVar();
+    Value rowBase =
+        b.create<arith::MulIOp>(loc, iv, idxc(rowStride, loc, b)).getResult();
+
+    if (numLoop > 0) {
+      auto inner = b.create<scf::ForOp>(loc, idxc0(loc, b),
+                                        idxc(numLoop, loc, b), idxc1(loc, b));
+      b.setInsertionPointToStart(inner.getBody());
+      Value jv = inner.getInductionVar();
+      Value co = b.create<arith::MulIOp>(loc, jv, idxc(chunkElems, loc, b))
+                     .getResult();
+      Value off = b.create<arith::AddIOp>(loc, rowBase, co).getResult();
+      vadd(loc, b, addPtr(loc, b, dst, ptrTy, off),
+           addPtr(loc, b, s0, ptrTy, off), addPtr(loc, b, s1, ptrTy, off),
+           i64c(kRepeatMax, loc, b), i64c8(loc, b));
+      b.setInsertionPointAfter(inner);
+    }
+
+    if (remain > 0) {
+      Value co = idxc(numLoop * chunkElems, loc, b);
+      Value off = b.create<arith::AddIOp>(loc, rowBase, co).getResult();
+      vadd(loc, b, addPtr(loc, b, dst, ptrTy, off),
+           addPtr(loc, b, s0, ptrTy, off), addPtr(loc, b, s1, ptrTy, off),
+           i64c(remain, loc, b), i64c8(loc, b));
+    }
+    b.setInsertionPointAfter(forOp);
+  }
+
+  //===--------------------------------------------------------------------===//
+  // Bin2LNormModeTail – masked per-row tail
+  //===--------------------------------------------------------------------===//
+
+  void tailRows(Location loc, OpBuilder &b, Value dst, Value s0, Value s1,
+                pto::PtrType ptrTy, const TileShapeInfo &info,
+                int64_t rowStride, int64_t rs, unsigned remainPerLine) {
+    bool strideOver =
+        (rowStride / info.blockSizeElem > kRepeatStrideMax);
+    setMask(loc, b, remainPerLine);
+
+    int64_t numLoop = 0;
+    int64_t remainAfterLoop = info.vRows;
+    if (info.vRows > kRepeatMax) {
+      numLoop = info.vRows / kRepeatMax;
+      remainAfterLoop = info.vRows % kRepeatMax;
+
+      auto forOp = b.create<scf::ForOp>(loc, idxc0(loc, b),
+                                        idxc(numLoop, loc, b), idxc1(loc, b));
+      b.setInsertionPointToStart(forOp.getBody());
+      Value iv = forOp.getInductionVar();
+      if (strideOver)
+        tailStrideOverChunk(loc, b, iv, dst, s0, s1, ptrTy, rowStride);
+      else
+        tailStrideOkChunk(loc, b, iv, dst, s0, s1, ptrTy, rowStride, rs);
+      b.setInsertionPointAfter(forOp);
+    }
+
+    if (remainAfterLoop > 0) {
+      if (strideOver)
+        tailStrideOverRemain(loc, b, dst, s0, s1, ptrTy, rowStride, numLoop,
+                             remainAfterLoop);
+      else
+        tailStrideOkRemain(loc, b, dst, s0, s1, ptrTy, rowStride, rs, numLoop,
+                           remainAfterLoop);
+    }
+
+    fullMask(loc, b);
+  }
+
+  void tailStrideOverChunk(Location loc, OpBuilder &b, Value iv, Value dst,
+                           Value s0, Value s1, pto::PtrType ptrTy,
+                           int64_t rowStride) {
+    auto forOp = b.create<scf::ForOp>(loc, idxc0(loc, b),
+                                      idxc(kRepeatMax, loc, b), idxc1(loc, b));
+    b.setInsertionPointToStart(forOp.getBody());
+    Value jv = forOp.getInductionVar();
+    Value baseOff = b.create<arith::MulIOp>(
+        loc, iv, idxc(kRepeatMax * rowStride, loc, b)).getResult();
+    Value rowOff =
+        b.create<arith::MulIOp>(loc, jv, idxc(rowStride, loc, b)).getResult();
+    Value off = b.create<arith::AddIOp>(loc, baseOff, rowOff).getResult();
+    vadd(loc, b, addPtr(loc, b, dst, ptrTy, off),
+         addPtr(loc, b, s0, ptrTy, off), addPtr(loc, b, s1, ptrTy, off),
+         i64c1(loc, b), i64c1(loc, b));
+    b.setInsertionPointAfter(forOp);
+  }
+
+  void tailStrideOkChunk(Location loc, OpBuilder &b, Value iv, Value dst,
+                         Value s0, Value s1, pto::PtrType ptrTy,
+                         int64_t rowStride, int64_t rs) {
+    Value off = b.create<arith::MulIOp>(
+        loc, iv, idxc(kRepeatMax * rowStride, loc, b)).getResult();
+    vadd(loc, b, addPtr(loc, b, dst, ptrTy, off),
+         addPtr(loc, b, s0, ptrTy, off), addPtr(loc, b, s1, ptrTy, off),
+         i64c(kRepeatMax, loc, b), i64c(rs, loc, b));
+  }
+
+  void tailStrideOverRemain(Location loc, OpBuilder &b, Value dst, Value s0,
+                            Value s1, pto::PtrType ptrTy, int64_t rowStride,
+                            int64_t numLoop, int64_t remain) {
+    auto forOp = b.create<scf::ForOp>(loc, idxc0(loc, b), idxc(remain, loc, b),
+                                      idxc1(loc, b));
+    b.setInsertionPointToStart(forOp.getBody());
+    Value jv = forOp.getInductionVar();
+    Value baseOff = idxc(numLoop * kRepeatMax * rowStride, loc, b);
+    Value rowOff =
+        b.create<arith::MulIOp>(loc, jv, idxc(rowStride, loc, b)).getResult();
+    Value off = b.create<arith::AddIOp>(loc, baseOff, rowOff).getResult();
+    vadd(loc, b, addPtr(loc, b, dst, ptrTy, off),
+         addPtr(loc, b, s0, ptrTy, off), addPtr(loc, b, s1, ptrTy, off),
+         i64c1(loc, b), i64c1(loc, b));
+    b.setInsertionPointAfter(forOp);
+  }
+
+  void tailStrideOkRemain(Location loc, OpBuilder &b, Value dst, Value s0,
+                          Value s1, pto::PtrType ptrTy, int64_t rowStride,
+                          int64_t rs, int64_t numLoop, int64_t remain) {
+    Value off = idxc(numLoop * kRepeatMax * rowStride, loc, b);
+    vadd(loc, b, addPtr(loc, b, dst, ptrTy, off),
+         addPtr(loc, b, s0, ptrTy, off), addPtr(loc, b, s1, ptrTy, off),
+         i64c(remain, loc, b), i64c(rs, loc, b));
   }
 };
 
