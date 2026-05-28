@@ -14,7 +14,19 @@
 
 module attributes {pto.target_arch = "a3", pto.kernel_kind = #pto.kernel_kind<vector>} {
 
-// 16x64xf32 → repeat=32, repStride=8
+// 16x64xf32 → blockSizeElem=8, elementsPerRepeat=32
+//   repeat = 16*64/32 = 32, repStride = 64/8 = 8
+//
+//                                               ┌── repeat ──┐  ┌ block strides ─┐  ┌ repeat strides ┐
+//  pto.ub.vadd dst, src0, src1, %c32_i64, %c1_i64, %c1_i64, %c1_i64, %c8_i64, %c8_i64, %c8_i64 : ...
+//
+// CHECK-DAG: pto.tile_buf_addr {{%.*}} : !pto.tile_buf<vec, 16x64xf32> -> !pto.ptr<f32, ub>
+// CHECK-DAG: pto.tile_buf_addr {{%.*}} : !pto.tile_buf<vec, 16x64xf32> -> !pto.ptr<f32, ub>
+// CHECK-DAG: pto.tile_buf_addr {{%.*}} : !pto.tile_buf<vec, 16x64xf32> -> !pto.ptr<f32, ub>
+// CHECK-DAG: [[RPT32:%c[0-9]+_i64]] = arith.constant 32 : i64
+// CHECK-DAG: [[RST8:%c[0-9]+_i64]] = arith.constant 8 : i64
+// CHECK-DAG: [[ONE:%c[0-9]+_i64]] = arith.constant 1 : i64
+// CHECK-DAG: pto.ub.vadd {{%.*}}, {{%.*}}, {{%.*}}, [[RPT32]], [[ONE]], [[ONE]], [[ONE]], [[RST8]], [[RST8]], [[RST8]] : !pto.ptr<f32, ub>, !pto.ptr<f32, ub>, !pto.ptr<f32, ub>, i64, i64, i64, i64, i64, i64, i64
   func.func @lower_tadd_f32() attributes {pto.aicore} {
     %dst = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64, v_row=16, v_col=64, blayout=row_major, slayout=none_box, fractal=512, pad=0>
     %src0 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64, v_row=16, v_col=64, blayout=row_major, slayout=none_box, fractal=512, pad=0>
@@ -23,7 +35,19 @@ module attributes {pto.target_arch = "a3", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-// 16x64xf16 → repeat=16, repStride=4
+// 16x64xf16 → blockSizeElem=16, elementsPerRepeat=64
+//   repeat = 16*64/64 = 16, repStride = 64/16 = 4
+//
+//                                               ┌── repeat ──┐  ┌ block strides ─┐  ┌ repeat strides ┐
+//  pto.ub.vadd dst, src0, src1, %c16_i64, %c1_i64, %c1_i64, %c1_i64, %c4_i64, %c4_i64, %c4_i64 : ...
+//
+// CHECK-DAG: pto.tile_buf_addr {{%.*}} : !pto.tile_buf<vec, 16x64xf16> -> !pto.ptr<f16, ub>
+// CHECK-DAG: pto.tile_buf_addr {{%.*}} : !pto.tile_buf<vec, 16x64xf16> -> !pto.ptr<f16, ub>
+// CHECK-DAG: pto.tile_buf_addr {{%.*}} : !pto.tile_buf<vec, 16x64xf16> -> !pto.ptr<f16, ub>
+// CHECK-DAG: [[RPT16:%c[0-9]+_i64]] = arith.constant 16 : i64
+// CHECK-DAG: [[RST4:%c[0-9]+_i64]] = arith.constant 4 : i64
+// CHECK-DAG: [[ONE]] = arith.constant 1 : i64
+// CHECK-DAG: pto.ub.vadd {{%.*}}, {{%.*}}, {{%.*}}, [[RPT16]], [[ONE]], [[ONE]], [[ONE]], [[RST4]], [[RST4]], [[RST4]] : !pto.ptr<f16, ub>, !pto.ptr<f16, ub>, !pto.ptr<f16, ub>, i64, i64, i64, i64, i64, i64, i64
   func.func @lower_tadd_f16() attributes {pto.aicore} {
     %dst = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=64, v_row=16, v_col=64, blayout=row_major, slayout=none_box, fractal=512, pad=0>
     %src0 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f16, rows=16, cols=64, v_row=16, v_col=64, blayout=row_major, slayout=none_box, fractal=512, pad=0>
@@ -32,32 +56,6 @@ module attributes {pto.target_arch = "a3", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 }
-
-// Three tile_buf_addr ops per function extract !pto.ptr<T, ub> from each tile
-// CHECK-DAG: pto.tile_buf_addr {{%.*}} : !pto.tile_buf<vec, 16x64xf32> -> !pto.ptr<f32, ub>
-// CHECK-DAG: pto.tile_buf_addr {{%.*}} : !pto.tile_buf<vec, 16x64xf32> -> !pto.ptr<f32, ub>
-// CHECK-DAG: pto.tile_buf_addr {{%.*}} : !pto.tile_buf<vec, 16x64xf32> -> !pto.ptr<f32, ub>
-// CHECK-DAG: pto.tile_buf_addr {{%.*}} : !pto.tile_buf<vec, 16x64xf16> -> !pto.ptr<f16, ub>
-// CHECK-DAG: pto.tile_buf_addr {{%.*}} : !pto.tile_buf<vec, 16x64xf16> -> !pto.ptr<f16, ub>
-// CHECK-DAG: pto.tile_buf_addr {{%.*}} : !pto.tile_buf<vec, 16x64xf16> -> !pto.ptr<f16, ub>
-
-// Capture the constant definitions and verify they map to the correct
-// ub.vadd argument positions:
-//
-//   ub.vadd(dst, src0, src1,
-//           repeat, dstBlk, src0Blk, src1Blk, dstRep, src0Rep, src1Rep)
-//
-// CHECK-DAG: [[RPT32:%c[0-9]+_i64]] = arith.constant 32 : i64
-// CHECK-DAG: [[RST8:%c[0-9]+_i64]] = arith.constant 8 : i64
-// CHECK-DAG: [[RPT16:%c[0-9]+_i64]] = arith.constant 16 : i64
-// CHECK-DAG: [[RST4:%c[0-9]+_i64]] = arith.constant 4 : i64
-// CHECK-DAG: [[ONE:%c[0-9]+_i64]] = arith.constant 1 : i64
-
-// f32: repeat=32, block strides all 1, repeat strides all 8
-// CHECK-DAG: pto.ub.vadd {{%.*}}, {{%.*}}, {{%.*}}, [[RPT32]], [[ONE]], [[ONE]], [[ONE]], [[RST8]], [[RST8]], [[RST8]] : !pto.ptr<f32, ub>, !pto.ptr<f32, ub>, !pto.ptr<f32, ub>, i64, i64, i64, i64, i64, i64, i64
-
-// f16: repeat=16, block strides all 1, repeat strides all 4
-// CHECK-DAG: pto.ub.vadd {{%.*}}, {{%.*}}, {{%.*}}, [[RPT16]], [[ONE]], [[ONE]], [[ONE]], [[RST4]], [[RST4]], [[RST4]] : !pto.ptr<f16, ub>, !pto.ptr<f16, ub>, !pto.ptr<f16, ub>, i64, i64, i64, i64, i64, i64, i64
 
 // Verify pto.tadd is fully consumed by the pass
 // CHECK-NOT: pto.tadd

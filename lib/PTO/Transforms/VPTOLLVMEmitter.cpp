@@ -4339,6 +4339,44 @@ private:
   LoweringState &state;
 };
 
+class LowerUBSetMaskOpPattern final
+    : public OpConversionPattern<pto::UBSetMaskOp> {
+public:
+  explicit LowerUBSetMaskOpPattern(TypeConverter &typeConverter,
+                                   MLIRContext *context, LoweringState &state)
+      : OpConversionPattern<pto::UBSetMaskOp>(typeConverter, context),
+        state(state) {}
+
+  LogicalResult
+  matchAndRewrite(pto::UBSetMaskOp op, typename pto::UBSetMaskOp::Adaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    StringRef calleeName = "llvm.hivm.MOVEMASK";
+    Location loc = op.getLoc();
+
+    auto funcType = rewriter.getFunctionType(
+        TypeRange{rewriter.getI64Type(), rewriter.getI64Type()}, TypeRange{});
+
+    // movemask(0, mask0) — MASK[0] for lanes 0-63
+    Value c0Idx = rewriter.create<arith::ConstantOp>(
+        loc, rewriter.getI64IntegerAttr(0));
+    rewriter.create<func::CallOp>(loc, calleeName, TypeRange{},
+                                  ValueRange{c0Idx, adaptor.getMask0()});
+
+    // movemask(1, mask1) — MASK[1] for lanes 64-127
+    Value c1Idx = rewriter.create<arith::ConstantOp>(
+        loc, rewriter.getI64IntegerAttr(1));
+    rewriter.create<func::CallOp>(loc, calleeName, TypeRange{},
+                                  ValueRange{c1Idx, adaptor.getMask1()});
+
+    state.plannedDecls.push_back(PlannedDecl{calleeName.str(), funcType});
+    rewriter.eraseOp(op);
+    return success();
+  }
+
+private:
+  LoweringState &state;
+};
+
 static LogicalResult lowerMadRawOp(pto::MadRawOpInterface op,
                                    ValueRange convertedOperands,
                                    ConversionPatternRewriter &rewriter,
@@ -9391,9 +9429,12 @@ static void populateVPTOOpLoweringPatterns(VPTOTypeConverter &typeConverter,
                LowerCopyUbufToCbufOpPattern>(
       typeConverter, patterns.getContext(), state);
 
-  if (march == "dav-m200-vec")
+  if (march == "dav-m200-vec") {
     patterns.add<LowerUBufBinaryOpPattern<pto::UBVaddOp>>(
         typeConverter, patterns.getContext(), state);
+    patterns.add<LowerUBSetMaskOpPattern>(
+        typeConverter, patterns.getContext(), state);
+  }
 }
 
 static void configureVPTOOpLoweringTarget(ConversionTarget &target,
@@ -9497,8 +9538,10 @@ static void configureVPTOOpLoweringTarget(ConversionTarget &target,
                       pto::MadRawOp, pto::MadBiasRawOp, pto::MadMxRawOp,
                       pto::MadMxBiasRawOp>();
 
-  if (march == "dav-m200-vec")
+  if (march == "dav-m200-vec") {
     target.addIllegalOp<pto::UBVaddOp>();
+    target.addIllegalOp<pto::UBSetMaskOp>();
+  }
 
   target.markUnknownOpDynamicallyLegal([](Operation *) { return true; });
 }
