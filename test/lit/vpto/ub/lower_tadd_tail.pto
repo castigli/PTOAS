@@ -1,0 +1,40 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// Test that non-aligned tiles produce a masked tail: head repeats via
+// pto.ub.vadd + masked tail via pto.ub.set_mask + pto.ub.vadd(1).
+
+// RUN: ( mkdir -p %T && ptoas --pto-arch=a3 --pto-backend=vpto %s -o %t --mlir-print-ir-after=pto-lower-to-ubuf-ops 2>&1 || true ) | FileCheck %s
+
+module attributes {pto.target_arch = "a3", pto.kernel_kind = #pto.kernel_kind<vector>} {
+
+// 7x48xf32 → elementsPerRepeat=32, blockSizeElem=8
+//   total = 336, headRepeats = 336/32 = 10, tailElements = 336%32 = 16
+//   repStride = 48/8 = 6
+  func.func @lower_tadd_tail() attributes {pto.aicore} {
+    %dst = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=7, cols=48, v_row=7, v_col=48, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %src0 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=7, cols=48, v_row=7, v_col=48, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %src1 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=7, cols=48, v_row=7, v_col=48, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tadd ins(%src0, %src1 : !pto.tile_buf<loc=vec, dtype=f32, rows=7, cols=48, v_row=7, v_col=48, blayout=row_major, slayout=none_box, fractal=512, pad=0>, !pto.tile_buf<loc=vec, dtype=f32, rows=7, cols=48, v_row=7, v_col=48, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%dst : !pto.tile_buf<loc=vec, dtype=f32, rows=7, cols=48, v_row=7, v_col=48, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+    return
+  }
+}
+
+// Head: 10 repeats, repStride=6
+// CHECK: [[RPT10:%c[0-9]+_i64]] = arith.constant 10 : i64
+// CHECK: [[RST6:%c[0-9]+_i64]] = arith.constant 6 : i64
+// CHECK: pto.ub.vadd {{%.*}}, {{%.*}}, {{%.*}}, [[RPT10]], %c1_i64, %c1_i64, %c1_i64, [[RST6]], [[RST6]], [[RST6]]
+
+// Tail: set_mask → addptr to offset 320 (10*32) → ub.vadd repeat=1 → restore mask
+// CHECK: pto.ub.set_mask
+// CHECK: arith.constant 320 : index
+// CHECK: pto.addptr
+// CHECK: pto.ub.vadd {{%.*}}, {{%.*}}, {{%.*}}, {{%.*}}, {{%.*}}, {{%.*}}, {{%.*}}, {{%.*}}, {{%.*}}, {{%.*}} : !pto.ptr<f32, ub>, !pto.ptr<f32, ub>, !pto.ptr<f32, ub>, i64, i64, i64, i64, i64, i64, i64
+// CHECK: pto.ub.set_mask %c-1_i64, %c-1_i64
+
+// CHECK-NOT: pto.tadd
