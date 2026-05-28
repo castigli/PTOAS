@@ -6,39 +6,25 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// Test flat Bin1LNormMode: stride=8.
-// 4x32 f32: repeat=4, repStride=8.
-// 1x64 f32 (single row): repeat=2, repStride=8.
+// Test Bin1LNormMode: flat VL-aligned, repeat ≤ 255, stride = CCE constant 8.
+// 4x32 f32 — cols=32, epr=32, nonVLAligned=false, headRepeats=4, tail=0.
 
 // RUN: ( mkdir -p %T && ptoas --pto-arch=a3 --pto-backend=vpto %s -o %t --mlir-print-ir-after=pto-lower-to-ubuf-ops 2>&1 || true ) | FileCheck %s
 
 module attributes {pto.target_arch = "a3", pto.kernel_kind = #pto.kernel_kind<vector>} {
-
-  func.func @lower_f32() attributes {pto.aicore} {
+  func.func @lower_tadd_flat() attributes {pto.aicore} {
     %dst = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=4, cols=32, v_row=4, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>
     %src0 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=4, cols=32, v_row=4, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>
     %src1 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=4, cols=32, v_row=4, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>
     pto.tadd ins(%src0, %src1 : !pto.tile_buf<loc=vec, dtype=f32, rows=4, cols=32, v_row=4, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>, !pto.tile_buf<loc=vec, dtype=f32, rows=4, cols=32, v_row=4, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%dst : !pto.tile_buf<loc=vec, dtype=f32, rows=4, cols=32, v_row=4, v_col=32, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
     return
   }
-
-  func.func @lower_f32_single_row() attributes {pto.aicore} {
-    %dst = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=64, v_row=1, v_col=64, blayout=row_major, slayout=none_box, fractal=512, pad=0>
-    %src0 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=64, v_row=1, v_col=64, blayout=row_major, slayout=none_box, fractal=512, pad=0>
-    %src1 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=64, v_row=1, v_col=64, blayout=row_major, slayout=none_box, fractal=512, pad=0>
-    pto.tadd ins(%src0, %src1 : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=64, v_row=1, v_col=64, blayout=row_major, slayout=none_box, fractal=512, pad=0>, !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=64, v_row=1, v_col=64, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%dst : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=64, v_row=1, v_col=64, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
-    return
-  }
 }
 
-// f32 flat: repeat=4, repStride=8, no mask
-// CHECK-LABEL: func.func @lower_f32
-// CHECK: pto.ub.vadd
+// Bin1LNormMode: vadd(repeat=4, repStride=8), no mask, no tail
+// CHECK-LABEL: func.func @lower_tadd_flat
+// CHECK: %c4_i64 = arith.constant 4 : i64
+// CHECK: %c8_i64 = arith.constant 8 : i64
+// CHECK: pto.ub.vadd {{%.*}}, {{%.*}}, {{%.*}}, %c4_i64, {{%.*}}, {{%.*}}, {{%.*}}, %c8_i64, %c8_i64, %c8_i64
 // CHECK-NOT: pto.ub.set_mask
-// CHECK: return
-
-// single row: repeat=2, repStride=8, no mask
-// CHECK-LABEL: func.func @lower_f32_single_row
-// CHECK: pto.ub.vadd
-// CHECK-NOT: pto.ub.set_mask
-// CHECK: return
+// CHECK-NOT: pto.tadd

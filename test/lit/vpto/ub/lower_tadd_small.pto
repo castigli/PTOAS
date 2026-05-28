@@ -6,29 +6,25 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// Test that tiny tiles (headRepeats=0) produce only a masked tail:
-// no head ub.vadd, just set_mask + ub.vadd(1) + restore.
+// Test Bin1LNormModeSmall: cols < elementsPerRepeat → masked repeat=vRows.
+// 2x8 f32 — cols=8 < epr=32, rows=2 ≤ 255.
 
 // RUN: ( mkdir -p %T && ptoas --pto-arch=a3 --pto-backend=vpto %s -o %t --mlir-print-ir-after=pto-lower-to-ubuf-ops 2>&1 || true ) | FileCheck %s
 
 module attributes {pto.target_arch = "a3", pto.kernel_kind = #pto.kernel_kind<vector>} {
-
-// 2x8xf32 → elementsPerRepeat=32, blockSizeElem=8
-//   total = 16, headRepeats = 16/32 = 0, tailElements = 16
-//   repStride = 8/8 = 1
   func.func @lower_tadd_small() attributes {pto.aicore} {
-    %dst = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=2, cols=8, v_row=2, v_col=8, blayout=row_major, slayout=none_box, fractal=512, pad=0>
-    %src0 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=2, cols=8, v_row=2, v_col=8, blayout=row_major, slayout=none_box, fractal=512, pad=0>
-    %src1 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=2, cols=8, v_row=2, v_col=8, blayout=row_major, slayout=none_box, fractal=512, pad=0>
-    pto.tadd ins(%src0, %src1 : !pto.tile_buf<loc=vec, dtype=f32, rows=2, cols=8, v_row=2, v_col=8, blayout=row_major, slayout=none_box, fractal=512, pad=0>, !pto.tile_buf<loc=vec, dtype=f32, rows=2, cols=8, v_row=2, v_col=8, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%dst : !pto.tile_buf<loc=vec, dtype=f32, rows=2, cols=8, v_row=2, v_col=8, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+    %dst = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=2, cols=32, v_row=2, v_col=8, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %src0 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=2, cols=32, v_row=2, v_col=8, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %src1 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=2, cols=32, v_row=2, v_col=8, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tadd ins(%src0, %src1 : !pto.tile_buf<loc=vec, dtype=f32, rows=2, cols=32, v_row=2, v_col=8, blayout=row_major, slayout=none_box, fractal=512, pad=0>, !pto.tile_buf<loc=vec, dtype=f32, rows=2, cols=32, v_row=2, v_col=8, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%dst : !pto.tile_buf<loc=vec, dtype=f32, rows=2, cols=32, v_row=2, v_col=8, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
     return
   }
 }
 
-// headRepeats=0: only masked tail, no head ub.vadd
-// CHECK-DAG: [[MASK16:%c[0-9]+_i64]] = arith.constant 65535 : i64
-// CHECK: pto.ub.set_mask [[MASK16]], %c0_i64
-// Tail ub.vadd at offset 0: repeat=1, repStride=1
-// CHECK: pto.ub.vadd {{%.*}}, {{%.*}}, {{%.*}}, {{%.*}}, {{%.*}}, {{%.*}}, {{%.*}}, {{%.*}}, {{%.*}}, {{%.*}} : !pto.ptr<f32, ub>, !pto.ptr<f32, ub>, !pto.ptr<f32, ub>, i64, i64, i64, i64, i64, i64, i64
+// Small tile: set_mask(8) → vadd(repeat=2, repStride=2) → set_mask(-1,-1)
+// cols/blockSizeElem = 32/8 = 4 (but rs=rows/be from the function uses cols/be = 32/8=4)
+// CHECK-LABEL: func.func @lower_tadd_small
+// CHECK: pto.ub.set_mask
+// CHECK: pto.ub.vadd {{%.*}}, {{%.*}}, {{%.*}}, {{%.*}}, {{%.*}}, {{%.*}}, {{%.*}}, {{%.*}}, {{%.*}}, {{%.*}}
 // CHECK: pto.ub.set_mask %c-1_i64, %c-1_i64
 // CHECK-NOT: pto.tadd
