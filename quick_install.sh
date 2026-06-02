@@ -30,8 +30,26 @@ for d in "$LLVM_BUILD_DIR/lib/cmake/llvm" "$LLVM_BUILD_DIR/lib/cmake/mlir"; do
 done
 
 PYBIND11_DIR="$(python -m pybind11 --cmakedir)"
-MLIR_PY_PKG="${LLVM_BUILD_DIR}/tools/mlir/python_packages/mlir_core"
-test -d "$MLIR_PY_PKG" || { echo "error: MLIR python package dir missing: $MLIR_PY_PKG" >&2; exit 1; }
+
+_find_mlir_python_package() {
+  local prefix="$1"
+  local cand
+  for cand in \
+    "${prefix}/tools/mlir/python_packages/mlir_core" \
+    "${prefix}/python_packages/mlir_core"
+  do
+    if [ -d "$cand" ]; then
+      echo "$cand"
+      return 0
+    fi
+  done
+  echo "error: cannot find MLIR python package under ${prefix}" >&2
+  echo "Tried:" >&2
+  echo "  ${prefix}/tools/mlir/python_packages/mlir_core" >&2
+  echo "  ${prefix}/python_packages/mlir_core" >&2
+  exit 1
+}
+MLIR_PY_PKG="$(_find_mlir_python_package "${LLVM_BUILD_DIR}")"
 
 PTOAS_VERSION="${PTOAS_VERSION:-$(python "${PTO_SOURCE_DIR}/.github/scripts/compute_ptoas_version.py" --cmake-file "${PTO_SOURCE_DIR}/CMakeLists.txt" --mode dev)}"
 

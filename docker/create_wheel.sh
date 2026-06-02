@@ -33,7 +33,25 @@ for var in PTO_SOURCE_DIR PTO_INSTALL_DIR LLVM_BUILD_DIR; do
   fi
 done
 
-MLIR_PYTHON_PACKAGE_DIR="${LLVM_BUILD_DIR}/tools/mlir/python_packages/mlir_core"
+_find_mlir_python_package() {
+  local prefix="$1"
+  local cand
+  for cand in \
+    "${prefix}/tools/mlir/python_packages/mlir_core" \
+    "${prefix}/python_packages/mlir_core"
+  do
+    if [ -d "$cand" ]; then
+      echo "$cand"
+      return 0
+    fi
+  done
+  echo "Error: cannot find MLIR python package under ${prefix}" >&2
+  echo "Tried:" >&2
+  echo "  ${prefix}/tools/mlir/python_packages/mlir_core" >&2
+  echo "  ${prefix}/python_packages/mlir_core" >&2
+  exit 1
+}
+MLIR_PYTHON_PACKAGE_DIR="$(_find_mlir_python_package "${LLVM_BUILD_DIR}")"
 WHEEL_STAGING_DIR="${PTO_WHEEL_STAGING_DIR:-${PTO_SOURCE_DIR}/build/wheel-staging}"
 WHEEL_DIST_DIR="${PTO_WHEEL_DIST_DIR:-${PTO_SOURCE_DIR}/build/wheel-dist}"
 PYTHON_BIN="${PYTHON:-python3}"
