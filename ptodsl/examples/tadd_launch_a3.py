@@ -7,12 +7,10 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 
 """
-TADD tile kernel for A3 (dav-m200-vec) — e2e numerical verification.
+TADD tile kernel — Python DSL equivalent of
+  test/tilelang_st/npu/a3/src/st/testcase/tadd/tadd.pto
 
-Exercises the LowerPTOToUBufOps pass which converts pto.tadd to pto.ub.vadd
-(or count mode via pto.ub.set_mask_count + pto.ub.set_mask_norm) on A3.
-
-End-to-end: @pto.jit → MLIR → binary → launch on A3 NPU → accuracy check.
+End-to-end: @pto.jit → MLIR → binary → launch → accuracy check.
 """
 
 import argparse
@@ -30,7 +28,7 @@ if __package__ in {None, ""}:
             break
     else:
         raise RuntimeError(
-            "Unable to locate the PTODSL Python package root from tadd_launch_a3.py"
+            "Unable to locate the PTODSL Python package root from tadd_launch.py"
         )
 
 from ptodsl import pto
@@ -77,11 +75,11 @@ def _tadd_tile(A, B, C, rows: int, cols: int) -> None:
     target="a3",
 )
 def TADD_f32_16x64(
-    A: pto.tensor_spec(rank=2, dtype=pto.f32),
-    B: pto.tensor_spec(rank=2, dtype=pto.f32),
-    C: pto.tensor_spec(rank=2, dtype=pto.f32),
+    A_ptr: pto.ptr(pto.f32, "gm"),
+    B_ptr: pto.ptr(pto.f32, "gm"),
+    C_ptr: pto.ptr(pto.f32, "gm"),
 ):
-    _tadd_tile(A, B, C, 16, 64)
+    _tadd_tile(A_ptr, B_ptr, C_ptr, 16, 64)
 
 
 @pto.jit(
@@ -90,11 +88,11 @@ def TADD_f32_16x64(
     target="a3",
 )
 def TADD_f32_32x32(
-    A: pto.tensor_spec(rank=2, dtype=pto.f32),
-    B: pto.tensor_spec(rank=2, dtype=pto.f32),
-    C: pto.tensor_spec(rank=2, dtype=pto.f32),
+    A_ptr: pto.ptr(pto.f32, "gm"),
+    B_ptr: pto.ptr(pto.f32, "gm"),
+    C_ptr: pto.ptr(pto.f32, "gm"),
 ):
-    _tadd_tile(A, B, C, 32, 32)
+    _tadd_tile(A_ptr, B_ptr, C_ptr, 32, 32)
 
 
 KERNELS = (TADD_f32_16x64, TADD_f32_32x32)
@@ -114,7 +112,7 @@ CASES = [
 ]
 
 
-# def init_torch_npu():
+# def init_torch_npu() -> None:
 #     import torch
 #     import torch_npu  # noqa: F401
 
@@ -145,7 +143,7 @@ def run_case(case: dict, torch) -> None:
     compile_s = time.perf_counter() - t0
 
     t0 = time.perf_counter()
-    compiled[1, stream](a, b, c)
+    compiled[1, stream](a.data_ptr(), b.data_ptr(), c.data_ptr())
     torch.npu.synchronize()
     launch_s = time.perf_counter() - t0
 
