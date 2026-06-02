@@ -33,37 +33,40 @@ import zipfile
 from pathlib import Path
 
 _REPO = Path(__file__).parent.resolve()
-_LLVM_BUILD_DIR = Path(
-    os.environ.get("LLVM_BUILD_DIR",
-                   "/llvm-workspace/llvm-project/build-shared")
-)
+
+def _find_llvm_dir():
+    """Return an LLVM install or build-tree prefix, resolving in order:
+
+    1. ``LLVM_BUILD_DIR`` / ``LLVM_INSTALL_DIR`` env vars
+    2. Auto-detect common install locations by probing ``lib/cmake/llvm``
+    3. Default build-tree path
+    """
+    for key in ("LLVM_BUILD_DIR", "LLVM_INSTALL_DIR"):
+        if key in os.environ:
+            return Path(os.environ[key])
+
+    for cand in ("/usr/local/llvm", "/usr/local/Ascend/latest/compiler",
+                 "/opt/llvm"):
+        if (Path(cand) / "lib" / "cmake" / "llvm").is_dir():
+            return Path(cand)
+
+    return Path("/llvm-workspace/llvm-project/build-shared")
+
+
+_LLVM_BUILD_DIR = _find_llvm_dir()
 _PTO_INSTALL_DIR = Path(
     os.environ.get("PTO_INSTALL_DIR", str(_REPO / "install"))
 )
 _BUILD_DIR = Path(os.environ.get("PTO_BUILD_DIR", str(_REPO / "build")))
-
-
-def _find_mlir_python_package(prefix: Path) -> Path:
-    """Return the MLIR python package directory under *prefix*.
-
-    Handles both build-tree layouts (``tools/mlir/python_packages/mlir_core``)
-    and install-prefix layouts (``python_packages/mlir_core``).
-    """
-    candidates = [
-        prefix / "tools" / "mlir" / "python_packages" / "mlir_core",
-        prefix / "python_packages" / "mlir_core",
-    ]
-    for cand in candidates:
-        if cand.is_dir():
-            return cand
-
-    tried = "\n  ".join(str(c) for c in candidates)
-    raise FileNotFoundError(
-        f"Cannot find MLIR python package under {prefix}. Tried:\n  {tried}"
-    )
-
-
-_MLIR_PY_PKG = _find_mlir_python_package(_LLVM_BUILD_DIR)
+_MLIR_PY_PKG = None
+if "MLIR_PYTHON_PACKAGE_DIR" in os.environ:
+    _MLIR_PY_PKG = Path(os.environ["MLIR_PYTHON_PACKAGE_DIR"])
+elif "LLVM_INSTALL_DIR" in os.environ:
+    _MLIR_PY_PKG = Path(os.environ["LLVM_INSTALL_DIR"]) / "python_packages" / "mlir_core"
+else:
+    _installed = _LLVM_BUILD_DIR / "python_packages" / "mlir_core"
+    _build_tree = _LLVM_BUILD_DIR / "tools" / "mlir" / "python_packages" / "mlir_core"
+    _MLIR_PY_PKG = _installed if _installed.exists() else _build_tree
 _WHEEL_DIST_DIR = _BUILD_DIR / "wheel-dist"
 
 
@@ -194,8 +197,10 @@ def build_editable(wheel_directory, config_settings=None, metadata_directory=Non
     pth_paths = [
         # mlir.* namespace + _pto.so (installed there by CMake)
         str(_MLIR_PY_PKG),
-        # _pto.so output directory (CMAKE_LIBRARY_OUTPUT_DIRECTORY)
+        # generated files (_pto.so, _pto_ops_gen.py) under mlir/ namespace
         str(_BUILD_DIR / "python"),
+        # handwritten Python sources (pto/dialects/pto.py, etc.)
+        str(_REPO / "python"),
         # ptodsl pure-Python sub-package
         str(_REPO / "ptodsl"),
         # runtime resources installed by CMake (tilelang_dsl, TileOps, etc.)

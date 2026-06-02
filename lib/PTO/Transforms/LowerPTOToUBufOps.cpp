@@ -19,9 +19,11 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/Pass/Pass.h"
 
 #include "llvm/ADT/SmallVector.h"
@@ -60,15 +62,41 @@ static unsigned getElementSize(Type elemTy) {
   return 0;
 }
 
-static bool isUBMemorySpace(pto::TileBufType tbTy) {
-  auto msAttr =
-      dyn_cast_or_null<pto::AddressSpaceAttr>(tbTy.getMemorySpace());
-  if (!msAttr)
-    return false;
-  auto space = msAttr.getAddressSpace();
-  return space == pto::AddressSpace::VEC ||
-         space == pto::AddressSpace::SCALING ||
-         space == pto::AddressSpace::Zero;
+static Type getStoredElemType(Type ty) {
+  if (auto tbTy = dyn_cast<pto::TileBufType>(ty))
+    return tbTy.getElementType();
+  if (auto mrTy = dyn_cast<MemRefType>(ty))
+    return mrTy.getElementType();
+  if (auto ptrTy = dyn_cast<pto::PtrType>(ty))
+    return ptrTy.getElementType();
+  return Type();
+}
+
+/// Returns true if the type lives in UB (VEC) address space.
+static std::optional<bool> isUBMemorySpaceImpl(Type ty) {
+  if (auto tbTy = dyn_cast<pto::TileBufType>(ty)) {
+    auto msAttr =
+        dyn_cast_or_null<pto::AddressSpaceAttr>(tbTy.getMemorySpace());
+    if (!msAttr)
+      return false;
+    return msAttr.getAddressSpace() == pto::AddressSpace::VEC;
+  }
+  if (auto mrTy = dyn_cast<MemRefType>(ty)) {
+    auto msAttr =
+        dyn_cast_or_null<pto::AddressSpaceAttr>(mrTy.getMemorySpace());
+    if (!msAttr)
+      return false;
+    return msAttr.getAddressSpace() == pto::AddressSpace::VEC;
+  }
+  if (auto ptrTy = dyn_cast<pto::PtrType>(ty))
+    return ptrTy.getMemorySpace().getAddressSpace() == pto::AddressSpace::VEC;
+  return std::nullopt;
+}
+
+/// Returns true if the given type is confirmed UB memory space.
+static bool isUBMemorySpace(Type ty) {
+  auto result = isUBMemorySpaceImpl(ty);
+  return result.has_value() && result.value();
 }
 
 static bool isRowMajor(pto::TileBufType tbTy) {
@@ -104,25 +132,38 @@ struct TileShapeInfo {
   unsigned blockSizeElem;
 };
 
-static std::optional<TileShapeInfo> extractTileShapeInfo(pto::TAddOp op) {
-  auto dstTy = dyn_cast<pto::TileBufType>(op.getDst().getType());
-  auto src0Ty = dyn_cast<pto::TileBufType>(op.getSrc0().getType());
-  auto src1Ty = dyn_cast<pto::TileBufType>(op.getSrc1().getType());
-  if (!dstTy || !src0Ty || !src1Ty)
-    return std::nullopt;
-  if (!isUBMemorySpace(dstTy) || !isUBMemorySpace(src0Ty) ||
-      !isUBMemorySpace(src1Ty))
-    return std::nullopt;
-  if (!isRowMajor(dstTy) || !isRowMajor(src0Ty) || !isRowMajor(src1Ty))
+static std::optional<TileShapeInfo> extractTileShapeInfo(
+    pto::TAddOp op,
+    const DenseMap<Value, SmallVector<int64_t, 2>> &tileShapes) {
+  Type dstTy = op.getDst().getType();
+  if (!isUBMemorySpace(dstTy))
     return std::nullopt;
 
-  Type elemTy = dstTy.getElementType();
+  Type elemTy;
+  ArrayRef<int64_t> shape;
+  ArrayRef<int64_t> validShape;
+  if (auto tbTy = dyn_cast<pto::TileBufType>(op.getDst().getType())) {
+    elemTy = tbTy.getElementType();
+    shape = tbTy.getShape();
+    validShape = tbTy.getValidShape();
+    if (!isRowMajor(tbTy))
+      return std::nullopt;
+  } else if (auto mrTy = dyn_cast<MemRefType>(op.getDst().getType())) {
+    elemTy = mrTy.getElementType();
+    shape = mrTy.getShape();
+  } else if (isa<pto::PtrType>(op.getDst().getType())) {
+    auto it = tileShapes.find(op.getDst());
+    if (it == tileShapes.end())
+      return std::nullopt;
+    elemTy = cast<pto::PtrType>(op.getDst().getType()).getElementType();
+    shape = llvm::ArrayRef(it->second);
+  } else {
+    return std::nullopt;
+  }
   unsigned elemSize = getElementSize(elemTy);
   if (elemSize == 0)
     return std::nullopt;
 
-  auto shape = dstTy.getShape();
-  auto validShape = dstTy.getValidShape();
   if (shape.size() < 2)
     return std::nullopt;
 
@@ -149,8 +190,9 @@ static std::optional<TileShapeInfo> extractTileShapeInfo(pto::TAddOp op) {
   return info;
 }
 
-static bool canLower(pto::TAddOp op) {
-  return extractTileShapeInfo(op).has_value();
+static bool canLower(pto::TAddOp op,
+                     const DenseMap<Value, SmallVector<int64_t, 2>> &tileShapes) {
+  return extractTileShapeInfo(op, tileShapes).has_value();
 }
 
 //===----------------------------------------------------------------------===//
@@ -175,23 +217,55 @@ struct LowerPTOToUBufOpsPass
     MLIRContext *ctx = &getContext();
     OpBuilder builder(ctx);
 
+    // A3: sequential memory planning for alloc_tile buffers.  Must run first
+    // so tadd/tload/tstore lowering sees PtrType from CastPtrOp instead of
+    // tile_buf from AllocTileOp.
+    DenseMap<Value, SmallVector<int64_t, 2>> tileShapes;
+    {
+      SmallVector<pto::AllocTileOp> allocOps;
+      func.walk([&](pto::AllocTileOp op) { allocOps.push_back(op); });
+      uint64_t offset = 0;
+      for (auto op : allocOps) {
+        auto tbTy = cast<pto::TileBufType>(op.getResult().getType());
+        auto shape = tbTy.getShape();
+        uint64_t numElems = 1;
+        for (auto d : shape)
+          numElems *= d;
+        uint64_t elemSize = getElementSize(tbTy.getElementType());
+        uint64_t totalBytes = numElems * elemSize;
+        builder.setInsertionPoint(op);
+        auto addrConst = builder.create<arith::ConstantOp>(
+            op.getLoc(), builder.getI64IntegerAttr(offset));
+        auto ptrTy = pto::PtrType::get(
+            ctx, tbTy.getElementType(),
+            pto::AddressSpaceAttr::get(ctx, pto::AddressSpace::VEC));
+        auto pc = builder.create<pto::CastPtrOp>(
+            op.getLoc(), ptrTy, addrConst.getResult());
+        tileShapes[pc.getResult()] = SmallVector<int64_t, 2>(shape);
+        op.getResult().replaceAllUsesWith(pc.getResult());
+        op.erase();
+        offset += totalBytes;
+      }
+    }
+
     SmallVector<pto::TAddOp> taddOps;
     func.walk([&](pto::TAddOp op) { taddOps.push_back(op); });
 
     for (auto op : taddOps) {
-      if (!canLower(op))
+      if (!canLower(op, tileShapes))
         continue;
-      auto info = extractTileShapeInfo(op);
+      auto info = extractTileShapeInfo(op, tileShapes);
       if (!info)
         continue;
 
       builder.setInsertionPoint(op);
-      Type elemTy = cast<pto::TileBufType>(op.getDst().getType())
-                        .getElementType();
+      Type elemTy = getStoredElemType(op.getDst().getType());
       auto ptrType = getUBPtrType(ctx, elemTy);
       Location loc = op.getLoc();
 
       auto emitAddr = [&](Value tile) -> Value {
+        if (isa<pto::PtrType>(tile.getType()))
+          return tile; // Already a PTO pointer (e.g. from PointerCastOp)
         auto addrOp = builder.create<pto::TileBufAddrOp>(loc, ptrType, tile);
         return addrOp.getDst();
       };
@@ -201,6 +275,35 @@ struct LowerPTOToUBufOpsPass
       Value src1Ptr = emitAddr(op.getSrc1());
       dispatch(loc, builder, dstPtr, src0Ptr, src1Ptr, ptrType, *info);
       op.erase();
+    }
+
+    // ---- tload → mte_gm_ub ----
+    SmallVector<pto::TLoadOp> tloadOps;
+    func.walk([&](pto::TLoadOp op) { tloadOps.push_back(op); });
+    for (auto op : tloadOps) {
+      builder.setInsertionPoint(op);
+      if (succeeded(lowerTLoad(op, builder, tileShapes)))
+        op.erase();
+    }
+
+    // ---- tstore → mte_ub_gm ----
+    SmallVector<pto::TStoreOp> tstoreOps;
+    func.walk([&](pto::TStoreOp op) { tstoreOps.push_back(op); });
+    for (auto op : tstoreOps) {
+      builder.setInsertionPoint(op);
+      if (succeeded(lowerTStore(op, builder, tileShapes)))
+        op.erase();
+    }
+
+    // ---- cleanup dead PTO ops ----
+    SmallVector<Operation *> toErase;
+    func.walk([&](Operation *op) {
+      if (isa<pto::PartitionViewOp, pto::MakeTensorViewOp>(op))
+        toErase.push_back(op);
+    });
+    for (auto *op : llvm::reverse(toErase)) {
+      if (op->use_empty())
+        op->erase();
     }
   }
 
@@ -241,8 +344,220 @@ private:
   }
 
   Value addPtr(Location loc, OpBuilder &b, Value base, pto::PtrType ptrTy,
-               Value off) {
+                Value off) {
     return b.create<pto::AddPtrOp>(loc, ptrTy, base, off);
+  }
+
+  //===--------------------------------------------------------------------===//
+  // tload → mte_gm_ub / tstore → mte_ub_gm
+  //===--------------------------------------------------------------------===//
+
+  struct DmaViewInfo {
+    Value gmPtr;
+    SmallVector<Value> sizes;
+    SmallVector<Value> strides;
+    SmallVector<Value> offsets;
+  };
+
+  static FailureOr<DmaViewInfo> extractDmaViewInfo(pto::TLoadOp op) {
+    auto pvOp = op.getSrc().getDefiningOp<pto::PartitionViewOp>();
+    if (!pvOp)
+      return failure();
+    auto mtvOp = pvOp.getSource().getDefiningOp<pto::MakeTensorViewOp>();
+    if (!mtvOp)
+      return failure();
+    DmaViewInfo info;
+    info.gmPtr = mtvOp.getPtr();
+    info.sizes.assign(pvOp.getSizes().begin(), pvOp.getSizes().end());
+    info.strides.assign(mtvOp.getStrides().begin(),
+                        mtvOp.getStrides().end());
+    info.offsets.assign(pvOp.getOffsets().begin(), pvOp.getOffsets().end());
+    return info;
+  }
+
+  Value computeGMByteOffset(Location loc, OpBuilder &b,
+                            const DmaViewInfo &viewInfo, unsigned elemSize) {
+    Value totalOff = idxc0(loc, b);
+    for (size_t i = 0; i < viewInfo.offsets.size() &&
+                       i < viewInfo.strides.size(); ++i) {
+      APInt constOff;
+      if (matchPattern(viewInfo.offsets[i], m_ConstantInt(&constOff)) &&
+          constOff.isZero())
+        continue;
+      Value dimOff = b.create<arith::MulIOp>(loc, viewInfo.offsets[i],
+                                             viewInfo.strides[i]).getResult();
+      totalOff = b.create<arith::AddIOp>(loc, totalOff, dimOff).getResult();
+    }
+    if (elemSize > 1)
+      totalOff = b.create<arith::MulIOp>(loc, totalOff,
+                                         idxc(elemSize, loc, b)).getResult();
+    return totalOff;
+  }
+
+  Value offsetGMPtrByBytes(Location loc, OpBuilder &b, Value gmPtr,
+                           Value byteOff) {
+    APInt constOff;
+    if (matchPattern(byteOff, m_ConstantInt(&constOff)) && constOff.isZero())
+      return gmPtr;
+    auto origPtrTy = cast<pto::PtrType>(gmPtr.getType());
+    auto bytePtrTy = pto::PtrType::get(b.getContext(), b.getI8Type(),
+                                       origPtrTy.getMemorySpace());
+    Value bytePtr = b.create<pto::CastPtrOp>(loc, bytePtrTy, gmPtr);
+    Value offIdx = byteOff;
+    if (!offIdx.getType().isIndex())
+      offIdx = b.create<arith::IndexCastOp>(loc, b.getIndexType(), byteOff)
+                   .getResult();
+    Value offsetBytePtr =
+        b.create<pto::AddPtrOp>(loc, bytePtrTy, bytePtr, offIdx);
+    return b.create<pto::CastPtrOp>(loc, origPtrTy, offsetBytePtr);
+  }
+
+  Value i64Cast(Location loc, OpBuilder &b, Value indexVal) {
+    return b.create<arith::IndexCastOp>(loc, b.getI64Type(), indexVal)
+        .getResult();
+  }
+
+  LogicalResult emitMteGmUb(Location loc, OpBuilder &b, Value gmPtr,
+                             Value ubPtr, const DmaViewInfo &viewInfo,
+                             Type elemTy, ArrayRef<int64_t> tileShape) {
+    if (tileShape.size() < 2) return failure();
+    int64_t ubCols = tileShape[1];
+    unsigned elemSize = getElementSize(elemTy);
+    unsigned nd = viewInfo.sizes.size();
+    if (nd < 2) return failure();
+
+    Value nburstCount = viewInfo.sizes[nd - 2];
+    Value lenBurstElts = viewInfo.sizes[nd - 1];
+    Value lenBurst = b.create<arith::MulIOp>(loc,
+        b.create<arith::IndexCastOp>(loc, b.getI64Type(), lenBurstElts)
+            .getResult(), i64c(elemSize, loc, b)).getResult();
+    Value nburstSrcStride = b.create<arith::MulIOp>(loc,
+        b.create<arith::IndexCastOp>(loc, b.getI64Type(),
+            viewInfo.strides[nd - 2]).getResult(),
+        i64c(elemSize, loc, b)).getResult();
+    Value ubRowStride = b.create<arith::MulIOp>(loc, i64c(ubCols, loc, b),
+                                                i64c(elemSize, loc, b)).getResult();
+    pto::DmaLoopConfig nburst{i64Cast(loc, b, nburstCount),
+                              nburstSrcStride, ubRowStride};
+
+    SmallVector<pto::DmaLoopConfig> loops;
+    for (int i = nd - 3; i >= 0; --i) {
+      Value count = b.create<arith::IndexCastOp>(loc, b.getI64Type(),
+          viewInfo.sizes[i]).getResult();
+      Value srcStride = b.create<arith::MulIOp>(loc,
+          b.create<arith::IndexCastOp>(loc, b.getI64Type(),
+              viewInfo.strides[i]).getResult(),
+          i64c(elemSize, loc, b)).getResult();
+      Value innerElems = i64c1(loc, b);
+      for (int j = i + 1; j < (int)nd; ++j) {
+        Value dimSize = b.create<arith::IndexCastOp>(loc, b.getI64Type(),
+            viewInfo.sizes[j]).getResult();
+        innerElems = b.create<arith::MulIOp>(loc, innerElems, dimSize).getResult();
+      }
+      Value dstStride = b.create<arith::MulIOp>(loc, innerElems,
+          i64c(elemSize, loc, b)).getResult();
+      loops.push_back({count, srcStride, dstStride});
+    }
+    b.create<pto::MteGmUbOp>(loc, gmPtr, ubPtr, i64c0(loc, b), lenBurst,
+        nburst, llvm::ArrayRef(loops), std::nullopt);
+    return success();
+  }
+
+  LogicalResult emitMteUbGm(Location loc, OpBuilder &b, Value ubPtr,
+                             Value gmPtr, const DmaViewInfo &viewInfo,
+                             Type elemTy, ArrayRef<int64_t> tileShape) {
+    if (tileShape.size() < 2) return failure();
+    int64_t ubCols = tileShape[1];
+    unsigned elemSize = getElementSize(elemTy);
+    unsigned nd = viewInfo.sizes.size();
+    if (nd < 2) return failure();
+
+    Value nburstCount = viewInfo.sizes[nd - 2];
+    Value lenBurstElts = viewInfo.sizes[nd - 1];
+    Value lenBurst = b.create<arith::MulIOp>(loc,
+        b.create<arith::IndexCastOp>(loc, b.getI64Type(), lenBurstElts)
+            .getResult(), i64c(elemSize, loc, b)).getResult();
+    Value nburstSrcStride = b.create<arith::MulIOp>(loc,
+        i64c(ubCols, loc, b), i64c(elemSize, loc, b)).getResult();
+    Value nburstDstStride = b.create<arith::MulIOp>(loc,
+        b.create<arith::IndexCastOp>(loc, b.getI64Type(),
+            viewInfo.strides[nd - 2]).getResult(),
+        i64c(elemSize, loc, b)).getResult();
+    pto::DmaLoopConfig nburst{i64Cast(loc, b, nburstCount),
+                              nburstSrcStride, nburstDstStride};
+
+    SmallVector<pto::DmaLoopConfig> loops;
+    for (int i = nd - 3; i >= 0; --i) {
+      Value count = b.create<arith::IndexCastOp>(loc, b.getI64Type(),
+          viewInfo.sizes[i]).getResult();
+      Value innerElems = i64c1(loc, b);
+      for (int j = i + 1; j < (int)nd; ++j) {
+        Value dimSize = b.create<arith::IndexCastOp>(loc, b.getI64Type(),
+            viewInfo.sizes[j]).getResult();
+        innerElems = b.create<arith::MulIOp>(loc, innerElems, dimSize).getResult();
+      }
+      Value srcStride = b.create<arith::MulIOp>(loc, innerElems,
+          i64c(elemSize, loc, b)).getResult();
+      Value dstStride = b.create<arith::MulIOp>(loc,
+          b.create<arith::IndexCastOp>(loc, b.getI64Type(),
+              viewInfo.strides[i]).getResult(),
+          i64c(elemSize, loc, b)).getResult();
+      loops.push_back({count, srcStride, dstStride});
+    }
+    b.create<pto::MteUbGmOp>(loc, ubPtr, gmPtr, lenBurst, nburst,
+                             llvm::ArrayRef(loops));
+    return success();
+  }
+
+  LogicalResult lowerTLoad(pto::TLoadOp op, OpBuilder &b,
+                            const DenseMap<Value, SmallVector<int64_t, 2>> &tileShapes) {
+    Location loc = op.getLoc();
+    auto viewInfo = extractDmaViewInfo(op);
+    if (failed(viewInfo)) return failure();
+    Type dstType = op.getDst().getType();
+    if (!isUBMemorySpace(dstType)) return failure();
+    Type elemTy = getStoredElemType(dstType);
+    if (!elemTy) return failure();
+    unsigned elemSize = getElementSize(elemTy);
+    if (elemSize == 0) return failure();
+
+    auto it = tileShapes.find(op.getDst());
+    if (it == tileShapes.end()) return failure();
+
+    Value byteOff = computeGMByteOffset(loc, b, *viewInfo, elemSize);
+    Value gmPtr = offsetGMPtrByBytes(loc, b, viewInfo->gmPtr, byteOff);
+    return emitMteGmUb(loc, b, gmPtr, op.getDst(), *viewInfo, elemTy,
+                       llvm::ArrayRef(it->second));
+  }
+
+  LogicalResult lowerTStore(pto::TStoreOp op, OpBuilder &b,
+                             const DenseMap<Value, SmallVector<int64_t, 2>> &tileShapes) {
+    Location loc = op.getLoc();
+    Type srcType = op.getSrc().getType();
+    if (!isUBMemorySpace(srcType)) return failure();
+    Type elemTy = getStoredElemType(srcType);
+    if (!elemTy) return failure();
+    unsigned elemSize = getElementSize(elemTy);
+    if (elemSize == 0) return failure();
+
+    auto it = tileShapes.find(op.getSrc());
+    if (it == tileShapes.end()) return failure();
+
+    auto pvOp = op.getDst().getDefiningOp<pto::PartitionViewOp>();
+    if (!pvOp) return failure();
+    auto mtvOp = pvOp.getSource().getDefiningOp<pto::MakeTensorViewOp>();
+    if (!mtvOp) return failure();
+
+    DmaViewInfo viewInfo;
+    viewInfo.gmPtr = mtvOp.getPtr();
+    viewInfo.sizes.assign(pvOp.getSizes().begin(), pvOp.getSizes().end());
+    viewInfo.strides.assign(mtvOp.getStrides().begin(), mtvOp.getStrides().end());
+    viewInfo.offsets.assign(pvOp.getOffsets().begin(), pvOp.getOffsets().end());
+
+    Value byteOff = computeGMByteOffset(loc, b, viewInfo, elemSize);
+    Value gmPtr = offsetGMPtrByBytes(loc, b, viewInfo.gmPtr, byteOff);
+    return emitMteUbGm(loc, b, op.getSrc(), gmPtr, viewInfo, elemTy,
+                       llvm::ArrayRef(it->second));
   }
 
   //===--------------------------------------------------------------------===//

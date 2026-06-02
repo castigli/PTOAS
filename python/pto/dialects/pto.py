@@ -13,7 +13,10 @@ from pathlib import Path
 
 from mlir import ir as _ods_ir
 
-from . import _pto_ops_gen as _pto_ops_gen
+try:
+    from . import _pto_ops_gen as _pto_ops_gen
+except ImportError:
+    from mlir.dialects import _pto_ops_gen as _pto_ops_gen
 
 
 def _load_local_pto_ext():
@@ -33,7 +36,10 @@ def _load_local_pto_ext():
 try:
     _pto_mod = _load_local_pto_ext()
 except Exception:
-    _pto_mod = importlib.import_module(".._mlir_libs._pto", __package__)
+    try:
+        _pto_mod = importlib.import_module(".._mlir_libs._pto", __package__)
+    except ImportError:
+        _pto_mod = importlib.import_module("mlir._mlir_libs._pto")
 
 
 def _export_generated_symbols():
