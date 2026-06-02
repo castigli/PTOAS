@@ -41,9 +41,29 @@ _PTO_INSTALL_DIR = Path(
     os.environ.get("PTO_INSTALL_DIR", str(_REPO / "install"))
 )
 _BUILD_DIR = Path(os.environ.get("PTO_BUILD_DIR", str(_REPO / "build")))
-_MLIR_PY_PKG = (
-    _LLVM_BUILD_DIR / "tools" / "mlir" / "python_packages" / "mlir_core"
-)
+
+
+def _find_mlir_python_package(prefix: Path) -> Path:
+    """Return the MLIR python package directory under *prefix*.
+
+    Handles both build-tree layouts (``tools/mlir/python_packages/mlir_core``)
+    and install-prefix layouts (``python_packages/mlir_core``).
+    """
+    candidates = [
+        prefix / "tools" / "mlir" / "python_packages" / "mlir_core",
+        prefix / "python_packages" / "mlir_core",
+    ]
+    for cand in candidates:
+        if cand.is_dir():
+            return cand
+
+    tried = "\n  ".join(str(c) for c in candidates)
+    raise FileNotFoundError(
+        f"Cannot find MLIR python package under {prefix}. Tried:\n  {tried}"
+    )
+
+
+_MLIR_PY_PKG = _find_mlir_python_package(_LLVM_BUILD_DIR)
 _WHEEL_DIST_DIR = _BUILD_DIR / "wheel-dist"
 
 
@@ -92,8 +112,8 @@ def build_sdist(sdist_directory, config_settings=None):
     )
 
 
-def _cmake_configure_and_build():
-    """CMake configure + Ninja build + install."""
+def _cmake_configure_and_build(skip_install=False):
+    """CMake configure + Ninja build (+ install unless *skip_install*)."""
     _BUILD_DIR.mkdir(parents=True, exist_ok=True)
 
     pybind11_dir = subprocess.check_output(
@@ -104,6 +124,7 @@ def _cmake_configure_and_build():
         "cmake", "-GNinja",
         f"-S{_REPO}", f"-B{_BUILD_DIR}",
         "-DCMAKE_BUILD_TYPE=Release",
+        "-DPTO_ENABLE_PYTHON_BINDING=ON",
         f"-DLLVM_DIR={_LLVM_BUILD_DIR}/lib/cmake/llvm",
         f"-DMLIR_DIR={_LLVM_BUILD_DIR}/lib/cmake/mlir",
         f"-DPython3_ROOT_DIR={sys.prefix}",
@@ -124,7 +145,8 @@ def _cmake_configure_and_build():
 
     subprocess.check_call(cmake_cmd)
     subprocess.check_call(["ninja", "-C", str(_BUILD_DIR)])
-    subprocess.check_call(["ninja", "-C", str(_BUILD_DIR), "install"])
+    if not skip_install:
+        subprocess.check_call(["ninja", "-C", str(_BUILD_DIR), "install"])
 
 
 def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
@@ -164,7 +186,7 @@ def build_editable(wheel_directory, config_settings=None, metadata_directory=Non
     installs a .pth file pointing sys.path at the build tree.  No files are
     copied into site-packages except the .pth file itself.
     """
-    _cmake_configure_and_build()
+    _cmake_configure_and_build(skip_install=True)
 
     version = os.environ.get("PTOAS_PYTHON_PACKAGE_VERSION", "0.1.0")
 
@@ -176,6 +198,8 @@ def build_editable(wheel_directory, config_settings=None, metadata_directory=Non
         str(_BUILD_DIR / "python"),
         # ptodsl pure-Python sub-package
         str(_REPO / "ptodsl"),
+        # runtime resources installed by CMake (tilelang_dsl, TileOps, etc.)
+        str(_PTO_INSTALL_DIR),
     ]
 
     pth_content = "\n".join(pth_paths) + "\n"
