@@ -44,8 +44,8 @@ def PTO_ScalingPtrType : Type<
   CPred<"::llvm::isa<::mlir::pto::PtrType>($_self) && "
         "::llvm::cast<::mlir::pto::PtrType>($_self).getMemorySpace().getAddressSpace() == ::mlir::pto::AddressSpace::SCALING">,
   "scaling pointer type">;
-def PTO_BufferLikeType : AnyTypeOf<[AnyMemRef, PTO_BufferType],
-                                    "memref or pointer-like buffer type">;
+def PTO_BufferLikeType : AnyTypeOf<[PTO_BufferType, AnyMemRef],
+                                    "pointer-like or memref buffer type">;
 def PTO_AccStorePayloadType : AnyTypeOf<[AnySignlessInteger, AnyFloat, PTO_ScalingPtrType],
                                         "signless integer, float scalar, or scaling pointer">;
 def PTO_AccStoreClipPayloadType : AnyTypeOf<[AnyInteger, AnyFloat],

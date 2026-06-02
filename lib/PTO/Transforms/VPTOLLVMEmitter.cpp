@@ -25,6 +25,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Func/Transforms/FuncConversions.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/Transforms/Patterns.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -8813,21 +8814,76 @@ public:
   matchAndRewrite(UnrealizedConversionCastOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     if (op->getNumOperands() != 1 || op->getNumResults() != 1)
-      return failure();
+      return rewriter.notifyMatchFailure(op, "expected single-operand single-result cast");
+
     if (!hasVPTOConvertibleType(op->getOperandTypes()) &&
         !hasVPTOConvertibleType(op->getResultTypes()))
-      return failure();
+      return rewriter.notifyMatchFailure(op, "no VPTO convertible types");
 
     Type convertedResultType =
         getTypeConverter()->convertType(op.getResult(0).getType());
     if (!convertedResultType)
-      return failure();
+      return rewriter.notifyMatchFailure(op, "could not convert result type");
 
     Value input = adaptor.getOperands().front();
     if (input.getType() != convertedResultType)
-      return failure();
+      return rewriter.notifyMatchFailure(op, "input type does not match converted result type");
 
     rewriter.replaceOp(op, input);
+    return success();
+  }
+};
+
+class ConvertPtoTileBufAddrOp final
+    : public OpConversionPattern<pto::TileBufAddrOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(pto::TileBufAddrOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Type convertedResultType =
+        getTypeConverter()->convertType(op.getResult().getType());
+    auto llvmPtrType = dyn_cast<LLVM::LLVMPointerType>(convertedResultType);
+    if (!llvmPtrType)
+      return rewriter.notifyMatchFailure(op, "expected LLVM pointer result");
+
+    Value input = adaptor.getSrc();
+    if (isa<MemRefType>(input.getType())) {
+      Value alignedIdx =
+          rewriter.create<memref::ExtractAlignedPointerAsIndexOp>(
+              op.getLoc(), rewriter.getIndexType(), input);
+      Value i64 = rewriter.create<arith::IndexCastUIOp>(
+          op.getLoc(), rewriter.getI64Type(), alignedIdx);
+      rewriter.replaceOpWithNewOp<LLVM::IntToPtrOp>(op, llvmPtrType, i64);
+      return success();
+    }
+
+    return rewriter.notifyMatchFailure(op, "unsupported tilebuf address source");
+  }
+};
+
+class ConvertPointerCastToCastPtrOp final
+    : public OpConversionPattern<pto::PointerCastOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(pto::PointerCastOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (adaptor.getAddrs().empty())
+      return rewriter.notifyMatchFailure(op, "expected at least one address");
+
+    auto memref = dyn_cast<MemRefType>(op.getResult().getType());
+    if (!memref)
+      return rewriter.notifyMatchFailure(op, "expected memref result type");
+
+    auto ptrTy = pto::PtrType::get(rewriter.getContext(),
+        memref.getElementType(),
+        pto::AddressSpaceAttr::get(rewriter.getContext(), pto::AddressSpace::VEC));
+
+    rewriter.replaceOpWithNewOp<pto::CastPtrOp>(op, ptrTy,
+                                                adaptor.getAddrs().front());
     return success();
   }
 };
@@ -8864,8 +8920,8 @@ public:
   LogicalResult
   matchAndRewrite(pto::CastPtrOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    Type convertedResultType =
-        getTypeConverter()->convertType(op.getResult().getType());
+    Type resultType = op.getResult().getType();
+    Type convertedResultType = getTypeConverter()->convertType(resultType);
     if (!convertedResultType)
       return rewriter.notifyMatchFailure(op,
                                          "could not convert castptr result type");
@@ -8882,10 +8938,19 @@ public:
         rewriter.replaceOpWithNewOp<LLVM::IntToPtrOp>(op, llvmPtrType, input);
         return success();
       }
+      if (isa<MemRefType>(inputType)) {
+        Value alignedIdx =
+            rewriter.create<memref::ExtractAlignedPointerAsIndexOp>(
+                op.getLoc(), rewriter.getIndexType(), input);
+        Value i64 = rewriter.create<arith::IndexCastUIOp>(
+            op.getLoc(), rewriter.getI64Type(), alignedIdx);
+        rewriter.replaceOpWithNewOp<LLVM::IntToPtrOp>(op, llvmPtrType, i64);
+        return success();
+      }
       auto sourcePtrType = dyn_cast<LLVM::LLVMPointerType>(inputType);
       if (!sourcePtrType)
         return rewriter.notifyMatchFailure(op,
-                                           "expected integer or LLVM pointer input");
+                                           "expected integer, memref, or LLVM pointer input");
       if (sourcePtrType.getAddressSpace() == llvmPtrType.getAddressSpace()) {
         rewriter.replaceOpWithNewOp<LLVM::BitcastOp>(op, llvmPtrType, input);
         return success();
@@ -9500,10 +9565,17 @@ static void configureVPTOOpLoweringTarget(ConversionTarget &target,
                                           const std::string &march) {
   (void)typeConverter;
   target.addLegalOp<ModuleOp>();
+  target.addLegalOp<func::FuncOp>();
+  target.addLegalOp<pto::TileBufAddrOp>();
+  target.addLegalOp<pto::AddPtrOp>();
   target.addLegalDialect<arith::ArithDialect, cf::ControlFlowDialect,
                          LLVM::LLVMDialect,
                          func::FuncDialect, scf::SCFDialect>();
-  target.addLegalOp<UnrealizedConversionCastOp>();
+  target.addDynamicallyLegalOp<UnrealizedConversionCastOp>(
+      [](UnrealizedConversionCastOp op) {
+        return !hasVPTOConvertibleType(op->getOperandTypes()) &&
+               !hasVPTOConvertibleType(op->getResultTypes());
+      });
   target.addIllegalOp<pto::SetFlagOp, pto::WaitFlagOp, pto::SetFlagDynOp, pto::WaitFlagDynOp, pto::SyncSetOp,
                       pto::SyncWaitOp, pto::BarrierOp, pto::MemBarOp,
                       pto::GetBufOp, pto::RlsBufOp>();
@@ -9649,6 +9721,7 @@ static LogicalResult lowerVPTOOps(ModuleOp module,
 
   configureVPTOOpLoweringTarget(target, typeConverter, march);
   populateVPTOOpLoweringPatterns(typeConverter, patterns, state, march);
+  patterns.add<ConvertVPTOUnrealizedCastOp>(typeConverter, context);
 
   if (failed(applyPartialConversion(module, target, std::move(patterns)))) {
     diagOS << "VPTO LLVM emission failed: VPTO op lowering failed\n";
@@ -9667,6 +9740,7 @@ static LogicalResult lowerVPTOTypes(ModuleOp module, llvm::raw_ostream &diagOS) 
   LoweringState state;
 
   target.addLegalOp<ModuleOp>();
+  target.addLegalOp<pto::AddPtrOp>();
   target.addDynamicallyLegalOp<func::FuncOp>([&](func::FuncOp op) {
     return typeConverter.isSignatureLegal(op.getFunctionType()) &&
            typeConverter.isLegal(&op.getBody());
@@ -9680,7 +9754,7 @@ static LogicalResult lowerVPTOTypes(ModuleOp module, llvm::raw_ostream &diagOS) 
         return isLegalForBranchOpInterfaceTypeConversionPattern(op,
                                                                 typeConverter);
       });
-  target.addIllegalOp<pto::AddPtrOp, pto::CastPtrOp, pto::LoadScalarOp,
+  target.addIllegalOp<pto::PointerCastOp, pto::AddPtrOp, pto::LoadScalarOp,
                       pto::StoreScalarOp, pto::PTOLoadOp, pto::PTOStoreOp,
                       pto::PTOLdgOp, pto::PTOStgOp>();
   target.addDynamicallyLegalOp<UnrealizedConversionCastOp>(
@@ -9695,10 +9769,8 @@ static LogicalResult lowerVPTOTypes(ModuleOp module, llvm::raw_ostream &diagOS) 
 
   populateVPTOStructuralTypePatterns(typeConverter, patterns, target);
   patterns.add<ConvertPtoAddPtrOp, ConvertPtoCastPtrOp, ConvertPtoLoadScalarOp,
-               ConvertPtoStoreScalarOp>(typeConverter, context);
-  patterns.add<ConvertPtoLoadOp, ConvertPtoStoreOp, ConvertPtoLdgOp,
-               ConvertPtoStgOp>(
-      typeConverter, context, state);
+               ConvertPtoStoreScalarOp, ConvertPtoLoadOp, ConvertPtoStoreOp>(
+      typeConverter, context);
   patterns.add<ConvertVPTOUnrealizedCastOp>(typeConverter, context);
   patterns.add<ConvertVPTOTypedCarrierOp>(typeConverter, context);
 
@@ -10007,6 +10079,7 @@ static LogicalResult runPipeline(ModuleOp module, llvm::raw_ostream &diagOS,
   kernelModulePM.addPass(std::make_unique<LowerVPTOTypesPass>());
   kernelModulePM.addPass(
       std::make_unique<NormalizeFuncSignaturesForLLVMLoweringPass>());
+  kernelModulePM.addPass(createReconcileUnrealizedCastsPass());
   kernelModulePM.addPass(arith::createArithExpandOpsPass());
   kernelModulePM.addPass(createConvertSCFToCFPass());
   kernelModulePM.addPass(createArithToLLVMConversionPass());

@@ -13,7 +13,10 @@ from pathlib import Path
 
 from mlir import ir as _ods_ir
 
-from . import _pto_ops_gen as _pto_ops_gen
+try:
+    from . import _pto_ops_gen as _pto_ops_gen
+except ImportError:
+    from mlir.dialects import _pto_ops_gen as _pto_ops_gen
 
 
 def _load_local_pto_ext():

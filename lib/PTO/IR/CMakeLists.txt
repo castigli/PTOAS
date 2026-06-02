@@ -27,7 +27,7 @@ add_mlir_dialect_library(PTOIR
   DEPENDS
   PTOOpsIncGen  # 对应 include/PTO/IR/CMakeLists.txt 里定义的那个目标
 
-  LINK_LIBS PUBLIC
+  LINK_LIBS PRIVATE
   MLIRIR
   MLIRFuncDialect
   MLIRMemRefDialect
