@@ -48,7 +48,7 @@ def PtrOrMemRef :
   AnyTypeOf<[PtrType, AnyMemRef], "Ptr or MemRef">;
 
 def TileBufOrMemRef :
-  AnyTypeOf<[TileBufType, AnyMemRef], "TileBuf or MemRef">;
+  AnyTypeOf<[PtrType, TileBufType, AnyMemRef], "Ptr, TileBuf or MemRef">;
 
 def ScalarPtrOrMemRef :
   TypeConstraint<

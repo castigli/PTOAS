@@ -32,17 +32,40 @@ import zipfile
 from pathlib import Path
 
 _REPO = Path(__file__).parent.resolve()
-_LLVM_BUILD_DIR = Path(
-    os.environ.get("LLVM_BUILD_DIR",
-                   "/llvm-workspace/llvm-project/build-shared")
-)
+
+def _find_llvm_dir():
+    """Return an LLVM install or build-tree prefix, resolving in order:
+
+    1. ``LLVM_BUILD_DIR`` / ``LLVM_INSTALL_DIR`` env vars
+    2. Auto-detect common install locations by probing ``lib/cmake/llvm``
+    3. Default build-tree path
+    """
+    for key in ("LLVM_BUILD_DIR", "LLVM_INSTALL_DIR"):
+        if key in os.environ:
+            return Path(os.environ[key])
+
+    for cand in ("/usr/local/llvm", "/usr/local/Ascend/latest/compiler",
+                 "/opt/llvm"):
+        if (Path(cand) / "lib" / "cmake" / "llvm").is_dir():
+            return Path(cand)
+
+    return Path("/llvm-workspace/llvm-project/build-shared")
+
+
+_LLVM_BUILD_DIR = _find_llvm_dir()
 _PTO_INSTALL_DIR = Path(
     os.environ.get("PTO_INSTALL_DIR", str(_REPO / "install"))
 )
 _BUILD_DIR = _REPO / "build"
-_MLIR_PY_PKG = (
-    _LLVM_BUILD_DIR / "tools" / "mlir" / "python_packages" / "mlir_core"
-)
+_MLIR_PY_PKG = None
+if "MLIR_PYTHON_PACKAGE_DIR" in os.environ:
+    _MLIR_PY_PKG = Path(os.environ["MLIR_PYTHON_PACKAGE_DIR"])
+elif "LLVM_INSTALL_DIR" in os.environ:
+    _MLIR_PY_PKG = Path(os.environ["LLVM_INSTALL_DIR"]) / "python_packages" / "mlir_core"
+else:
+    _installed = _LLVM_BUILD_DIR / "python_packages" / "mlir_core"
+    _build_tree = _LLVM_BUILD_DIR / "tools" / "mlir" / "python_packages" / "mlir_core"
+    _MLIR_PY_PKG = _installed if _installed.exists() else _build_tree
 
 
 def get_requires_for_build_wheel(config_settings=None):
@@ -194,8 +217,8 @@ def build_editable(wheel_directory, config_settings=None, metadata_directory=Non
     pth_paths = [
         # mlir.* namespace + _pto.so (installed there by CMake)
         str(_MLIR_PY_PKG),
-        # _pto.so output directory (CMAKE_LIBRARY_OUTPUT_DIRECTORY)
-        str(_BUILD_DIR / "python" / "pto"),
+        # generated files (_pto.so, _pto_ops_gen.py) under mlir/ namespace
+        str(_BUILD_DIR / "python"),
         # handwritten Python sources (pto/dialects/pto.py, etc.)
         str(_REPO / "python"),
         # ptodsl pure-Python sub-package

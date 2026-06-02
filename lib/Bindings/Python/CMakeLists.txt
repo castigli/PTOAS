@@ -31,24 +31,8 @@ target_include_directories(_pto PRIVATE
 target_link_options(_pto PRIVATE)
 
 target_link_libraries(_pto PRIVATE
-
   PTOCAPI
   PTOIR
-  MLIRIR
-  MLIRCAPIIR
-  MLIRSupport
-  MLIRArithDialect
-  MLIRMemRefDialect
-  MLIRSCFDialect
-  MLIRDestinationStyleOpInterface
-  MLIRInferTypeOpInterface
-  MLIRSideEffectInterfaces
-  MLIRCallInterfaces
-  MLIRControlFlowInterfaces
-  MLIRLoopLikeInterface
-  MLIRViewLikeInterface
-  MLIRFunctionInterfaces
-  MLIRLLVMDialect
 )
 
 # 关键：放到 mlir/_mlir_libs 下（匹配 MLIR dialect python 的 import 习惯）
