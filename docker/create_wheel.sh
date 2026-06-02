@@ -80,6 +80,10 @@ echo "Overlaying PTO native extension..."
 mkdir -p "${WHEEL_STAGING_DIR}/mlir/_mlir_libs"
 cp "${PTO_INSTALL_DIR}/mlir/_mlir_libs"/_pto* "${WHEEL_STAGING_DIR}/mlir/_mlir_libs/"
 
+echo "Copying ptoas binary..."
+mkdir -p "${WHEEL_STAGING_DIR}/bin"
+cp "${PTO_INSTALL_DIR}/bin/ptoas" "${WHEEL_STAGING_DIR}/bin/ptoas"
+
 # Copy TileLang resources into the wheel staging tree so wheel installs keep
 # the template library and Python DSL available.
 echo "Copying TileLang resources..."

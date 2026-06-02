@@ -26,6 +26,7 @@ setup(
     name="ptoas",
     version=read_package_version(),
     description="PTO Assembler & Optimizer",
+    data_files=[("bin", ["bin/ptoas"])],
     # NOTE: find_namespace_packages detects folders even without __init__.py
     packages=find_namespace_packages(),
     # Include native libraries used by macOS wheels (.dylib), while keeping

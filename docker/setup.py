@@ -18,6 +18,7 @@ setup(
     name="ptoas",
     version=read_package_version(),
     description="PTO Assembler & Optimizer",
+    data_files=[("bin", ["bin/ptoas"])],
     # NOTE: find_namespace_packages detects folders even without __init__.py
     packages=find_namespace_packages(),
     # NOTE: The * at the end captures .so.22, .so.22.1, etc.
