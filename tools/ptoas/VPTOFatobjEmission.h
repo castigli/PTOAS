@@ -13,14 +13,12 @@
 
 namespace mlir::pto {
 
-inline LogicalResult emitVPTOFatobj(llvm::Module *cubeModule,
-                                    llvm::Module *vectorModule,
-                                    llvm::StringRef stubSource,
-                                    llvm::ToolOutputFile &outputFile,
-                                    llvm::raw_ostream &diagOS) {
-  return emitFatobjLLVMWithRuntime(cubeModule, vectorModule, stubSource,
-                                   outputFile, diagOS);
-}
+LogicalResult emitVPTOFatobj(llvm::Module *cubeModule,
+                             llvm::Module *vectorModule,
+                             llvm::StringRef stubSource,
+                             llvm::ToolOutputFile &outputFile,
+                             llvm::raw_ostream &diagOS,
+                             llvm::StringRef deviceTargetCPU);
 
 } // namespace mlir::pto
 

@@ -9,7 +9,7 @@
 //===- LowerPTOToUBufOps.cpp - Lower pto.tadd to pto.ub.vadd on a2a3 -----===//
 //===----------------------------------------------------------------------===//
 //
-// Lowers pto.tadd to pto.ub.vadd on a3 (dav-m200-vec). Uses the full CCE
+// Lowers pto.tadd to pto.ub.vadd on a3 (dav-c220-vec). Uses the full CCE
 // dispatch tree from TBinOp.hpp with all modes.
 //
 //===----------------------------------------------------------------------===//

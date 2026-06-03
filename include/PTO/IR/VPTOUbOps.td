@@ -20,7 +20,7 @@ class PTO_UBufBinaryOp<string mnemonic, list<Trait> traits = []>
       !listconcat(traits, [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>])> {
   let summary = "Raw ubuf binary operation mapping to llvm.hivm intrinsics.";
   let description = [{
-    Lowers to `llvm.hivm` intrinsics for the a2a3 (dav-m200-vec) backend.
+    Lowers to `llvm.hivm` intrinsics for the a2a3 (dav-c220-vec) backend.
     Operates directly on ubuf pointers rather than vreg values.
 
     The repeat / block-stride / repeat-stride operands are packed into a single

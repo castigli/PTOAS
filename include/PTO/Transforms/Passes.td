@@ -445,7 +445,7 @@ def FoldTileBufIntrinsics : Pass<"pto-fold-tile-buf-intrinsics", "mlir::func::Fu
 def LowerPTOToUBufOps : Pass<"pto-lower-to-ubuf-ops", "mlir::func::FuncOp"> {
   let summary = "Lower eligible pto.tadd to pto.ub.vadd on a2a3 targets";
   let description = [{
-    Converts pto.tadd on UB tiles to pto.ub.vadd when targeting a3 (dav-m200-vec).
+    Converts pto.tadd on UB tiles to pto.ub.vadd when targeting a3 (dav-c220-vec).
     Computes repeat count and repeat strides from the tile shape metadata and emits
     tile_buf_addr ops to extract UB pointers. pto.ub.vadd is later lowered to
     llvm.hivm.VADD.* by the VPTOLLVMEmitter.
