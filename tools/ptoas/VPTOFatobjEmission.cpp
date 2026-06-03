@@ -257,6 +257,7 @@ public:
 
   bool emitCubeObject(llvm::Module *module,
                       const VPTOFatobjToolchain &toolchain,
+                      llvm::StringRef targetCPU,
                       llvm::raw_ostream &diagOS) {
     if (!module)
       return true;
@@ -267,12 +268,13 @@ public:
     if (!tempFiles.create("ptoas-device", ".o", cubeObjPath, diagOS))
       return false;
     return compileDeviceLLVMToObject(cubeLLPath, cubeObjPath,
-                                     "dav-c310-cube", toolchain.bisheng(),
+                                     targetCPU, toolchain.bisheng(),
                                      stderrPath, diagOS);
   }
 
   bool emitVectorObject(llvm::Module *module,
                         const VPTOFatobjToolchain &toolchain,
+                        llvm::StringRef targetCPU,
                         llvm::raw_ostream &diagOS) {
     if (!module)
       return true;
@@ -283,7 +285,7 @@ public:
     if (!tempFiles.create("ptoas-device", ".o", vectorObjPath, diagOS))
       return false;
     return compileDeviceLLVMToObject(vectorLLPath, vectorObjPath,
-                                     "dav-c310-vec", toolchain.bisheng(),
+                                     targetCPU, toolchain.bisheng(),
                                      stderrPath, diagOS);
   }
 
@@ -543,11 +545,18 @@ mlir::LogicalResult mlir::pto::emitVPTOFatobj(llvm::Module *cubeModule,
                                               llvm::Module *vectorModule,
                                               llvm::StringRef stubSource,
                                               llvm::ToolOutputFile &outputFile,
-                                              llvm::raw_ostream &diagOS) {
+                                              llvm::raw_ostream &diagOS,
+                                              llvm::StringRef deviceTargetCPU) {
   if (!cubeModule && !vectorModule) {
     diagOS << "Error: VPTO fatobj emission requires at least one LLVM module.\n";
     return failure();
   }
+
+  std::string vectorCPU = deviceTargetCPU.str();
+  std::string cubeCPU = deviceTargetCPU.str();
+  size_t vecPos = cubeCPU.rfind("-vec");
+  if (vecPos != std::string::npos)
+    cubeCPU.replace(vecPos, 4, "-cube");
 
   std::optional<VPTOFatobjToolchain> toolchain =
       VPTOFatobjToolchain::create(diagOS);
@@ -561,9 +570,9 @@ mlir::LogicalResult mlir::pto::emitVPTOFatobj(llvm::Module *cubeModule,
   if (!artifacts.initCommandLogs(diagOS))
     return failure();
 
-  if (!artifacts.emitCubeObject(cubeModule, *toolchain, diagOS))
+  if (!artifacts.emitCubeObject(cubeModule, *toolchain, cubeCPU, diagOS))
     return failure();
-  if (!artifacts.emitVectorObject(vectorModule, *toolchain, diagOS))
+  if (!artifacts.emitVectorObject(vectorModule, *toolchain, vectorCPU, diagOS))
     return failure();
 
   if (!artifacts.mergeDeviceObjects(*toolchain, diagOS))

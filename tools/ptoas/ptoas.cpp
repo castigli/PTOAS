@@ -1512,7 +1512,7 @@ static pto::VPTOEmissionOptions buildVPTOEmissionOptions() {
   std::string arch = ptoTargetArch;
   for (char &c : arch)
     c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-  options.march = (arch == "a3") ? "dav-m200-vec" : "dav-c310-vec";
+  options.march = (arch == "a3") ? "dav-c220-vec" : "dav-c310-vec";
   return options;
 }
 
@@ -1543,7 +1543,8 @@ static int emitVPTOBackendResult(ModuleOp module,
 
   if (failed(pto::emitVPTOFatobj(cubeModule.module.get(),
                                  vectorModule.module.get(), stubSource,
-                                 outputFile, llvm::errs()))) {
+                                 outputFile, llvm::errs(),
+                                 options.march))) {
     llvm::errs() << "Error: Failed to emit VPTO fatobj.\n";
     return 1;
   }
