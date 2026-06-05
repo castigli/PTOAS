@@ -112,14 +112,14 @@ CASES = [
 ]
 
 
-# def init_torch_npu() -> None:
-#     import torch
-#     import torch_npu  # noqa: F401
+def init_torch_npu() -> None:
+    import torch
+    import torch_npu  # noqa: F401
 
-#     torch.npu.config.allow_internal_format = False
-#     torch_npu.npu.set_compile_mode(jit_compile=False)
-#     torch.npu.set_device(_DEVICE)
-#     return torch
+    torch.npu.config.allow_internal_format = False
+    torch_npu.npu.set_compile_mode(jit_compile=False)
+    torch.npu.set_device(_DEVICE)
+    return torch
 
 
 def npu_stream(torch):
@@ -154,11 +154,11 @@ def run_case(case: dict, torch) -> None:
     )
 
 
-# def test_tadd() -> None:
-#     torch = init_torch_npu()
-#     for case in CASES:
-#         run_case(case, torch)
-#     print("All cases passed.")
+def test_tadd() -> None:
+    torch = init_torch_npu()
+    for case in CASES:
+        run_case(case, torch)
+    print("All cases passed.")
 
 
 def main(argv=None) -> int:
@@ -170,11 +170,11 @@ def main(argv=None) -> int:
     )
     args = parser.parse_args(argv)
 
-    # if args.emit_mlir:
-    print(emit_mlir())
-        # return 0
+    if args.emit_mlir:
+        print(emit_mlir())
+        return 0
 
-    # test_tadd()
+    test_tadd()
     return 0
 
 

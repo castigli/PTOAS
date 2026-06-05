@@ -1305,9 +1305,7 @@ packCopyGmToUbCfgV220(Operation *anchor, ValueRange operands) {
   Value sid = getI64Operand(2);
   Value nBurst = getI64Operand(3);
   Value lenBurst = getI64Operand(4);
-  Value srcGap = getI64Operand(9);
-  Value dstGap = getI64Operand(10);
-  if (!sid || !nBurst || !lenBurst || !srcGap || !dstGap)
+  if (!sid || !nBurst || !lenBurst)
     return failure();
 
   auto shl = [&](Value value, uint64_t amount) -> Value {
@@ -1321,8 +1319,6 @@ packCopyGmToUbCfgV220(Operation *anchor, ValueRange operands) {
   Value cfg = sid;
   cfg = bitOr(cfg, shl(nBurst, 4));
   cfg = bitOr(cfg, shl(lenBurst, 16));
-  cfg = bitOr(cfg, shl(srcGap, 32));
-  cfg = bitOr(cfg, shl(dstGap, 48));
   return cfg;
 }
 
@@ -1399,9 +1395,7 @@ packCopyUbToGmCfgV220(Operation *anchor, ValueRange operands) {
   Value sid = getI64Operand(2);
   Value nBurst = getI64Operand(3);
   Value lenBurst = getI64Operand(4);
-  Value srcGap = getI64Operand(7);
-  Value dstGap = getI64Operand(6);
-  if (!sid || !nBurst || !lenBurst || !srcGap || !dstGap)
+  if (!sid || !nBurst || !lenBurst)
     return failure();
 
   auto shl = [&](Value value, uint64_t amount) -> Value {
@@ -1415,8 +1409,6 @@ packCopyUbToGmCfgV220(Operation *anchor, ValueRange operands) {
   Value cfg = sid;
   cfg = bitOr(cfg, shl(nBurst, 4));
   cfg = bitOr(cfg, shl(lenBurst, 16));
-  cfg = bitOr(cfg, shl(srcGap, 32));
-  cfg = bitOr(cfg, shl(dstGap, 48));
   return cfg;
 }
 
