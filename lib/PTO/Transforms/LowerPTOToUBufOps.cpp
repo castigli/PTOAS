@@ -185,7 +185,7 @@ static std::optional<TileShapeInfo> extractTileShapeInfo(
   info.cols = cols;
   info.rows = rows;
   info.elemSize = elemSize;
-  info.elementsPerRepeat = 128 / elemSize;
+  info.elementsPerRepeat = 256 / elemSize;
   info.blockSizeElem = 32 / elemSize;
   return info;
 }
@@ -225,6 +225,7 @@ struct LowerPTOToUBufOpsPass
       SmallVector<pto::AllocTileOp> allocOps;
       func.walk([&](pto::AllocTileOp op) { allocOps.push_back(op); });
       uint64_t offset = 0;
+      constexpr uint64_t ubBankAlignment = 65536;
       for (auto op : allocOps) {
         auto tbTy = cast<pto::TileBufType>(op.getResult().getType());
         auto shape = tbTy.getShape();
@@ -244,7 +245,8 @@ struct LowerPTOToUBufOpsPass
         tileShapes[pc.getResult()] = SmallVector<int64_t, 2>(shape);
         op.getResult().replaceAllUsesWith(pc.getResult());
         op.erase();
-        offset += totalBytes;
+        uint64_t paddedBytes = (totalBytes + ubBankAlignment - 1) / ubBankAlignment * ubBankAlignment;
+        offset += paddedBytes;
       }
     }
 
@@ -331,7 +333,48 @@ private:
             Value repeat, Value repStride) {
     b.create<pto::UBVaddOp>(loc, dst, s0, s1, repeat,
                             i64c1(loc, b), i64c1(loc, b), i64c1(loc, b),
-                            repStride, repStride, repStride);
+                            repStride, repStride, i64c0(loc, b));
+  }
+
+  void modeNorm1L(Location loc, OpBuilder &b, Value dst, Value s0, Value s1,
+                  pto::PtrType ptrTy, const TileShapeInfo &info) {
+    int64_t epr = info.elementsPerRepeat;
+    int64_t totalV = info.vRows * info.vCols;
+    int64_t headRepeats = totalV / epr;
+    int64_t tailElements = totalV % epr;
+
+    if (headRepeats > 1) {
+      auto forOp = b.create<scf::ForOp>(loc, idxc0(loc, b),
+                                         idxc(headRepeats, loc, b), idxc1(loc, b));
+      b.setInsertionPointToStart(forOp.getBody());
+      Value iv = forOp.getInductionVar();
+      Value off = b.create<arith::MulIOp>(loc, iv, idxc(epr, loc, b)).getResult();
+      Value rd = addPtr(loc, b, dst, ptrTy, off);
+      Value r0 = addPtr(loc, b, s0, ptrTy, off);
+      Value r1 = addPtr(loc, b, s1, ptrTy, off);
+      b.create<pto::UBSetMaskCountOp>(loc);
+      b.create<pto::UBSetMaskOp>(loc, i64c(epr, loc, b), i64c0(loc, b));
+      vadd(loc, b, rd, r0, r1, i64c1(loc, b), i64c8(loc, b));
+      b.create<pto::UBSetMaskNormOp>(loc);
+      b.setInsertionPointAfter(forOp);
+      if (tailElements > 0) {
+        Value offT = idxc(headRepeats * epr, loc, b);
+        Value td = addPtr(loc, b, dst, ptrTy, offT);
+        Value ts0 = addPtr(loc, b, s0, ptrTy, offT);
+        Value ts1 = addPtr(loc, b, s1, ptrTy, offT);
+        b.create<pto::UBSetMaskCountOp>(loc);
+        b.create<pto::UBSetMaskOp>(loc, i64c(tailElements, loc, b), i64c0(loc, b));
+        vadd(loc, b, td, ts0, ts1, i64c1(loc, b), i64c8(loc, b));
+        b.create<pto::UBSetMaskNormOp>(loc);
+      }
+      return;
+    }
+
+    b.create<pto::UBSetMaskCountOp>(loc);
+    b.create<pto::UBSetMaskOp>(loc, i64c(totalV, loc, b), i64c0(loc, b));
+    vadd(loc, b, dst, s0, s1, i64c1(loc, b), i64c8(loc, b));
+    b.create<pto::UBSetMaskNormOp>(loc);
+    fullMask(loc, b);
   }
 
   void setMask(Location loc, OpBuilder &b, unsigned n) {
@@ -340,7 +383,7 @@ private:
   }
 
   void fullMask(Location loc, OpBuilder &b) {
-    b.create<pto::UBSetMaskOp>(loc, i64cM1(loc, b), i64cM1(loc, b));
+    b.create<pto::UBSetMaskOp>(loc, i64cM1(loc, b), i64c0(loc, b));
   }
 
   Value addPtr(Location loc, OpBuilder &b, Value base, pto::PtrType ptrTy,
@@ -613,34 +656,29 @@ private:
   void modeSmall(Location loc, OpBuilder &b, Value dst, Value s0, Value s1,
                  pto::PtrType ptrTy, const TileShapeInfo &info) {
     int64_t rs = info.cols / static_cast<int64_t>(info.blockSizeElem);
-    setMask(loc, b, info.vCols);
-    vadd(loc, b, dst, s0, s1, i64c(info.vRows, loc, b), i64c(rs, loc, b));
-    fullMask(loc, b);
-  }
 
-  //===--------------------------------------------------------------------===//
-  // Bin1LNormMode – flat, stride=8, repeat≤255
-  //===--------------------------------------------------------------------===//
-
-  void modeNorm1L(Location loc, OpBuilder &b, Value dst, Value s0, Value s1,
-                  pto::PtrType ptrTy, const TileShapeInfo &info) {
-    int64_t totalV = info.vRows * info.vCols;
-    int64_t epr = info.elementsPerRepeat;
-    int64_t headRepeats = totalV / epr;
-    int64_t tailElements = totalV % epr;
-
-    if (headRepeats > 0)
-      vadd(loc, b, dst, s0, s1, i64c(headRepeats, loc, b), i64c8(loc, b));
-
-    if (tailElements > 0) {
-      Value off = idxc(headRepeats * epr, loc, b);
-      Value td = addPtr(loc, b, dst, ptrTy, off);
-      Value ts0 = addPtr(loc, b, s0, ptrTy, off);
-      Value ts1 = addPtr(loc, b, s1, ptrTy, off);
-      setMask(loc, b, tailElements);
-      vadd(loc, b, td, ts0, ts1, i64c1(loc, b), i64c8(loc, b));
-      fullMask(loc, b);
+    if (info.vRows > 1) {
+      auto forOp = b.create<scf::ForOp>(loc, idxc0(loc, b),
+                                         idxc(info.vRows, loc, b), idxc1(loc, b));
+      b.setInsertionPointToStart(forOp.getBody());
+      Value iv = forOp.getInductionVar();
+      Value off = b.create<arith::MulIOp>(loc, iv, idxc(info.cols, loc, b)).getResult();
+      Value rd = addPtr(loc, b, dst, ptrTy, off);
+      Value r0 = addPtr(loc, b, s0, ptrTy, off);
+      Value r1 = addPtr(loc, b, s1, ptrTy, off);
+      b.create<pto::UBSetMaskCountOp>(loc);
+      b.create<pto::UBSetMaskOp>(loc, i64c(info.vCols, loc, b), i64c0(loc, b));
+      vadd(loc, b, rd, r0, r1, i64c1(loc, b), i64c(rs, loc, b));
+      b.create<pto::UBSetMaskNormOp>(loc);
+      b.setInsertionPointAfter(forOp);
+      return;
     }
+
+    b.create<pto::UBSetMaskCountOp>(loc);
+    b.create<pto::UBSetMaskOp>(loc, i64c(info.vCols, loc, b), i64c0(loc, b));
+    vadd(loc, b, dst, s0, s1, i64c1(loc, b), i64c(rs, loc, b));
+    b.create<pto::UBSetMaskNormOp>(loc);
+    fullMask(loc, b);
   }
 
   //===--------------------------------------------------------------------===//

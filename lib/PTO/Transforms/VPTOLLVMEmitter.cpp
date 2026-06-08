@@ -1303,9 +1303,8 @@ packCopyGmToUbCfgV220(Operation *anchor, ValueRange operands) {
   };
 
   Value sid = getI64Operand(2);
-  Value nBurst = getI64Operand(3);
   Value lenBurst = getI64Operand(4);
-  if (!sid || !nBurst || !lenBurst)
+  if (!sid || !lenBurst)
     return failure();
 
   auto shl = [&](Value value, uint64_t amount) -> Value {
@@ -1317,8 +1316,18 @@ packCopyGmToUbCfgV220(Operation *anchor, ValueRange operands) {
   };
 
   Value cfg = sid;
-  cfg = bitOr(cfg, shl(nBurst, 4));
-  cfg = bitOr(cfg, shl(lenBurst, 16));
+  auto oneI64 = builder
+                    .create<arith::ConstantOp>(loc,
+                                               builder.getI64IntegerAttr(1))
+                    .getResult();
+  cfg = bitOr(cfg, shl(oneI64, 4));
+  auto bytesPer32B = builder
+                         .create<arith::ConstantOp>(
+                             loc, builder.getI64IntegerAttr(5))
+                         .getResult();
+  auto lenIn32B =
+      builder.create<arith::ShRUIOp>(loc, lenBurst, bytesPer32B).getResult();
+  cfg = bitOr(cfg, shl(lenIn32B, 16));
   return cfg;
 }
 
@@ -1393,9 +1402,8 @@ packCopyUbToGmCfgV220(Operation *anchor, ValueRange operands) {
   };
 
   Value sid = getI64Operand(2);
-  Value nBurst = getI64Operand(3);
   Value lenBurst = getI64Operand(4);
-  if (!sid || !nBurst || !lenBurst)
+  if (!sid || !lenBurst)
     return failure();
 
   auto shl = [&](Value value, uint64_t amount) -> Value {
@@ -1407,8 +1415,18 @@ packCopyUbToGmCfgV220(Operation *anchor, ValueRange operands) {
   };
 
   Value cfg = sid;
-  cfg = bitOr(cfg, shl(nBurst, 4));
-  cfg = bitOr(cfg, shl(lenBurst, 16));
+  auto oneI64 = builder
+                    .create<arith::ConstantOp>(loc,
+                                               builder.getI64IntegerAttr(1))
+                    .getResult();
+  cfg = bitOr(cfg, shl(oneI64, 4));
+  auto bytesPer32B = builder
+                         .create<arith::ConstantOp>(
+                             loc, builder.getI64IntegerAttr(5))
+                         .getResult();
+  auto lenIn32B =
+      builder.create<arith::ShRUIOp>(loc, lenBurst, bytesPer32B).getResult();
+  cfg = bitOr(cfg, shl(lenIn32B, 16));
   return cfg;
 }
 
@@ -4395,16 +4413,17 @@ public:
       return rewriter.notifyMatchFailure(
           op, "unexpected converted ubuf binary operand types");
 
-    // Pack the 7 stride/repeat fields into a single i64 config per
-    // cce_aicore_intrinsics_3101.h:
-    //   ((repeat & 0xff) << 56 | (dstBlockStride & 0xff) << 0  |
-    //    (src0BlockStride & 0xff) << 8  | (src1BlockStride & 0xff) << 16 |
-    //    (dstRepeatStride & 0xff) << 24 | (src0RepeatStride & 0xff) << 32 |
-    //    (src1RepeatStride & 0xff) << 40)
+    // A3/HVVM VADD packs byte fields from low to high and sets the high SIMD
+    // flag byte. This matches the CCE->HVVM reference lowering for dav-c220-vec.
     Location loc = op.getLoc();
     auto i64Ty = rewriter.getI64Type();
     auto getI64 = [&](Value v) -> Value {
       return castIntegerLikeTo(op, v, i64Ty);
+    };
+    auto maskByte = [&](Value v) -> Value {
+      return rewriter.create<arith::AndIOp>(
+          loc, v, rewriter.create<arith::ConstantOp>(
+                     loc, rewriter.getI64IntegerAttr(0xff)));
     };
     auto shl = [&](Value v, uint64_t amount) -> Value {
       return rewriter.create<arith::ShLIOp>(
@@ -4412,21 +4431,21 @@ public:
                        loc, rewriter.getI64IntegerAttr(amount)));
     };
     Value config = rewriter.create<arith::ConstantOp>(
-        loc, rewriter.getI64IntegerAttr(0));
-    Value repeat = getI64(adaptor.getRepeat());
-    config = rewriter.create<arith::OrIOp>(loc, config, shl(repeat, 56));
+        loc, rewriter.getI64IntegerAttr(1LL << 56));
     config = rewriter.create<arith::OrIOp>(
-        loc, config, getI64(adaptor.getDstBlockStride()));
+        loc, config, maskByte(getI64(adaptor.getRepeat())));
     config = rewriter.create<arith::OrIOp>(
-        loc, config, shl(getI64(adaptor.getSrc0BlockStride()), 8));
+        loc, config, shl(maskByte(getI64(adaptor.getDstBlockStride())), 8));
     config = rewriter.create<arith::OrIOp>(
-        loc, config, shl(getI64(adaptor.getSrc1BlockStride()), 16));
+        loc, config, shl(maskByte(getI64(adaptor.getSrc0BlockStride())), 16));
     config = rewriter.create<arith::OrIOp>(
-        loc, config, shl(getI64(adaptor.getDstRepeatStride()), 24));
+        loc, config, shl(maskByte(getI64(adaptor.getSrc1BlockStride())), 24));
     config = rewriter.create<arith::OrIOp>(
-        loc, config, shl(getI64(adaptor.getSrc0RepeatStride()), 32));
+        loc, config, shl(maskByte(getI64(adaptor.getDstRepeatStride())), 32));
     config = rewriter.create<arith::OrIOp>(
-        loc, config, shl(getI64(adaptor.getSrc1RepeatStride()), 40));
+        loc, config, shl(maskByte(getI64(adaptor.getSrc0RepeatStride())), 40));
+    config = rewriter.create<arith::OrIOp>(
+        loc, config, shl(maskByte(getI64(adaptor.getSrc1RepeatStride())), 48));
 
     auto funcType = rewriter.getFunctionType(
         TypeRange{dst.getType(), src0.getType(), src1.getType(),
@@ -4496,12 +4515,15 @@ public:
   matchAndRewrite(pto::UBSetMaskCountOp op,
                   typename pto::UBSetMaskCountOp::Adaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    StringRef calleeName = "llvm.hivm.SET.MASK.COUNT";
-    auto funcType =
-        rewriter.getFunctionType(TypeRange{}, TypeRange{});
-    rewriter.create<func::CallOp>(op.getLoc(), calleeName, TypeRange{},
-                                  ValueRange{});
-    state.plannedDecls.push_back(PlannedDecl{calleeName.str(), funcType});
+    auto loc = op.getLoc();
+    auto i64Ty = rewriter.getI64Type();
+    Value ctrl = rewriter.create<pto::GetCtrlOp>(loc, i64Ty).getResult();
+    Value bit56 = rewriter.create<arith::ConstantOp>(
+        loc, rewriter.getI64IntegerAttr(56));
+    Value set = rewriter
+                    .create<pto::Sbitset1Op>(loc, i64Ty, ctrl, bit56)
+                    .getResult();
+    rewriter.create<pto::SetCtrlOp>(loc, set);
     rewriter.eraseOp(op);
     return success();
   }
@@ -4523,12 +4545,15 @@ public:
   matchAndRewrite(pto::UBSetMaskNormOp op,
                   typename pto::UBSetMaskNormOp::Adaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    StringRef calleeName = "llvm.hivm.SET.MASK.NORM";
-    auto funcType =
-        rewriter.getFunctionType(TypeRange{}, TypeRange{});
-    rewriter.create<func::CallOp>(op.getLoc(), calleeName, TypeRange{},
-                                  ValueRange{});
-    state.plannedDecls.push_back(PlannedDecl{calleeName.str(), funcType});
+    auto loc = op.getLoc();
+    auto i64Ty = rewriter.getI64Type();
+    Value ctrl = rewriter.create<pto::GetCtrlOp>(loc, i64Ty).getResult();
+    Value bit56 = rewriter.create<arith::ConstantOp>(
+        loc, rewriter.getI64IntegerAttr(56));
+    Value reset = rewriter
+                      .create<pto::Sbitset0Op>(loc, i64Ty, ctrl, bit56)
+                      .getResult();
+    rewriter.create<pto::SetCtrlOp>(loc, reset);
     rewriter.eraseOp(op);
     return success();
   }
@@ -9966,6 +9991,12 @@ static VPTOEmissionOptions
 makeDeviceEmissionOptions(const VPTOEmissionOptions &baseOptions,
                           FunctionKernelKind kind) {
   VPTOEmissionOptions options = baseOptions;
+  constexpr llvm::StringLiteral kC220VecTargetFeatures =
+      "+ASAN,+ATOMIC,+AtomicForB64,+AtomicForB8 ,+FFTSBlk,"
+      "+MOVX8,+MSTX,+MathOp,+SPR7bits,+dav-c220-vec";
+  constexpr llvm::StringLiteral kC220CubeTargetFeatures =
+      "+ASAN,+ATOMIC,+AtomicForB64,+AtomicForB8 ,+FFTSBlk,"
+      "+MOVX8,+MSTX,+MathOp,+SPR7bits,+dav-c220-cube";
   constexpr llvm::StringLiteral kVecTargetFeatures =
       "+ATOMIC,+ArchV130,+AregRedefinable,+ArithmeticBf16,+AtomicForB8 ,"
       "+F8e4m3,+F8e5m2,+F8e8m0,+FFTSBlk,+Fp4e1m2x2,+Fp4e2m1x2,+LDExtRefine,"
@@ -9989,7 +10020,14 @@ makeDeviceEmissionOptions(const VPTOEmissionOptions &baseOptions,
   } else {
     options.aicoreArch = options.march;
     options.defaultTargetCPU = options.march;
-    options.defaultTargetFeatures = kVecTargetFeatures.str();
+    if (options.march == "dav-c220-vec")
+      options.defaultTargetFeatures = kC220VecTargetFeatures.str();
+    else if (options.march == "dav-c220-cube")
+      options.defaultTargetFeatures = kC220CubeTargetFeatures.str();
+    else if (kind == FunctionKernelKind::Cube)
+      options.defaultTargetFeatures = kCubeTargetFeatures.str();
+    else
+      options.defaultTargetFeatures = kVecTargetFeatures.str();
   }
   return options;
 }

@@ -7,9 +7,25 @@
 // See LICENSE in the root of the software repository for the full text of the License.
 
 // Test that pto.ub.set_mask_count and pto.ub.set_mask_norm lower to
-// llvm.hivm.SET.MASK.COUNT and llvm.hivm.SET.MASK.NORM respectively.
+// SBITSET1 / SBITSET0 on CTRL register bit 56 (matching CCE reference).
 
 // RUN: ( mkdir -p %T && ptoas --pto-arch=a3 --pto-backend=vpto %s -o %t --mlir-print-ir-after=convert-func-to-llvm 2>&1 || true ) | FileCheck %s
+
+// CHECK-LABEL: llvm.func @set_mask_count_llvm_mix_aiv
+// CHECK: llvm.call @llvm.hivm.SBITSET1
+// CHECK: llvm.call @llvm.hivm.SET.CTRL
+
+// CHECK-LABEL: llvm.func @set_mask_norm_llvm_mix_aiv
+// CHECK: llvm.call @llvm.hivm.SBITSET0
+// CHECK: llvm.call @llvm.hivm.SET.CTRL
+
+// CHECK-LABEL: llvm.func @count_mode_sequence_mix_aiv
+// CHECK: llvm.call @llvm.hivm.SBITSET1
+// CHECK: llvm.call @llvm.hivm.SET.CTRL
+// CHECK: llvm.call @llvm.hivm.MOVEMASK
+// CHECK: llvm.call @llvm.hivm.MOVEMASK
+// CHECK: llvm.call @llvm.hivm.SBITSET0
+// CHECK: llvm.call @llvm.hivm.SET.CTRL
 
 module attributes {pto.target_arch = "a3", pto.kernel_kind = #pto.kernel_kind<vector>} {
 
@@ -32,15 +48,3 @@ module attributes {pto.target_arch = "a3", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 }
-
-// CHECK-LABEL: llvm.func @set_mask_count_llvm_mix_aiv
-// CHECK: llvm.call @llvm.hivm.SET.MASK.COUNT() : () -> ()
-
-// CHECK-LABEL: llvm.func @set_mask_norm_llvm_mix_aiv
-// CHECK: llvm.call @llvm.hivm.SET.MASK.NORM() : () -> ()
-
-// CHECK-LABEL: llvm.func @count_mode_sequence_mix_aiv
-// CHECK: llvm.call @llvm.hivm.SET.MASK.COUNT()
-// CHECK: llvm.call @llvm.hivm.MOVEMASK
-// CHECK: llvm.call @llvm.hivm.MOVEMASK
-// CHECK: llvm.call @llvm.hivm.SET.MASK.NORM()
