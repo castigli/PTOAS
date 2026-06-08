@@ -65,25 +65,30 @@ module attributes {pto.target_arch = "a3", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 
-// Verify packing: each stride field lands at the correct bit position.
-// Packing from cce_aicore_intrinsics_3101.h:
-//   ((repeat & 0xff) << 56 | (dstBlk & 0xff) << 0  | (src0Blk & 0xff) << 8  |
-//    (src1Blk & 0xff) << 16 | (dstRep & 0xff) << 24 | (src0Rep & 0xff) << 32 |
-//    (src1Rep & 0xff) << 40)
+// Verify A3/HVVM byte packing:
+//   repeat[7:0], dstBlk[15:8], src0Blk[23:16], src1Blk[31:24],
+//   dstRep[39:32], src0Rep[47:40], src1Rep[55:48], simdFlag[63:56]=1.
 // CHECK-LABEL: llvm.func @ub_vadd_packed_mix_aiv
-// CHECK-DAG: llvm.mlir.constant(56 : i64)
-// CHECK-DAG: llvm.mlir.constant(72057594037927936 : i64)
-// CHECK-DAG: llvm.mlir.constant(8 : i64)
-// CHECK-DAG: llvm.mlir.constant(768 : i64)
-// CHECK-DAG: llvm.mlir.constant(16 : i64)
-// CHECK-DAG: llvm.mlir.constant(393216 : i64)
-// CHECK-DAG: llvm.mlir.constant(24 : i64)
-// CHECK-DAG: llvm.mlir.constant(150994944 : i64)
-// CHECK-DAG: llvm.mlir.constant(32 : i64)
-// CHECK-DAG: llvm.mlir.constant(51539607552 : i64)
-// CHECK-DAG: llvm.mlir.constant(40 : i64)
-// CHECK-DAG: llvm.mlir.constant(16492674416640 : i64)
-// CHECK-NOT: CHECK
+// CHECK: llvm.mlir.constant(72057594037927936 : i64)
+// CHECK: llvm.or
+// CHECK: %[[DSTBLK:.*]] = llvm.mlir.constant(2 : i64)
+// CHECK: %[[SH8:.*]] = llvm.mlir.constant(8 : i64)
+// CHECK: llvm.shl %[[DSTBLK]], %[[SH8]]
+// CHECK: %[[SRC0BLK:.*]] = llvm.mlir.constant(3 : i64)
+// CHECK: %[[SH16:.*]] = llvm.mlir.constant(16 : i64)
+// CHECK: llvm.shl %[[SRC0BLK]], %[[SH16]]
+// CHECK: %[[SRC1BLK:.*]] = llvm.mlir.constant(6 : i64)
+// CHECK: %[[SH24:.*]] = llvm.mlir.constant(24 : i64)
+// CHECK: llvm.shl %[[SRC1BLK]], %[[SH24]]
+// CHECK: %[[DSTREP:.*]] = llvm.mlir.constant(9 : i64)
+// CHECK: %[[SH32:.*]] = llvm.mlir.constant(32 : i64)
+// CHECK: llvm.shl %[[DSTREP]], %[[SH32]]
+// CHECK: %[[SRC0REP:.*]] = llvm.mlir.constant(12 : i64)
+// CHECK: %[[SH40:.*]] = llvm.mlir.constant(40 : i64)
+// CHECK: llvm.shl %[[SRC0REP]], %[[SH40]]
+// CHECK: %[[SRC1REP:.*]] = llvm.mlir.constant(15 : i64)
+// CHECK: %[[SH48:.*]] = llvm.mlir.constant(48 : i64)
+// CHECK: llvm.shl %[[SRC1REP]], %[[SH48]]
 // CHECK: llvm.call @llvm.hivm.VADD.s16({{.*}}, {{.*}}, {{.*}}, {{%.*}}) : (!llvm.ptr<6>, !llvm.ptr<6>, !llvm.ptr<6>, i64) -> ()
   func.func @ub_vadd_packed(%dst: !pto.ptr<i16, ub>, %src0: !pto.ptr<i16, ub>, %src1: !pto.ptr<i16, ub>) attributes {pto.aicore} {
     %c1 = arith.constant 1 : i64
@@ -97,4 +102,3 @@ module attributes {pto.target_arch = "a3", pto.kernel_kind = #pto.kernel_kind<ve
     return
   }
 }
-

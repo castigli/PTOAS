@@ -83,8 +83,8 @@ def _host_compile_flags() -> list[str]:
     ]
 
 
-def _kernel_compile_flags(kernel_kind: str) -> list[str]:
-    arch = aicore_arch_for_kernel_kind(kernel_kind)
+def _kernel_compile_flags(kernel_kind: str, target_arch: str = "a5") -> list[str]:
+    arch = aicore_arch_for_kernel_kind(kernel_kind, target_arch)
     return common_include_flags() + [
         "-std=gnu++17",
         "-O2",
@@ -114,13 +114,14 @@ def _compile_launch_cpp(
     launch_object: Path,
     *,
     kernel_kind: str,
+    target_arch: str,
     export_macro: str,
 ) -> None:
     bisheng = resolve_bisheng()
     _run(
         [
             bisheng,
-            *_kernel_compile_flags(kernel_kind),
+            *_kernel_compile_flags(kernel_kind, target_arch),
             f"-D{export_macro}",
             "-c",
             str(launch_cpp),
@@ -196,6 +197,7 @@ def build_native_library(
         artifacts.launch_cpp,
         launch_object,
         kernel_kind=module_spec.kernel_kind,
+        target_arch=module_spec.target_arch,
         export_macro=export_macro,
     )
     _link_shared_library(

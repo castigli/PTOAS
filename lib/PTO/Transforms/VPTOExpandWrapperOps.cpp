@@ -975,8 +975,9 @@ struct ExpandDmaLoadPattern : public OpRewritePattern<pto::MteGmUbOp> {
         collectLoopConfigs(op.getLoopCounts(), op.getLoopSrcStrides(),
                            op.getLoopDstStrides());
 
+    SmallVector<pto::DmaLoopConfig> allLoops;
     ArrayRef<pto::DmaLoopConfig> hwLoops;
-    ArrayRef<pto::DmaLoopConfig> swLoops = ArrayRef<pto::DmaLoopConfig>(loops);
+    ArrayRef<pto::DmaLoopConfig> swLoops;
     Value loop1Count;
     Value loop2Size = one;
 
@@ -997,6 +998,14 @@ struct ExpandDmaLoadPattern : public OpRewritePattern<pto::MteGmUbOp> {
             loc, hwLoops[0].srcStride, hwLoops[0].dstStride);
         rewriter.create<pto::SetLoopSizeOutToUbOp>(loc, loop2Size, loop1Count);
       }
+    } else {
+      allLoops.append(loops);
+      pto::DmaLoopConfig nburstCfg;
+      nburstCfg.count = op.getNBurst();
+      nburstCfg.srcStride = op.getNburstSrcStride();
+      nburstCfg.dstStride = op.getNburstDstStride();
+      allLoops.push_back(nburstCfg);
+      swLoops = ArrayRef<pto::DmaLoopConfig>(allLoops);
     }
 
     Value leftPadding = op.getLeftPaddingCount();
@@ -1013,6 +1022,8 @@ struct ExpandDmaLoadPattern : public OpRewritePattern<pto::MteGmUbOp> {
     if (Value padValue = op.getPadValue())
       rewriter.create<pto::SetMovPadValOp>(loc, padValue);
 
+    Value effectiveNBurst = (dmaArch == DmaArch::A5) ? op.getNBurst() : one;
+
     buildSoftwareLoopNest(
         rewriter, loc, swLoops, zero, zero,
         [&](Value srcOffset, Value dstOffset) {
@@ -1020,7 +1031,7 @@ struct ExpandDmaLoadPattern : public OpRewritePattern<pto::MteGmUbOp> {
           Value destination =
               offsetPointerByBytes(op.getDestination(), dstOffset, rewriter, loc);
           auto copyOp = rewriter.create<pto::CopyGmToUbufOp>(
-              loc, source, destination, zero, op.getNBurst(), op.getLenBurst(),
+              loc, source, destination, zero, effectiveNBurst, op.getLenBurst(),
               leftPadding, rightPadding, dataSelect, op.getL2CacheCtl(),
               op.getNburstSrcStride(), op.getNburstDstStride());
           if (hasPad)
@@ -1048,8 +1059,9 @@ struct ExpandDmaStorePattern : public OpRewritePattern<pto::MteUbGmOp> {
         collectLoopConfigs(op.getLoopCounts(), op.getLoopSrcStrides(),
                            op.getLoopDstStrides());
 
+    SmallVector<pto::DmaLoopConfig> allLoops;
     ArrayRef<pto::DmaLoopConfig> hwLoops;
-    ArrayRef<pto::DmaLoopConfig> swLoops = ArrayRef<pto::DmaLoopConfig>(loops);
+    ArrayRef<pto::DmaLoopConfig> swLoops;
     Value loop1Count;
     Value loop2Size = one;
 
@@ -1071,7 +1083,17 @@ struct ExpandDmaStorePattern : public OpRewritePattern<pto::MteUbGmOp> {
             loc, hwLoops[0].srcStride, hwLoops[0].dstStride);
         rewriter.create<pto::SetLoopSizeUbToOutOp>(loc, loop2Size, loop1Count);
       }
+    } else {
+      allLoops.append(loops);
+      pto::DmaLoopConfig nburstCfg;
+      nburstCfg.count = op.getNBurst();
+      nburstCfg.srcStride = op.getNburstSrcStride();
+      nburstCfg.dstStride = op.getNburstDstStride();
+      allLoops.push_back(nburstCfg);
+      swLoops = ArrayRef<pto::DmaLoopConfig>(allLoops);
     }
+
+    Value effectiveNBurst = (dmaArch == DmaArch::A5) ? op.getNBurst() : one;
 
     buildSoftwareLoopNest(
         rewriter, loc, swLoops, zero, zero,
@@ -1080,7 +1102,7 @@ struct ExpandDmaStorePattern : public OpRewritePattern<pto::MteUbGmOp> {
           Value destination =
               offsetPointerByBytes(op.getDestination(), dstOffset, rewriter, loc);
           rewriter.create<pto::CopyUbufToGmOp>(
-              loc, source, destination, zero, op.getNBurst(), op.getLenBurst(),
+              loc, source, destination, zero, effectiveNBurst, op.getLenBurst(),
               zero, op.getNburstDstStride(), op.getNburstSrcStride());
         });
     if (dmaArch == DmaArch::A5 &&
