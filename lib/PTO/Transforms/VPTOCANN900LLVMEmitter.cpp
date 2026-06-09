@@ -67,17 +67,6 @@ static Type getElementTypeFromVectorLike(Type type);
 static std::optional<int64_t> getElementCountFromVectorLike(Type type);
 
 static Type getLowPrecisionLLVMType(Type type, MLIRContext *context) {
-  if (pto::isPTOHiFloat8Type(type))
-    return LLVM::LLVMHiFloat8Type::get(context);
-  if (isa<pto::F4E1M2x2Type>(type))
-    return LLVM::LLVMFloat4E1M2x2Type::get(context);
-  if (isa<pto::F4E2M1x2Type>(type))
-    return LLVM::LLVMFloat4E2M1x2Type::get(context);
-  if (type.isFloat8E4M3() || type.isFloat8E4M3FN() ||
-      type.isFloat8E4M3FNUZ() || type.isFloat8E4M3B11FNUZ())
-    return LLVM::LLVMFloat8E4M3Type::get(context);
-  if (type.isFloat8E5M2() || type.isFloat8E5M2FNUZ())
-    return LLVM::LLVMFloat8E5M2Type::get(context);
   return {};
 }
 
@@ -90,9 +79,6 @@ static Type getLLVMCompatibleVectorType(ArrayRef<int64_t> shape,
 }
 
 static Type normalizePayloadTypeForLLVMLowering(Type type, Builder &builder) {
-  if (pto::isPTOHiFloat8x2Type(type))
-    return LLVM::LLVMFixedVectorType::get(
-        LLVM::LLVMHiFloat8Type::get(builder.getContext()), 2);
   if (Type lowpType = getLowPrecisionLLVMType(type, builder.getContext()))
     return lowpType;
 
@@ -9745,7 +9731,7 @@ static void applySimtEntryCallingConvention(
     const llvm::StringSet<llvm::BumpPtrAllocator> &simtEntryNames) {
   for (llvm::Function &function : llvmModule) {
     if (simtEntryNames.contains(function.getName())) {
-      function.setCallingConv(llvm::CallingConv::SimtEntry);
+      function.setCallingConv(llvm::CallingConv::C);
       function.addFnAttr(llvm::Attribute::NoInline);
       // Match Bisheng's C++ frontend shape for SIMT outlined bodies. The
       // exported wrapper owns the real kernel metadata, while the SIMT body is
@@ -9767,7 +9753,7 @@ static void applySimtEntryCallingConvention(
         auto *callee = call->getCalledFunction();
         if (!callee || !simtEntryNames.contains(callee->getName()))
           continue;
-        call->setCallingConv(llvm::CallingConv::SimtEntry);
+        call->setCallingConv(llvm::CallingConv::C);
       }
     }
   }
