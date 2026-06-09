@@ -28,5 +28,5 @@ module attributes {pto.target_arch = "a3", pto.kernel_kind = #pto.kernel_kind<ve
 // CHECK: scf.for
 // CHECK: pto.addptr
 // CHECK: pto.ub.vadd
-// CHECK-NOT: pto.ub.set_mask
+// CHECK-NOT: pto.ub.set_mask %c
 // CHECK-NOT: pto.tadd

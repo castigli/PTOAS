@@ -3659,6 +3659,12 @@ public:
     std::string calleeName;
     if constexpr (std::is_same_v<UBOp, pto::UBVaddOp>)
       calleeName = "llvm.hivm.VADD." + elemFrag;
+    else if constexpr (std::is_same_v<UBOp, pto::UBVsubOp>)
+      calleeName = "llvm.hivm.VSUB." + elemFrag;
+    else if constexpr (std::is_same_v<UBOp, pto::UBVmulOp>)
+      calleeName = "llvm.hivm.VMUL." + elemFrag;
+    else if constexpr (std::is_same_v<UBOp, pto::UBVdivOp>)
+      calleeName = "llvm.hivm.VDIV." + elemFrag;
     else
       return rewriter.notifyMatchFailure(op, "unsupported ubuf binary op");
 
@@ -7897,6 +7903,12 @@ static void populateVPTOOpLoweringPatterns(VPTOTypeConverter &typeConverter,
   if (march == "dav-c220-vec") {
     patterns.add<LowerUBufBinaryOpPattern<pto::UBVaddOp>>(
         typeConverter, patterns.getContext(), state);
+    patterns.add<LowerUBufBinaryOpPattern<pto::UBVsubOp>>(
+        typeConverter, patterns.getContext(), state);
+    patterns.add<LowerUBufBinaryOpPattern<pto::UBVmulOp>>(
+        typeConverter, patterns.getContext(), state);
+    patterns.add<LowerUBufBinaryOpPattern<pto::UBVdivOp>>(
+        typeConverter, patterns.getContext(), state);
     patterns.add<LowerUBSetMaskOpPattern>(
         typeConverter, patterns.getContext(), state);
     patterns.add<LowerUBSetMaskCountOpPattern>(
@@ -7993,6 +8005,9 @@ static void configureVPTOOpLoweringTarget(ConversionTarget &target,
 
   if (march == "dav-c220-vec") {
     target.addIllegalOp<pto::UBVaddOp>();
+    target.addIllegalOp<pto::UBVsubOp>();
+    target.addIllegalOp<pto::UBVmulOp>();
+    target.addIllegalOp<pto::UBVdivOp>();
     target.addIllegalOp<pto::UBSetMaskOp>();
     target.addIllegalOp<pto::UBSetMaskCountOp>();
     target.addIllegalOp<pto::UBSetMaskNormOp>();

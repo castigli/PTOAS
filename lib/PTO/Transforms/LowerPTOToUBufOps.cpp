@@ -6,11 +6,11 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-//===- LowerPTOToUBufOps.cpp - Lower pto.tadd to pto.ub.vadd on a2a3 -----===//
+//===- LowerPTOToUBufOps.cpp - Lower pto.tadd/tsub/tmul/tdiv on a2a3 -----===//
 //===----------------------------------------------------------------------===//
 //
-// Lowers pto.tadd to pto.ub.vadd on a3 (dav-c220-vec). Uses the full CCE
-// dispatch tree from TBinOp.hpp with all modes.
+// Lowers pto.tadd/tsub/tmul/tdiv to pto.ub.vadd/vsub/vmul/vdiv on a3.
+// Uses the full CCE dispatch tree from TBinOp.hpp with all modes.
 //
 //===----------------------------------------------------------------------===//
 
@@ -133,29 +133,30 @@ struct TileShapeInfo {
 };
 
 static std::optional<TileShapeInfo> extractTileShapeInfo(
-    pto::TAddOp op,
+    Operation *op,
     const DenseMap<Value, SmallVector<int64_t, 2>> &tileShapes) {
-  Type dstTy = op.getDst().getType();
+  auto opDst = op->getOperand(2);
+  Type dstTy = opDst.getType();
   if (!isUBMemorySpace(dstTy))
     return std::nullopt;
 
   Type elemTy;
   ArrayRef<int64_t> shape;
   ArrayRef<int64_t> validShape;
-  if (auto tbTy = dyn_cast<pto::TileBufType>(op.getDst().getType())) {
+  if (auto tbTy = dyn_cast<pto::TileBufType>(dstTy)) {
     elemTy = tbTy.getElementType();
     shape = tbTy.getShape();
     validShape = tbTy.getValidShape();
     if (!isRowMajor(tbTy))
       return std::nullopt;
-  } else if (auto mrTy = dyn_cast<MemRefType>(op.getDst().getType())) {
+  } else if (auto mrTy = dyn_cast<MemRefType>(dstTy)) {
     elemTy = mrTy.getElementType();
     shape = mrTy.getShape();
-  } else if (isa<pto::PtrType>(op.getDst().getType())) {
-    auto it = tileShapes.find(op.getDst());
+  } else if (isa<pto::PtrType>(dstTy)) {
+    auto it = tileShapes.find(opDst);
     if (it == tileShapes.end())
       return std::nullopt;
-    elemTy = cast<pto::PtrType>(op.getDst().getType()).getElementType();
+    elemTy = cast<pto::PtrType>(dstTy).getElementType();
     shape = llvm::ArrayRef(it->second);
   } else {
     return std::nullopt;
@@ -190,7 +191,7 @@ static std::optional<TileShapeInfo> extractTileShapeInfo(
   return info;
 }
 
-static bool canLower(pto::TAddOp op,
+static bool canLower(Operation *op,
                      const DenseMap<Value, SmallVector<int64_t, 2>> &tileShapes) {
   return extractTileShapeInfo(op, tileShapes).has_value();
 }
@@ -218,8 +219,7 @@ struct LowerPTOToUBufOpsPass
     OpBuilder builder(ctx);
 
     // A3: sequential memory planning for alloc_tile buffers.  Must run first
-    // so tadd/tload/tstore lowering sees PtrType from CastPtrOp instead of
-    // tile_buf from AllocTileOp.
+    // so lowering sees PtrType from CastPtrOp instead of tile_buf.
     DenseMap<Value, SmallVector<int64_t, 2>> tileShapes;
     {
       SmallVector<pto::AllocTileOp> allocOps;
@@ -250,33 +250,84 @@ struct LowerPTOToUBufOpsPass
       }
     }
 
-    SmallVector<pto::TAddOp> taddOps;
-    func.walk([&](pto::TAddOp op) { taddOps.push_back(op); });
+    // ---- tadd → pto.ub.vadd ----
+    {
+      SmallVector<pto::TAddOp> ops;
+      func.walk([&](pto::TAddOp op) { ops.push_back(op); });
+      for (auto op : ops) {
+        if (!canLower(op, tileShapes))
+          continue;
+        auto info = extractTileShapeInfo(op, tileShapes);
+        if (!info)
+          continue;
+        auto [dstPtr, src0Ptr, src1Ptr, ptrType] = lowerBinaryOpCommon(
+            builder, ctx, op, op.getDst(), op.getSrc0(), op.getSrc1(), tileShapes);
+        if (!dstPtr)
+          continue;
+        dispatch<pto::UBVaddOp>(op.getLoc(), builder, dstPtr, src0Ptr, src1Ptr,
+                                ptrType, *info);
+        op.erase();
+      }
+    }
 
-    for (auto op : taddOps) {
-      if (!canLower(op, tileShapes))
-        continue;
-      auto info = extractTileShapeInfo(op, tileShapes);
-      if (!info)
-        continue;
+    // ---- tsub → pto.ub.vsub ----
+    {
+      SmallVector<pto::TSubOp> ops;
+      func.walk([&](pto::TSubOp op) { ops.push_back(op); });
+      for (auto op : ops) {
+        if (!canLower(op, tileShapes))
+          continue;
+        auto info = extractTileShapeInfo(op, tileShapes);
+        if (!info)
+          continue;
+        auto [dstPtr, src0Ptr, src1Ptr, ptrType] = lowerBinaryOpCommon(
+            builder, ctx, op, op.getDst(), op.getSrc0(), op.getSrc1(), tileShapes);
+        if (!dstPtr)
+          continue;
+        dispatch<pto::UBVsubOp>(op.getLoc(), builder, dstPtr, src0Ptr, src1Ptr,
+                                ptrType, *info);
+        op.erase();
+      }
+    }
 
-      builder.setInsertionPoint(op);
-      Type elemTy = getStoredElemType(op.getDst().getType());
-      auto ptrType = getUBPtrType(ctx, elemTy);
-      Location loc = op.getLoc();
+    // ---- tmul → pto.ub.vmul ----
+    {
+      SmallVector<pto::TMulOp> ops;
+      func.walk([&](pto::TMulOp op) { ops.push_back(op); });
+      for (auto op : ops) {
+        if (!canLower(op, tileShapes))
+          continue;
+        auto info = extractTileShapeInfo(op, tileShapes);
+        if (!info)
+          continue;
+        auto [dstPtr, src0Ptr, src1Ptr, ptrType] = lowerBinaryOpCommon(
+            builder, ctx, op, op.getDst(), op.getSrc0(), op.getSrc1(), tileShapes);
+        if (!dstPtr)
+          continue;
+        dispatch<pto::UBVmulOp>(op.getLoc(), builder, dstPtr, src0Ptr, src1Ptr,
+                                ptrType, *info);
+        op.erase();
+      }
+    }
 
-      auto emitAddr = [&](Value tile) -> Value {
-        if (isa<pto::PtrType>(tile.getType()))
-          return tile; // Already a PTO pointer (e.g. from PointerCastOp)
-        auto addrOp = builder.create<pto::TileBufAddrOp>(loc, ptrType, tile);
-        return addrOp.getDst();
-      };
-
-      Value dstPtr = emitAddr(op.getDst());
-      Value src0Ptr = emitAddr(op.getSrc0());
-      Value src1Ptr = emitAddr(op.getSrc1());
-      dispatch(loc, builder, dstPtr, src0Ptr, src1Ptr, ptrType, *info);
-      op.erase();
+    // ---- tdiv → pto.ub.vdiv ----
+    {
+      SmallVector<pto::TDivOp> ops;
+      func.walk([&](pto::TDivOp op) { ops.push_back(op); });
+      for (auto op : ops) {
+        if (!canLower(op, tileShapes))
+          continue;
+        auto info = extractTileShapeInfo(op, tileShapes);
+        if (!info)
+          continue;
+        auto [dstPtr, src0Ptr, src1Ptr, ptrType] = lowerBinaryOpCommon(
+            builder, ctx, op, op.getDst(), op.getSrc0(), op.getSrc1(), tileShapes);
+        if (!dstPtr)
+          continue;
+        dispatch<pto::UBVdivOp>(op.getLoc(), builder, dstPtr, src0Ptr, src1Ptr,
+                                ptrType, *info);
+        op.erase();
+      }
     }
 
     // ---- tload → mte_gm_ub ----
@@ -329,13 +380,54 @@ private:
   Value idxc0(Location loc, OpBuilder &b) { return idxc(0, loc, b); }
   Value idxc1(Location loc, OpBuilder &b) { return idxc(1, loc, b); }
 
-  void vadd(Location loc, OpBuilder &b, Value dst, Value s0, Value s1,
-            Value repeat, Value repStride) {
-    b.create<pto::UBVaddOp>(loc, dst, s0, s1, repeat,
-                            i64c1(loc, b), i64c1(loc, b), i64c1(loc, b),
-                            repStride, repStride, i64c0(loc, b));
+  template <typename UBop>
+  void emitUBBinOp(Location loc, OpBuilder &b, Value dst, Value s0, Value s1,
+                   Value repeat, Value repStride) {
+    b.create<UBop>(loc, dst, s0, s1, repeat,
+                   i64c1(loc, b), i64c1(loc, b), i64c1(loc, b),
+                   repStride, repStride, i64c0(loc, b));
   }
 
+  void vadd(Location loc, OpBuilder &b, Value dst, Value s0, Value s1,
+            Value repeat, Value repStride) {
+    emitUBBinOp<pto::UBVaddOp>(loc, b, dst, s0, s1, repeat, repStride);
+  }
+  void vsub(Location loc, OpBuilder &b, Value dst, Value s0, Value s1,
+            Value repeat, Value repStride) {
+    emitUBBinOp<pto::UBVsubOp>(loc, b, dst, s0, s1, repeat, repStride);
+  }
+  void vmul(Location loc, OpBuilder &b, Value dst, Value s0, Value s1,
+            Value repeat, Value repStride) {
+    emitUBBinOp<pto::UBVmulOp>(loc, b, dst, s0, s1, repeat, repStride);
+  }
+  void vdiv(Location loc, OpBuilder &b, Value dst, Value s0, Value s1,
+            Value repeat, Value repStride) {
+    emitUBBinOp<pto::UBVdivOp>(loc, b, dst, s0, s1, repeat, repStride);
+  }
+
+  std::tuple<Value, Value, Value, pto::PtrType>
+  lowerBinaryOpCommon(OpBuilder &builder, MLIRContext *ctx, Operation *op,
+                      Value dstVal, Value src0Val, Value src1Val,
+                      const DenseMap<Value, SmallVector<int64_t, 2>> &tileShapes) {
+    Location loc = op->getLoc();
+    builder.setInsertionPoint(op);
+    Type elemTy = getStoredElemType(dstVal.getType());
+    auto ptrType = getUBPtrType(ctx, elemTy);
+
+    auto emitAddr = [&](Value tile) -> Value {
+      if (isa<pto::PtrType>(tile.getType()))
+        return tile;
+      auto addrOp = builder.create<pto::TileBufAddrOp>(loc, ptrType, tile);
+      return addrOp.getDst();
+    };
+
+    Value dstPtr = emitAddr(dstVal);
+    Value src0Ptr = emitAddr(src0Val);
+    Value src1Ptr = emitAddr(src1Val);
+    return {dstPtr, src0Ptr, src1Ptr, ptrType};
+  }
+
+  template <typename UBop>
   void modeNorm1L(Location loc, OpBuilder &b, Value dst, Value s0, Value s1,
                   pto::PtrType ptrTy, const TileShapeInfo &info) {
     int64_t epr = info.elementsPerRepeat;
@@ -345,7 +437,7 @@ private:
 
     if (headRepeats > 1) {
       auto forOp = b.create<scf::ForOp>(loc, idxc0(loc, b),
-                                         idxc(headRepeats, loc, b), idxc1(loc, b));
+                                          idxc(headRepeats, loc, b), idxc1(loc, b));
       b.setInsertionPointToStart(forOp.getBody());
       Value iv = forOp.getInductionVar();
       Value off = b.create<arith::MulIOp>(loc, iv, idxc(epr, loc, b)).getResult();
@@ -354,7 +446,7 @@ private:
       Value r1 = addPtr(loc, b, s1, ptrTy, off);
       b.create<pto::UBSetMaskCountOp>(loc);
       b.create<pto::UBSetMaskOp>(loc, i64c(epr, loc, b), i64c0(loc, b));
-      vadd(loc, b, rd, r0, r1, i64c1(loc, b), i64c8(loc, b));
+      emitUBBinOp<UBop>(loc, b, rd, r0, r1, i64c1(loc, b), i64c8(loc, b));
       b.create<pto::UBSetMaskNormOp>(loc);
       b.setInsertionPointAfter(forOp);
       if (tailElements > 0) {
@@ -364,7 +456,7 @@ private:
         Value ts1 = addPtr(loc, b, s1, ptrTy, offT);
         b.create<pto::UBSetMaskCountOp>(loc);
         b.create<pto::UBSetMaskOp>(loc, i64c(tailElements, loc, b), i64c0(loc, b));
-        vadd(loc, b, td, ts0, ts1, i64c1(loc, b), i64c8(loc, b));
+        emitUBBinOp<UBop>(loc, b, td, ts0, ts1, i64c1(loc, b), i64c8(loc, b));
         b.create<pto::UBSetMaskNormOp>(loc);
       }
       return;
@@ -372,7 +464,7 @@ private:
 
     b.create<pto::UBSetMaskCountOp>(loc);
     b.create<pto::UBSetMaskOp>(loc, i64c(totalV, loc, b), i64c0(loc, b));
-    vadd(loc, b, dst, s0, s1, i64c1(loc, b), i64c8(loc, b));
+    emitUBBinOp<UBop>(loc, b, dst, s0, s1, i64c1(loc, b), i64c8(loc, b));
     b.create<pto::UBSetMaskNormOp>(loc);
     fullMask(loc, b);
   }
@@ -422,7 +514,7 @@ private:
                             const DmaViewInfo &viewInfo, unsigned elemSize) {
     Value totalOff = idxc0(loc, b);
     for (size_t i = 0; i < viewInfo.offsets.size() &&
-                       i < viewInfo.strides.size(); ++i) {
+                        i < viewInfo.strides.size(); ++i) {
       APInt constOff;
       if (matchPattern(viewInfo.offsets[i], m_ConstantInt(&constOff)) &&
           constOff.isZero())
@@ -607,6 +699,7 @@ private:
   // CCE dispatch tree — mirrors TBinOp.hpp BinaryInstr
   //===--------------------------------------------------------------------===//
 
+  template <typename UBop>
   void dispatch(Location loc, OpBuilder &b, Value dst, Value s0, Value s1,
                 pto::PtrType ptrTy, const TileShapeInfo &info) {
     int64_t epr = info.elementsPerRepeat;
@@ -617,7 +710,7 @@ private:
 
     // 1. Small tile
     if (rows <= kRepeatMax && cols < static_cast<int64_t>(epr)) {
-      modeSmall(loc, b, dst, s0, s1, ptrTy, info);
+      modeSmall<UBop>(loc, b, dst, s0, s1, ptrTy, info);
       return;
     }
 
@@ -629,23 +722,23 @@ private:
           (vCols > static_cast<int64_t>(epr)) && ((vCols % epr) != 0);
 
       if (nonVLAligned || totalRpts > kRepeatMax)
-        modeCount1L(loc, b, dst, s0, s1, ptrTy, info);
+        modeCount1L<UBop>(loc, b, dst, s0, s1, ptrTy, info);
       else
-        modeNorm1L(loc, b, dst, s0, s1, ptrTy, info);
+        modeNorm1L<UBop>(loc, b, dst, s0, s1, ptrTy, info);
       return;
     }
 
     // 3. Non-continuous
     int64_t normColRepeat = cols / epr;
     if (normColRepeat > 1 && vRows * normColRepeat < kSmallRptBinOp) {
-      modeCount2L(loc, b, dst, s0, s1, ptrTy, info);
+      modeCount2L<UBop>(loc, b, dst, s0, s1, ptrTy, info);
     } else if (vRows < normColRepeat + 1) {
       if (vCols % epr > 0)
-        modeCount2L(loc, b, dst, s0, s1, ptrTy, info);
+        modeCount2L<UBop>(loc, b, dst, s0, s1, ptrTy, info);
       else
-        modeColVLAlign(loc, b, dst, s0, s1, ptrTy, info);
+        modeColVLAlign<UBop>(loc, b, dst, s0, s1, ptrTy, info);
     } else {
-      modeRowRpt(loc, b, dst, s0, s1, ptrTy, info);
+      modeRowRpt<UBop>(loc, b, dst, s0, s1, ptrTy, info);
     }
   }
 
@@ -653,6 +746,7 @@ private:
   // Bin1LNormModeSmall
   //===--------------------------------------------------------------------===//
 
+  template <typename UBop>
   void modeSmall(Location loc, OpBuilder &b, Value dst, Value s0, Value s1,
                  pto::PtrType ptrTy, const TileShapeInfo &info) {
     int64_t rs = info.cols / static_cast<int64_t>(info.blockSizeElem);
@@ -668,7 +762,7 @@ private:
       Value r1 = addPtr(loc, b, s1, ptrTy, off);
       b.create<pto::UBSetMaskCountOp>(loc);
       b.create<pto::UBSetMaskOp>(loc, i64c(info.vCols, loc, b), i64c0(loc, b));
-      vadd(loc, b, rd, r0, r1, i64c1(loc, b), i64c(rs, loc, b));
+      emitUBBinOp<UBop>(loc, b, rd, r0, r1, i64c1(loc, b), i64c(rs, loc, b));
       b.create<pto::UBSetMaskNormOp>(loc);
       b.setInsertionPointAfter(forOp);
       return;
@@ -676,7 +770,7 @@ private:
 
     b.create<pto::UBSetMaskCountOp>(loc);
     b.create<pto::UBSetMaskOp>(loc, i64c(info.vCols, loc, b), i64c0(loc, b));
-    vadd(loc, b, dst, s0, s1, i64c1(loc, b), i64c(rs, loc, b));
+    emitUBBinOp<UBop>(loc, b, dst, s0, s1, i64c1(loc, b), i64c(rs, loc, b));
     b.create<pto::UBSetMaskNormOp>(loc);
     fullMask(loc, b);
   }
@@ -685,12 +779,13 @@ private:
   // Bin1LCountMode
   //===--------------------------------------------------------------------===//
 
+  template <typename UBop>
   void modeCount1L(Location loc, OpBuilder &b, Value dst, Value s0, Value s1,
                    pto::PtrType ptrTy, const TileShapeInfo &info) {
     int64_t totalV = info.vRows * info.vCols;
     b.create<pto::UBSetMaskCountOp>(loc);
     b.create<pto::UBSetMaskOp>(loc, i64c(totalV, loc, b), i64c0(loc, b));
-    vadd(loc, b, dst, s0, s1, i64c0(loc, b), i64c8(loc, b));
+    emitUBBinOp<UBop>(loc, b, dst, s0, s1, i64c0(loc, b), i64c8(loc, b));
     b.create<pto::UBSetMaskNormOp>(loc);
     fullMask(loc, b);
   }
@@ -699,6 +794,7 @@ private:
   // Bin2LNormModeColVLAlign
   //===--------------------------------------------------------------------===//
 
+  template <typename UBop>
   void modeColVLAlign(Location loc, OpBuilder &b, Value dst, Value s0,
                       Value s1, pto::PtrType ptrTy, const TileShapeInfo &info) {
     int64_t epr = info.elementsPerRepeat;
@@ -714,7 +810,7 @@ private:
     Value rd = addPtr(loc, b, dst, ptrTy, off);
     Value rs0 = addPtr(loc, b, s0, ptrTy, off);
     Value rs1 = addPtr(loc, b, s1, ptrTy, off);
-    vadd(loc, b, rd, rs0, rs1, i64c(headRepeats, loc, b), i64c8(loc, b));
+    emitUBBinOp<UBop>(loc, b, rd, rs0, rs1, i64c(headRepeats, loc, b), i64c8(loc, b));
     b.setInsertionPointAfter(forOp);
   }
 
@@ -722,6 +818,7 @@ private:
   // Bin2LCountMode – row-by-row count mode
   //===--------------------------------------------------------------------===//
 
+  template <typename UBop>
   void modeCount2L(Location loc, OpBuilder &b, Value dst, Value s0, Value s1,
                    pto::PtrType ptrTy, const TileShapeInfo &info) {
     int64_t rowStride = info.cols;
@@ -738,7 +835,7 @@ private:
     Value rd = addPtr(loc, b, dst, ptrTy, off);
     Value rs0 = addPtr(loc, b, s0, ptrTy, off);
     Value rs1 = addPtr(loc, b, s1, ptrTy, off);
-    vadd(loc, b, rd, rs0, rs1, i64c0(loc, b), i64c8(loc, b));
+    emitUBBinOp<UBop>(loc, b, rd, rs0, rs1, i64c0(loc, b), i64c8(loc, b));
     b.setInsertionPointAfter(forOp);
 
     b.create<pto::UBSetMaskNormOp>(loc);
@@ -749,19 +846,21 @@ private:
   // Bin2LNormModeRowRpt
   //===--------------------------------------------------------------------===//
 
+  template <typename UBop>
   void modeRowRpt(Location loc, OpBuilder &b, Value dst, Value s0, Value s1,
-                   pto::PtrType ptrTy, const TileShapeInfo &info) {
+                  pto::PtrType ptrTy, const TileShapeInfo &info) {
     int64_t be = info.blockSizeElem;
     int64_t rowStride = info.cols;
     int64_t rs = rowStride / be;
     bool condRowRpt = (info.vRows <= kRepeatMax) && (rs <= kRepeatStrideMax);
 
     if (condRowRpt)
-      rowRptFast(loc, b, dst, s0, s1, ptrTy, info, rs);
+      rowRptFast<UBop>(loc, b, dst, s0, s1, ptrTy, info, rs);
     else
-      rowRptChunked(loc, b, dst, s0, s1, ptrTy, info, rowStride, rs);
+      rowRptChunked<UBop>(loc, b, dst, s0, s1, ptrTy, info, rowStride, rs);
   }
 
+  template <typename UBop>
   void rowRptFast(Location loc, OpBuilder &b, Value dst, Value s0, Value s1,
                   pto::PtrType ptrTy, const TileShapeInfo &info, int64_t rs) {
     int64_t epr = info.elementsPerRepeat;
@@ -772,7 +871,7 @@ private:
       Value rd = addPtr(loc, b, dst, ptrTy, idxc(i * epr, loc, b));
       Value r0 = addPtr(loc, b, s0, ptrTy, idxc(i * epr, loc, b));
       Value r1 = addPtr(loc, b, s1, ptrTy, idxc(i * epr, loc, b));
-      vadd(loc, b, rd, r0, r1, i64c(info.vRows, loc, b), i64c(rs, loc, b));
+      emitUBBinOp<UBop>(loc, b, rd, r0, r1, i64c(info.vRows, loc, b), i64c(rs, loc, b));
     }
 
     if (tailElements > 0) {
@@ -781,11 +880,12 @@ private:
       Value r0 = addPtr(loc, b, s0, ptrTy, off);
       Value r1 = addPtr(loc, b, s1, ptrTy, off);
       setMask(loc, b, tailElements);
-      vadd(loc, b, rd, r0, r1, i64c(info.vRows, loc, b), i64c(rs, loc, b));
+      emitUBBinOp<UBop>(loc, b, rd, r0, r1, i64c(info.vRows, loc, b), i64c(rs, loc, b));
       fullMask(loc, b);
     }
   }
 
+  template <typename UBop>
   void rowRptChunked(Location loc, OpBuilder &b, Value dst, Value s0,
                      Value s1, pto::PtrType ptrTy, const TileShapeInfo &info,
                      int64_t rowStride, int64_t rs) {
@@ -795,27 +895,27 @@ private:
 
     if (info.vRows > static_cast<int64_t>(epr)) {
       if (rptPerLine > 0)
-        headRows(loc, b, dst, s0, s1, ptrTy, info, rowStride, rptPerLine);
+        headRows<UBop>(loc, b, dst, s0, s1, ptrTy, info, rowStride, rptPerLine);
       if (remainElem > 0) {
         Value off = idxc(rptPerLine * epr, loc, b);
-        tailRows(loc, b, addPtr(loc, b, dst, ptrTy, off),
+        tailRows<UBop>(loc, b, addPtr(loc, b, dst, ptrTy, off),
                  addPtr(loc, b, s0, ptrTy, off),
                  addPtr(loc, b, s1, ptrTy, off), ptrTy, info, rowStride, rs,
                  remainElem);
       }
     } else {
       if (remainElem == 0) {
-        headRows(loc, b, dst, s0, s1, ptrTy, info, rowStride,
+        headRows<UBop>(loc, b, dst, s0, s1, ptrTy, info, rowStride,
                  info.vCols / epr);
       } else if (rptPerLine > 0) {
-        headRows(loc, b, dst, s0, s1, ptrTy, info, rowStride, rptPerLine);
+        headRows<UBop>(loc, b, dst, s0, s1, ptrTy, info, rowStride, rptPerLine);
         Value off = idxc(rptPerLine * epr, loc, b);
-        tailRows(loc, b, addPtr(loc, b, dst, ptrTy, off),
+        tailRows<UBop>(loc, b, addPtr(loc, b, dst, ptrTy, off),
                  addPtr(loc, b, s0, ptrTy, off),
                  addPtr(loc, b, s1, ptrTy, off), ptrTy, info, rowStride, rs,
                  remainElem);
       } else {
-        tailRows(loc, b, dst, s0, s1, ptrTy, info, rowStride, rs, remainElem);
+        tailRows<UBop>(loc, b, dst, s0, s1, ptrTy, info, rowStride, rs, remainElem);
       }
     }
   }
@@ -824,6 +924,7 @@ private:
   // Bin2LNormModeHead – chunked per-row head
   //===--------------------------------------------------------------------===//
 
+  template <typename UBop>
   void headRows(Location loc, OpBuilder &b, Value dst, Value s0, Value s1,
                 pto::PtrType ptrTy, const TileShapeInfo &info,
                 int64_t rowStride, int64_t rptPerLine) {
@@ -848,7 +949,7 @@ private:
       Value co = b.create<arith::MulIOp>(loc, jv, idxc(chunkElems, loc, b))
                      .getResult();
       Value off = b.create<arith::AddIOp>(loc, rowBase, co).getResult();
-      vadd(loc, b, addPtr(loc, b, dst, ptrTy, off),
+      emitUBBinOp<UBop>(loc, b, addPtr(loc, b, dst, ptrTy, off),
            addPtr(loc, b, s0, ptrTy, off), addPtr(loc, b, s1, ptrTy, off),
            i64c(kRepeatMax, loc, b), i64c8(loc, b));
       b.setInsertionPointAfter(inner);
@@ -857,7 +958,7 @@ private:
     if (remain > 0) {
       Value co = idxc(numLoop * chunkElems, loc, b);
       Value off = b.create<arith::AddIOp>(loc, rowBase, co).getResult();
-      vadd(loc, b, addPtr(loc, b, dst, ptrTy, off),
+      emitUBBinOp<UBop>(loc, b, addPtr(loc, b, dst, ptrTy, off),
            addPtr(loc, b, s0, ptrTy, off), addPtr(loc, b, s1, ptrTy, off),
            i64c(remain, loc, b), i64c8(loc, b));
     }
@@ -868,6 +969,7 @@ private:
   // Bin2LNormModeTail – masked per-row tail
   //===--------------------------------------------------------------------===//
 
+  template <typename UBop>
   void tailRows(Location loc, OpBuilder &b, Value dst, Value s0, Value s1,
                 pto::PtrType ptrTy, const TileShapeInfo &info,
                 int64_t rowStride, int64_t rs, unsigned remainPerLine) {
@@ -886,24 +988,25 @@ private:
       b.setInsertionPointToStart(forOp.getBody());
       Value iv = forOp.getInductionVar();
       if (strideOver)
-        tailStrideOverChunk(loc, b, iv, dst, s0, s1, ptrTy, rowStride);
+        tailStrideOverChunk<UBop>(loc, b, iv, dst, s0, s1, ptrTy, rowStride);
       else
-        tailStrideOkChunk(loc, b, iv, dst, s0, s1, ptrTy, rowStride, rs);
+        tailStrideOkChunk<UBop>(loc, b, iv, dst, s0, s1, ptrTy, rowStride, rs);
       b.setInsertionPointAfter(forOp);
     }
 
     if (remainAfterLoop > 0) {
       if (strideOver)
-        tailStrideOverRemain(loc, b, dst, s0, s1, ptrTy, rowStride, numLoop,
+        tailStrideOverRemain<UBop>(loc, b, dst, s0, s1, ptrTy, rowStride, numLoop,
                              remainAfterLoop);
       else
-        tailStrideOkRemain(loc, b, dst, s0, s1, ptrTy, rowStride, rs, numLoop,
+        tailStrideOkRemain<UBop>(loc, b, dst, s0, s1, ptrTy, rowStride, rs, numLoop,
                            remainAfterLoop);
     }
 
     fullMask(loc, b);
   }
 
+  template <typename UBop>
   void tailStrideOverChunk(Location loc, OpBuilder &b, Value iv, Value dst,
                            Value s0, Value s1, pto::PtrType ptrTy,
                            int64_t rowStride) {
@@ -916,22 +1019,24 @@ private:
     Value rowOff =
         b.create<arith::MulIOp>(loc, jv, idxc(rowStride, loc, b)).getResult();
     Value off = b.create<arith::AddIOp>(loc, baseOff, rowOff).getResult();
-    vadd(loc, b, addPtr(loc, b, dst, ptrTy, off),
+    emitUBBinOp<UBop>(loc, b, addPtr(loc, b, dst, ptrTy, off),
          addPtr(loc, b, s0, ptrTy, off), addPtr(loc, b, s1, ptrTy, off),
          i64c1(loc, b), i64c1(loc, b));
     b.setInsertionPointAfter(forOp);
   }
 
+  template <typename UBop>
   void tailStrideOkChunk(Location loc, OpBuilder &b, Value iv, Value dst,
                          Value s0, Value s1, pto::PtrType ptrTy,
                          int64_t rowStride, int64_t rs) {
     Value off = b.create<arith::MulIOp>(
         loc, iv, idxc(kRepeatMax * rowStride, loc, b)).getResult();
-    vadd(loc, b, addPtr(loc, b, dst, ptrTy, off),
+    emitUBBinOp<UBop>(loc, b, addPtr(loc, b, dst, ptrTy, off),
          addPtr(loc, b, s0, ptrTy, off), addPtr(loc, b, s1, ptrTy, off),
          i64c(kRepeatMax, loc, b), i64c(rs, loc, b));
   }
 
+  template <typename UBop>
   void tailStrideOverRemain(Location loc, OpBuilder &b, Value dst, Value s0,
                             Value s1, pto::PtrType ptrTy, int64_t rowStride,
                             int64_t numLoop, int64_t remain) {
@@ -943,17 +1048,18 @@ private:
     Value rowOff =
         b.create<arith::MulIOp>(loc, jv, idxc(rowStride, loc, b)).getResult();
     Value off = b.create<arith::AddIOp>(loc, baseOff, rowOff).getResult();
-    vadd(loc, b, addPtr(loc, b, dst, ptrTy, off),
+    emitUBBinOp<UBop>(loc, b, addPtr(loc, b, dst, ptrTy, off),
          addPtr(loc, b, s0, ptrTy, off), addPtr(loc, b, s1, ptrTy, off),
          i64c1(loc, b), i64c1(loc, b));
     b.setInsertionPointAfter(forOp);
   }
 
+  template <typename UBop>
   void tailStrideOkRemain(Location loc, OpBuilder &b, Value dst, Value s0,
                           Value s1, pto::PtrType ptrTy, int64_t rowStride,
                           int64_t rs, int64_t numLoop, int64_t remain) {
     Value off = idxc(numLoop * kRepeatMax * rowStride, loc, b);
-    vadd(loc, b, addPtr(loc, b, dst, ptrTy, off),
+    emitUBBinOp<UBop>(loc, b, addPtr(loc, b, dst, ptrTy, off),
          addPtr(loc, b, s0, ptrTy, off), addPtr(loc, b, s1, ptrTy, off),
          i64c(remain, loc, b), i64c(rs, loc, b));
   }
