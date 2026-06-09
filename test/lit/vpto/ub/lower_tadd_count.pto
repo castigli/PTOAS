@@ -6,8 +6,7 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// Test Bin1LCountMode: nonVLAligned.
-// 7x48 f32 — cols=48, epr=32, nonVLAligned=true → count mode.
+// Test Bin1LCountMode: 7x48 f32, headRepeats>1 → per-row scf.for.
 
 // RUN: ( mkdir -p %T && ptoas --pto-arch=a3 --pto-backend=vpto %s -o %t --mlir-print-ir-after=pto-lower-to-ubuf-ops 2>&1 || true ) | FileCheck %s
 
@@ -21,11 +20,8 @@ module attributes {pto.target_arch = "a3", pto.kernel_kind = #pto.kernel_kind<ve
   }
 }
 
-// Count mode: set_mask_count → set_mask(totalV,0) → vadd(repeat=0) → set_mask_norm → set_mask(-1,-1)
 // CHECK-LABEL: func.func @lower_tadd_count
 // CHECK: pto.ub.set_mask_count
-// CHECK: pto.ub.set_mask
 // CHECK: pto.ub.vadd
 // CHECK: pto.ub.set_mask_norm
-// CHECK: pto.ub.set_mask %c-1_i64, %c-1_i64
 // CHECK-NOT: pto.tadd

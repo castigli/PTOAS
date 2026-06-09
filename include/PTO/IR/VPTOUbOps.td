@@ -58,6 +58,9 @@ class PTO_UBufBinaryOp<string mnemonic, list<Trait> traits = []>
 }
 
 def PTO_UBVaddOp : PTO_UBufBinaryOp<"ub.vadd">;
+def PTO_UBVsubOp : PTO_UBufBinaryOp<"ub.vsub">;
+def PTO_UBVmulOp : PTO_UBufBinaryOp<"ub.vmul">;
+def PTO_UBVdivOp : PTO_UBufBinaryOp<"ub.vdiv">;
 
 def PTO_UBSetMaskOp : PTO_Op<"ub.set_mask", [
     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>

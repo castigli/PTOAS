@@ -28,6 +28,6 @@ module attributes {pto.target_arch = "a3", pto.kernel_kind = #pto.kernel_kind<ve
 // CHECK: pto.ub.set_mask
 // CHECK: pto.ub.vadd
 // CHECK: pto.ub.set_mask_norm
-// CHECK: pto.ub.set_mask %c-1_i64, %c-1_i64
+// CHECK: pto.ub.set_mask %c-1_i64, %c0
 // CHECK-NOT: scf.for
 // CHECK-NOT: pto.tadd

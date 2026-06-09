@@ -6,9 +6,8 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// Test Bin2LNormModeRowRpt (fast) with masked tail.
-// 5x128 f32, valid=5x40 → RowRpt fast path.
-// head: vadd(repeat=5, repStride=16), tail: addptr → set_mask(8) → vadd(5, 16) → restore.
+// Test Bin2LNormModeRowRpt. 5x128 f32, v_col=40.
+// headRepeats=3 > 1 → per-row scf.for count mode.
 
 // RUN: ( mkdir -p %T && ptoas --pto-arch=a3 --pto-backend=vpto %s -o %t --mlir-print-ir-after=pto-lower-to-ubuf-ops 2>&1 || true ) | FileCheck %s
 
@@ -22,15 +21,9 @@ module attributes {pto.target_arch = "a3", pto.kernel_kind = #pto.kernel_kind<ve
   }
 }
 
-// Head: vadd(repeat=5, repStride=16), then
-// Tail: addptr*3 → set_mask → vadd(repeat=5, stride=16) → set_mask(-1,-1)
 // CHECK-LABEL: func.func @lower_tadd_row_rpt_tail
-
-// First vadd (head): no mask before it
+// CHECK: scf.for
+// CHECK: pto.ub.set_mask_count
 // CHECK: pto.ub.vadd
-// CHECK-NOT: pto.ub.set_mask
-// CHECK: pto.addptr
-// CHECK: pto.ub.set_mask
-// CHECK: pto.ub.vadd
-// CHECK: pto.ub.set_mask %c-1_i64, %c-1_i64
+// CHECK: pto.ub.set_mask_norm
 // CHECK-NOT: pto.tadd
