@@ -535,14 +535,10 @@ static LogicalResult verifyLdgStgAccess(Operation *op, Type ptrType,
     return success();
   if (pto::isPTOFloat8Type(valueType) || pto::isPTOHiFloat8Type(valueType))
     return success();
-  if (pto::isPTOPackedLdgStgVectorType(valueType))
-    return success();
 
   return op->emitOpError()
-         << "currently supports 8/16/32/64-bit integer, "
-            "f16/bf16/f32/f64/fp8/hif8, "
-            "and packed vector<2xT> (T = "
-            "f16/bf16/f32/fp8/i8/i16/i32) and !pto.hif8x2 value type";
+         << "currently supports 8/16/32/64-bit integer and "
+            "f16/bf16/f32/f64/fp8/hif8 value type";
 }
 
 LogicalResult PTOLoadOp::verify() {
@@ -8232,6 +8228,49 @@ LogicalResult UBVdupOp::verify() {
     return emitOpError("requires pointer-like dst operand");
   if (classifyMemoryRole(getDst().getType()) != MemoryRole::UB)
     return emitOpError("requires UB-backed dst operand");
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// UBVgatherbOp
+//===----------------------------------------------------------------------===//
+
+void UBVgatherbOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Read::get(), &getSrcMutable());
+  effects.emplace_back(MemoryEffects::Read::get(), &getOffsetMutable());
+  effects.emplace_back(MemoryEffects::Write::get(), &getDstMutable());
+}
+
+LogicalResult UBVgatherbOp::verify() {
+  if (!isBufferLike(getDst().getType()) || !isBufferLike(getOffset().getType()) ||
+      !isBufferLike(getSrc().getType()))
+    return emitOpError("requires pointer-like operands");
+  if (classifyMemoryRole(getDst().getType()) != MemoryRole::UB ||
+      classifyMemoryRole(getOffset().getType()) != MemoryRole::UB ||
+      classifyMemoryRole(getSrc().getType()) != MemoryRole::UB)
+    return emitOpError("requires UB-backed operands");
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// UBVgatherOp
+//===----------------------------------------------------------------------===//
+
+void UBVgatherOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Read::get(), &getSrcMutable());
+  effects.emplace_back(MemoryEffects::Write::get(), &getDstMutable());
+}
+
+LogicalResult UBVgatherOp::verify() {
+  if (!isBufferLike(getDst().getType()) || !isBufferLike(getSrc().getType()))
+    return emitOpError("requires pointer-like operands");
+  if (classifyMemoryRole(getDst().getType()) != MemoryRole::UB ||
+      classifyMemoryRole(getSrc().getType()) != MemoryRole::UB)
+    return emitOpError("requires UB-backed operands");
   return success();
 }
 

@@ -2729,14 +2729,6 @@ static FailureOr<StringRef> buildL1CacheLoadCallee(MLIRContext *context,
   } else if (pto::isPTOFloat8Type(resultType) ||
              pto::isPTOHiFloat8Type(resultType)) {
     elem = "s8";
-  } else if (pto::isPTOPackedLdgStgVectorType(resultType)) {
-    unsigned totalBits = pto::getPTOPackedLdgStgTotalBits(resultType);
-    if (totalBits == 16)
-      elem = "s16";
-    else if (totalBits == 32)
-      elem = "s32";
-    else if (totalBits == 64)
-      elem = "s64";
   }
   if (elem.empty())
     return failure();
@@ -2769,14 +2761,6 @@ static FailureOr<StringRef> buildL1CacheStoreCallee(MLIRContext *context,
   } else if (pto::isPTOFloat8Type(valueType) ||
              pto::isPTOHiFloat8Type(valueType)) {
     elem = "b8";
-  } else if (pto::isPTOPackedLdgStgVectorType(valueType)) {
-    unsigned totalBits = pto::getPTOPackedLdgStgTotalBits(valueType);
-    if (totalBits == 16)
-      elem = "b16";
-    else if (totalBits == 32)
-      elem = "b32";
-    else if (totalBits == 64)
-      elem = "b64";
   }
   if (elem.empty())
     return failure();
@@ -4227,13 +4211,6 @@ StringRef buildSyncCallee<pto::RlsBufOp>(MLIRContext *context) {
   return StringAttr::get(context, "llvm.hivm.RLS.BUFI.mode").getValue();
 }
 
-static StringRef buildBufDynSyncCallee(MLIRContext *context, bool isGetBuf) {
-  return StringAttr::get(context,
-                         isGetBuf ? "llvm.hivm.GET.BUF.mode"
-                                  : "llvm.hivm.RLS.BUF.mode")
-      .getValue();
-}
-
 template <typename QueryOp>
 static StringRef buildRuntimeQueryCallee(MLIRContext *context);
 
@@ -4842,6 +4819,167 @@ public:
     auto call = rewriter.create<func::CallOp>(
         op.getLoc(), calleeName, TypeRange{},
         ValueRange{dst, src0, src1, config});
+    (void)call;
+    state.plannedDecls.push_back(PlannedDecl{calleeName, funcType});
+    rewriter.eraseOp(op);
+    return success();
+  }
+
+private:
+  LoweringState &state;
+};
+
+// pto.ub.vgatherb -> llvm.hivm.VGATHERB.b16/.b32(dst_ptr, offset_ptr, i64 config)
+// Config (decoded from bisheng IR, see docs/designs/a2a3-vpto-tgather.md):
+//   srcAddr[31:0] | dstRepeatStride[39:32] | dstBlockStride[47:40]
+//   | reserved[55:48]=0 | repeat[63:56]
+// The 2nd pointer operand is the offset buffer; the source data base address
+// (low 32 bits of the src pointer) is packed into config[31:0].
+class LowerUBVgatherbOpPattern final
+    : public OpConversionPattern<pto::UBVgatherbOp> {
+public:
+  explicit LowerUBVgatherbOpPattern(TypeConverter &typeConverter,
+                                    MLIRContext *context, LoweringState &state)
+      : OpConversionPattern<pto::UBVgatherbOp>(typeConverter, context),
+        state(state) {}
+
+  LogicalResult
+  matchAndRewrite(pto::UBVgatherbOp op, pto::UBVgatherbOp::Adaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Value dst = adaptor.getDst();
+    Value offset = adaptor.getOffset();
+    Value src = adaptor.getSrc();
+    if (!dst || !offset || !src ||
+        !isa<LLVM::LLVMPointerType>(dst.getType()) ||
+        !isa<LLVM::LLVMPointerType>(offset.getType()) ||
+        !isa<LLVM::LLVMPointerType>(src.getType()))
+      return rewriter.notifyMatchFailure(
+          op, "unexpected converted ub.vgatherb operand types");
+
+    auto ptrType = mlir::cast<pto::PtrType>(op.getDst().getType());
+    Type elemType = ptrType.getElementType();
+    unsigned width = pto::getPTOStorageElemBitWidth(elemType);
+    if (width != 16 && width != 32)
+      return rewriter.notifyMatchFailure(
+          op, "unsupported element width for ub.vgatherb");
+    std::string calleeName =
+        std::string("llvm.hivm.VGATHERB.") + ((width == 16) ? "b16" : "b32");
+
+    Location loc = op.getLoc();
+    auto i64Ty = rewriter.getI64Type();
+    auto constI64 = [&](uint64_t v) -> Value {
+      return rewriter.create<arith::ConstantOp>(loc,
+                                                rewriter.getI64IntegerAttr(v));
+    };
+    auto getI64 = [&](Value v) -> Value {
+      return castIntegerLikeTo(op, v, i64Ty);
+    };
+    auto maskByte = [&](Value v) -> Value {
+      return rewriter.create<arith::AndIOp>(loc, v, constI64(0xff));
+    };
+    auto shl = [&](Value v, uint64_t amount) -> Value {
+      return rewriter.create<arith::ShLIOp>(loc, v, constI64(amount));
+    };
+
+    // config[31:0] = source data address (low 32 bits of the src pointer).
+    // srcAddr = the UB address of the source tile.
+    // Trace back through castptr to get the original i64 address operand
+    // (the planned UB offset), which is what the pto-isa reference loads
+    // from Tile host_ptr metadata. This avoids PtrToInt roundtrip issues
+    // on CCE hardware where addrspace(6) pointer values may not equal
+    // the integer UB offset.
+    Value srcAddr;
+    if (auto *defOp = op.getSrc().getDefiningOp()) {
+      if (auto castOp = dyn_cast<pto::CastPtrOp>(defOp))
+        srcAddr = castOp.getOperand();
+    }
+    if (!srcAddr)
+      srcAddr = rewriter.create<LLVM::PtrToIntOp>(loc, i64Ty, src);
+    Value config =
+        rewriter.create<arith::AndIOp>(loc, srcAddr, constI64(0xffffffff));
+    config = rewriter.create<arith::OrIOp>(
+        loc, config, shl(maskByte(getI64(adaptor.getDstRepeatStride())), 32));
+    config = rewriter.create<arith::OrIOp>(
+        loc, config, shl(maskByte(getI64(adaptor.getDstBlockStride())), 40));
+    config = rewriter.create<arith::OrIOp>(
+        loc, config, shl(maskByte(getI64(adaptor.getRepeat())), 56));
+
+    auto funcType = rewriter.getFunctionType(
+        TypeRange{dst.getType(), offset.getType(), rewriter.getI64Type()},
+        TypeRange{});
+    auto call = rewriter.create<func::CallOp>(op.getLoc(), calleeName,
+                                              TypeRange{},
+                                              ValueRange{dst, offset, config});
+    (void)call;
+    state.plannedDecls.push_back(PlannedDecl{calleeName, funcType});
+    rewriter.eraseOp(op);
+    return success();
+  }
+
+private:
+  LoweringState &state;
+};
+
+// pto.ub.vgather -> llvm.hivm.VGATHER.b16/.b32(dst_ptr, src_ptr, i64 config)
+// Config: offsetAddr[31:0] | dstRepeatStride[39:32] | repeat[63:56].
+class LowerUBVgatherOpPattern final
+    : public OpConversionPattern<pto::UBVgatherOp> {
+public:
+  explicit LowerUBVgatherOpPattern(TypeConverter &typeConverter,
+                                   MLIRContext *context, LoweringState &state)
+      : OpConversionPattern<pto::UBVgatherOp>(typeConverter, context),
+        state(state) {}
+
+  LogicalResult
+  matchAndRewrite(pto::UBVgatherOp op, pto::UBVgatherOp::Adaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Value dst = adaptor.getDst();
+    Value src = adaptor.getSrc();
+    if (!dst || !src ||
+        !isa<LLVM::LLVMPointerType>(dst.getType()) ||
+        !isa<LLVM::LLVMPointerType>(src.getType()))
+      return rewriter.notifyMatchFailure(
+          op, "unexpected converted ub.vgather operand types");
+
+    auto ptrType = mlir::cast<pto::PtrType>(op.getDst().getType());
+    Type elemType = ptrType.getElementType();
+    unsigned width = pto::getPTOStorageElemBitWidth(elemType);
+    if (width != 16 && width != 32)
+      return rewriter.notifyMatchFailure(
+          op, "unsupported element width for ub.vgather");
+    std::string calleeName =
+        std::string("llvm.hivm.VGATHER.") + ((width == 16) ? "b16" : "b32");
+
+    Location loc = op.getLoc();
+    auto i64Ty = rewriter.getI64Type();
+    auto constI64 = [&](uint64_t v) -> Value {
+      return rewriter.create<arith::ConstantOp>(loc,
+                                                rewriter.getI64IntegerAttr(v));
+    };
+    auto getI64 = [&](Value v) -> Value {
+      return castIntegerLikeTo(op, v, i64Ty);
+    };
+    auto maskByte = [&](Value v) -> Value {
+      return rewriter.create<arith::AndIOp>(loc, v, constI64(0xff));
+    };
+    auto shl = [&](Value v, uint64_t amount) -> Value {
+      return rewriter.create<arith::ShLIOp>(loc, v, constI64(amount));
+    };
+
+    Value config =
+        rewriter.create<arith::AndIOp>(loc, getI64(adaptor.getOffsetAddr()),
+                                       constI64(0xffffffff));
+    config = rewriter.create<arith::OrIOp>(
+        loc, config, shl(maskByte(getI64(adaptor.getDstRepeatStride())), 32));
+    config = rewriter.create<arith::OrIOp>(
+        loc, config, shl(maskByte(getI64(adaptor.getRepeat())), 56));
+
+    auto funcType = rewriter.getFunctionType(
+        TypeRange{dst.getType(), src.getType(), rewriter.getI64Type()},
+        TypeRange{});
+    auto call = rewriter.create<func::CallOp>(op.getLoc(), calleeName,
+                                              TypeRange{},
+                                              ValueRange{dst, src, config});
     (void)call;
     state.plannedDecls.push_back(PlannedDecl{calleeName, funcType});
     rewriter.eraseOp(op);
@@ -9541,67 +9679,6 @@ private:
   LoweringState &state;
 };
 
-template <typename BufDynSyncOp>
-class LowerBufDynSyncOpPattern final
-    : public OpConversionPattern<BufDynSyncOp> {
-public:
-  explicit LowerBufDynSyncOpPattern(TypeConverter &typeConverter,
-                                    MLIRContext *context, LoweringState &state)
-      : OpConversionPattern<BufDynSyncOp>(typeConverter, context),
-        state(state) {}
-
-  LogicalResult
-  matchAndRewrite(BufDynSyncOp op, typename BufDynSyncOp::Adaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    PIPE pipe = PIPE::PIPE_UNASSIGNED;
-    if (auto pipeAttr = dyn_cast<PipeAttr>(op.getOpTypeAttr())) {
-      pipe = pipeAttr.getPipe();
-    } else {
-      auto opTypeOr = parseSyncOpTypeLikeAttr(op.getOpTypeAttr());
-      if (failed(opTypeOr))
-        return rewriter.notifyMatchFailure(
-            op, "buffer sync expects pipe/sync_op_type/pipe_event_type attr");
-      pipe = mapSyncOpTypeToPipe(*opTypeOr);
-    }
-    if (!isConcreteSyncPipe(pipe))
-      return rewriter.notifyMatchFailure(
-          op, "buffer sync op_type cannot map to concrete pipe");
-
-    auto pipeImm = parsePipeImmediate(stringifyPIPE(pipe));
-    if (!pipeImm)
-      return rewriter.notifyMatchFailure(op, "unsupported buffer sync pipe");
-
-    Value pipeValue = getI64Constant(rewriter, op.getLoc(), *pipeImm);
-    Value bufIdDyn = adaptor.getBufId();
-    if (!bufIdDyn)
-      return rewriter.notifyMatchFailure(
-          op, "expected dynamic buf-id operand");
-    Value bufIdValue = castIntegerLikeTo(op, bufIdDyn, rewriter.getI64Type());
-    if (!bufIdValue)
-      return rewriter.notifyMatchFailure(
-          op, "failed to cast dynamic buf-id to i64");
-
-    bool isGetBuf =
-        std::is_same_v<BufDynSyncOp, pto::GetBufDynOp>;
-    StringRef calleeName =
-        buildBufDynSyncCallee(op.getContext(), isGetBuf);
-    Value modeValue =
-        getI64Constant(rewriter, op.getLoc(), op.getModeAttr().getInt());
-    auto funcType = rewriter.getFunctionType(
-        TypeRange{rewriter.getI64Type(), rewriter.getI64Type(),
-                  rewriter.getI64Type()},
-        TypeRange{});
-    rewriter.create<func::CallOp>(op.getLoc(), calleeName, TypeRange{},
-                                  ValueRange{pipeValue, bufIdValue, modeValue});
-    state.plannedDecls.push_back(PlannedDecl{calleeName.str(), funcType});
-    rewriter.eraseOp(op);
-    return success();
-  }
-
-private:
-  LoweringState &state;
-};
-
 template <typename QueryOp>
 class LowerRuntimeQueryOpPattern final : public OpConversionPattern<QueryOp> {
 public:
@@ -10591,15 +10668,6 @@ static Type getLdgCallResultType(Type valueType, Type convertedValueType,
     return rewriter.getI64Type();
   if (pto::isPTOFloat8Type(valueType) || pto::isPTOHiFloat8Type(valueType))
     return rewriter.getI32Type();
-  if (pto::isPTOPackedLdgStgVectorType(valueType)) {
-    unsigned totalBits = pto::getPTOPackedLdgStgTotalBits(valueType);
-    if (totalBits == 16)
-      return rewriter.getI32Type();
-    if (totalBits == 32)
-      return rewriter.getI32Type();
-    if (totalBits == 64)
-      return rewriter.getI64Type();
-  }
   return convertedValueType;
 }
 
@@ -10626,16 +10694,6 @@ static Value convertLdgCallResult(Location loc, Type valueType,
     Value payload =
         rewriter.create<arith::TruncIOp>(loc, rewriter.getI8Type(), callResult);
     return rewriter.create<LLVM::BitcastOp>(loc, convertedValueType, payload);
-  }
-  if (pto::isPTOPackedLdgStgVectorType(valueType)) {
-    unsigned totalBits = pto::getPTOPackedLdgStgTotalBits(valueType);
-    if (totalBits == 16) {
-      Value trunc = rewriter.create<arith::TruncIOp>(
-          loc, rewriter.getI16Type(), callResult);
-      return rewriter.create<LLVM::BitcastOp>(loc, convertedValueType, trunc);
-    }
-    return rewriter.create<LLVM::BitcastOp>(loc, convertedValueType,
-                                            callResult);
   }
   return callResult;
 }
@@ -10768,18 +10826,6 @@ static Value convertStgValue(Location loc, Type valueType, Value value,
     return rewriter.create<LLVM::BitcastOp>(loc, rewriter.getI32Type(), value);
   if (valueType.isF64())
     return rewriter.create<LLVM::BitcastOp>(loc, rewriter.getI64Type(), value);
-  if (pto::isPTOPackedLdgStgVectorType(valueType)) {
-    unsigned totalBits = pto::getPTOPackedLdgStgTotalBits(valueType);
-    if (totalBits == 16)
-      return rewriter.create<LLVM::BitcastOp>(loc, rewriter.getF16Type(),
-                                              value);
-    if (totalBits == 32)
-      return rewriter.create<LLVM::BitcastOp>(loc, rewriter.getI32Type(),
-                                              value);
-    if (totalBits == 64)
-      return rewriter.create<LLVM::BitcastOp>(loc, rewriter.getI64Type(),
-                                              value);
-  }
   return value;
 }
 
@@ -11055,8 +11101,6 @@ static void populateVPTOOpLoweringPatterns(VPTOTypeConverter &typeConverter,
                LowerDcciOpPattern,
                LowerBufSyncOpPattern<pto::GetBufOp>,
                LowerBufSyncOpPattern<pto::RlsBufOp>,
-               LowerBufDynSyncOpPattern<pto::GetBufDynOp>,
-               LowerBufDynSyncOpPattern<pto::RlsBufDynOp>,
                LowerRuntimeQueryOpPattern<pto::GetBlockIdxOp>,
                LowerRuntimeQueryOpPattern<pto::GetSubBlockIdxOp>,
                LowerRuntimeQueryOpPattern<pto::GetBlockNumOp>,
@@ -11155,6 +11199,10 @@ static void populateVPTOOpLoweringPatterns(VPTOTypeConverter &typeConverter,
         typeConverter, patterns.getContext(), state);
     patterns.add<LowerUBufVdupPattern>(
         typeConverter, patterns.getContext(), state);
+    patterns.add<LowerUBVgatherbOpPattern>(
+        typeConverter, patterns.getContext(), state);
+    patterns.add<LowerUBVgatherOpPattern>(
+        typeConverter, patterns.getContext(), state);
     patterns.add<LowerUBSetMaskOpPattern>(
         typeConverter, patterns.getContext(), state);
     patterns.add<LowerUBSetMaskCountOpPattern>(
@@ -11184,8 +11232,7 @@ static void configureVPTOOpLoweringTarget(ConversionTarget &target,
                       pto::SyncWaitOp, pto::BarrierOp, pto::MemBarOp,
                       pto::CmoCacheInvalidOp, pto::FenceBarrierAllOp,
                       pto::DsbOp, pto::DcciOp,
-                      pto::GetBufOp, pto::RlsBufOp,
-                      pto::GetBufDynOp, pto::RlsBufDynOp>();
+                      pto::GetBufOp, pto::RlsBufOp>();
   target.addIllegalOp<pto::GetBlockIdxOp, pto::GetSubBlockIdxOp,
                       pto::GetBlockNumOp, pto::GetSubBlockNumOp,
                       pto::GetCtrlOp, pto::GetVms4SrOp, pto::GetTidXOp,
@@ -11305,6 +11352,8 @@ static void configureVPTOOpLoweringTarget(ConversionTarget &target,
     target.addIllegalOp<pto::UBVmaxSOp>();
     target.addIllegalOp<pto::UBVminSOp>();
     target.addIllegalOp<pto::UBVdupOp>();
+    target.addIllegalOp<pto::UBVgatherbOp>();
+    target.addIllegalOp<pto::UBVgatherOp>();
     target.addIllegalOp<pto::UBSetMaskOp>();
     target.addIllegalOp<pto::UBSetMaskCountOp>();
     target.addIllegalOp<pto::UBSetMaskNormOp>();

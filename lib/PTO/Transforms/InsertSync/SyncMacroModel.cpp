@@ -409,6 +409,17 @@ std::optional<SyncMacroModel> getMGatherSyncMacroModel(pto::MGatherOp op) {
   return model;
 }
 
+// TGatherBOp (byte-offset gather): single-phase PIPE_V op that reads src +
+// offsets and writes dst. Explicit model ensures InsertSync detects the
+// cross-pipe MTE2→V dependency (DMA load of src/offsets must complete before
+// the gather reads them).
+std::optional<SyncMacroModel> getTGatherBSyncMacroModel(pto::TGatherBOp op) {
+  SyncMacroModel model;
+  addPhase(model, PipelineType::PIPE_V, ValueRange{op.getDst()},
+           ValueRange{op.getSrc(), op.getOffsets()});
+  return model;
+}
+
 } // namespace
 
 std::optional<SyncMacroModel> mlir::pto::getSyncMacroModel(Operation *op) {
@@ -420,6 +431,8 @@ std::optional<SyncMacroModel> mlir::pto::getSyncMacroModel(Operation *op) {
     return getTScatterSyncMacroModel(tscatter);
   if (auto tgather = dyn_cast<pto::TGatherOp>(op))
     return getTGatherSyncMacroModel(tgather);
+  if (auto tgatherb = dyn_cast<pto::TGatherBOp>(op))
+    return getTGatherBSyncMacroModel(tgatherb);
   if (auto mgather = dyn_cast<pto::MGatherOp>(op))
     return getMGatherSyncMacroModel(mgather);
   return std::nullopt;

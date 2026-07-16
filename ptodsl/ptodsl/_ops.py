@@ -63,7 +63,6 @@ from ._types import (
     _materialize_integer_literal,
     _normalize_address_space,
     _resolve,
-    _strip_integer_signedness,
     mask_type,
     part_tensor_view_type,
     part_tensor_view_type_from_dims,
@@ -138,13 +137,6 @@ def _validate_static_event_id(event_id, *, context: str):
         raise TypeError(f"{context} does not accept bool values")
     if isinstance(event_id, int) and not 0 <= event_id <= 7:
         raise ValueError(f"{context} expects static event_id in [0, 7], got {event_id}")
-
-
-def _validate_static_buf_id(buf_id, *, context: str):
-    if isinstance(buf_id, bool):
-        raise TypeError(f"{context} does not accept bool values")
-    if isinstance(buf_id, int) and not 0 <= buf_id <= 31:
-        raise ValueError(f"{context} expects static buf_id in [0, 31], got {buf_id}")
 
 
 def _validate_sync_pipe(pipe, *, context: str, allowed: tuple[str, ...]):
@@ -236,17 +228,6 @@ def const(value: int, *, dtype=None):
     if IntegerType.isinstance(mlir_type):
         return wrap_surface_value(_materialize_integer_literal(mlir_type, value))
     return wrap_surface_value(arith.ConstantOp(mlir_type, value).result)
-
-
-def get_op_attr(name: str, default=None):
-    """Return a TileLib render-time op attribute supplied by the C++ bridge."""
-    from ._tracing.active import current_runtime
-
-    runtime = current_runtime()
-    attrs = getattr(runtime, "context_attrs", None)
-    if not attrs:
-        return default
-    return attrs.get(name, default)
 
 
 # ── Pointer ops ───────────────────────────────────────────────────────────────
@@ -1777,19 +1758,6 @@ def vdiv(lhs, rhs, mask):
     return _emit_binary_vec_op(_pto.VdivOp, lhs, rhs, mask)
 
 
-def vtrc(inp, mask, *, rnd="Z"):
-    """``pto.vtrc`` – truncate/round vector lanes according to *rnd*."""
-    _reject_low_precision_vreg_operands(inp, context="pto.vtrc(...)")
-    return wrap_surface_value(
-        _pto.VtrcOp(
-            unwrap_surface_value(inp).type,
-            unwrap_surface_value(inp),
-            unwrap_surface_value(mask),
-            _normalize_vcvt_round_mode(rnd, context="vtrc(..., rnd=...)"),
-        ).result
-    )
-
-
 def vshl(lhs, rhs, mask):
     """``pto.vshl`` – element-wise shift left."""
     return _emit_binary_vec_op(_pto.VshlOp, lhs, rhs, mask)
@@ -1800,32 +1768,6 @@ def vshr(lhs, rhs, mask):
     return _emit_binary_vec_op(_pto.VshrOp, lhs, rhs, mask)
 
 
-def vshls(inp, scalar, mask):
-    """``pto.vshls`` – vector shift-left by scalar under mask."""
-    _reject_low_precision_vreg_operands(inp, context="pto.vshls(...)")
-    return wrap_surface_value(
-        _pto.VshlsOp(
-            unwrap_surface_value(inp).type,
-            unwrap_surface_value(inp),
-            _coerce_i16(scalar, context="vshls"),
-            unwrap_surface_value(mask),
-        ).result
-    )
-
-
-def vshrs(inp, scalar, mask):
-    """``pto.vshrs`` – vector shift-right by scalar under mask."""
-    _reject_low_precision_vreg_operands(inp, context="pto.vshrs(...)")
-    return wrap_surface_value(
-        _pto.VshrsOp(
-            unwrap_surface_value(inp).type,
-            unwrap_surface_value(inp),
-            _coerce_i16(scalar, context="vshrs"),
-            unwrap_surface_value(mask),
-        ).result
-    )
-
-
 def vcmax(v, mask):
     """``pto.vcmax`` – cross-lane maximum reduction."""
     return _emit_unary_vec_op(_pto.VcmaxOp, v, mask)
@@ -1833,38 +1775,7 @@ def vcmax(v, mask):
 
 def vcadd(v, mask):
     """``pto.vcadd`` – cross-lane add (sum reduction)."""
-    _reject_low_precision_vreg_operands(v, context="pto.vcadd(...)")
-    raw_v = unwrap_surface_value(v)
-    input_type = _pto.VRegType(raw_v.type)
-    elem_type = input_type.element_type
-    result_elem_type = elem_type
-    result_lanes = input_type.element_count
-    if IntegerType.isinstance(elem_type):
-        int_type = IntegerType(elem_type)
-        if int_type.width == 8:
-            if int_type.is_unsigned:
-                result_elem_type = IntegerType.get_unsigned(16)
-            elif int_type.is_signed:
-                result_elem_type = IntegerType.get_signed(16)
-            else:
-                result_elem_type = IntegerType.get_signless(16)
-            result_lanes = input_type.element_count // 2
-        elif int_type.width == 16:
-            if int_type.is_unsigned:
-                result_elem_type = IntegerType.get_unsigned(32)
-            elif int_type.is_signed:
-                result_elem_type = IntegerType.get_signed(32)
-            else:
-                result_elem_type = IntegerType.get_signless(32)
-            result_lanes = input_type.element_count // 2
-    result_type = _resolve(vreg_type(result_lanes, result_elem_type))
-    return wrap_surface_value(
-        _pto.VcaddOp(
-            result_type,
-            raw_v,
-            unwrap_surface_value(mask),
-        ).result
-    )
+    return _emit_unary_vec_op(_pto.VcaddOp, v, mask)
 
 
 def vcmin(v, mask):
@@ -2086,164 +1997,6 @@ def vcgmin(v, mask):
 def vcpadd(v, mask):
     """``pto.vcpadd`` – inclusive prefix sum."""
     return _emit_unary_vec_op(_pto.VcpaddOp, v, mask)
-
-
-def vprelu(lhs, rhs, mask):
-    """``pto.vprelu`` – vector parametric ReLU."""
-    return _emit_binary_vec_op(_pto.VpreluOp, lhs, rhs, mask)
-
-
-def vintlv(lhs, rhs):
-    """``pto.vintlv`` – interleave two vectors and return the low/high pair."""
-    _reject_low_precision_vreg_operands(lhs, rhs, context="pto.vintlv(...)")
-    low, high = _pto.VintlvOp(
-        unwrap_surface_value(lhs).type,
-        unwrap_surface_value(rhs).type,
-        unwrap_surface_value(lhs),
-        unwrap_surface_value(rhs),
-    ).results
-    return wrap_surface_value(low), wrap_surface_value(high)
-
-
-def vdintlv(lhs, rhs):
-    """``pto.vdintlv`` – deinterleave two vectors and return the low/high pair."""
-    _reject_low_precision_vreg_operands(lhs, rhs, context="pto.vdintlv(...)")
-    low, high = _pto.VdintlvOp(
-        unwrap_surface_value(lhs).type,
-        unwrap_surface_value(rhs).type,
-        unwrap_surface_value(lhs),
-        unwrap_surface_value(rhs),
-    ).results
-    return wrap_surface_value(low), wrap_surface_value(high)
-
-
-def vselr(src0, src1):
-    """``pto.vselr`` – vector select/reorder helper."""
-    _reject_low_precision_vreg_operands(src0, src1, context="pto.vselr(...)")
-    return wrap_surface_value(
-        _pto.VselrOp(
-            unwrap_surface_value(src0).type,
-            unwrap_surface_value(src0),
-            unwrap_surface_value(src1),
-        ).result
-    )
-
-
-def vci(index, order=None):
-    """``pto.vci`` – vector consecutive index generator."""
-    raw_index = unwrap_surface_value(index)
-    if not hasattr(raw_index, "type"):
-        raw_index = _coerce_i32(raw_index, context="vci(index)")
-    result_type = _resolve(vreg_type(_elements_per_vreg(raw_index.type), raw_index.type))
-    kwargs = {}
-    if order is not None:
-        token = getattr(order, "value", order)
-        if not isinstance(token, str):
-            token = str(token)
-            if "." in token:
-                token = token.rsplit(".", 1)[-1]
-        kwargs["order"] = token.strip().upper()
-    return wrap_surface_value(_pto.VciOp(result_type, raw_index, **kwargs).result)
-
-
-def vaddc(lhs, rhs, mask):
-    """``pto.vaddc`` – vector add with carry-out predicate."""
-    _reject_low_precision_vreg_operands(lhs, rhs, context="pto.vaddc(...)")
-    carry_type = unwrap_surface_value(mask).type
-    result, carry = _pto.VaddcOp(
-        unwrap_surface_value(lhs).type,
-        carry_type,
-        unwrap_surface_value(lhs),
-        unwrap_surface_value(rhs),
-        unwrap_surface_value(mask),
-    ).results
-    return wrap_surface_value(result), wrap_surface_value(carry)
-
-
-def vaddcs(lhs, rhs, carry_in, mask):
-    """``pto.vaddcs`` – vector add with carry-in and carry-out."""
-    _reject_low_precision_vreg_operands(lhs, rhs, context="pto.vaddcs(...)")
-    carry_type = unwrap_surface_value(carry_in).type
-    result, carry = _pto.VaddcsOp(
-        unwrap_surface_value(lhs).type,
-        carry_type,
-        unwrap_surface_value(lhs),
-        unwrap_surface_value(rhs),
-        unwrap_surface_value(carry_in),
-        unwrap_surface_value(mask),
-    ).results
-    return wrap_surface_value(result), wrap_surface_value(carry)
-
-
-def vmull(lhs, rhs, mask):
-    """``pto.vmull`` – widening vector multiply returning low/high vectors."""
-    _reject_low_precision_vreg_operands(lhs, rhs, context="pto.vmull(...)")
-    low, high = _pto.VmullOp(
-        unwrap_surface_value(lhs).type,
-        unwrap_surface_value(rhs).type,
-        unwrap_surface_value(lhs),
-        unwrap_surface_value(rhs),
-        unwrap_surface_value(mask),
-    ).results
-    return wrap_surface_value(low), wrap_surface_value(high)
-
-
-def vbitsort(destination, source, indices, repeat_times):
-    """``pto.vbitsort`` – bitonic-sort vector tile primitive."""
-    _pto.VbitsortOp(
-        unwrap_surface_value(destination),
-        unwrap_surface_value(source),
-        unwrap_surface_value(indices),
-        _coerce_index(repeat_times, context="vbitsort(repeat_times)"),
-    )
-
-
-def vmrgsort4(destination, source0, source1, source2, source3, count, config):
-    """``pto.vmrgsort4`` – four-way merge-sort primitive."""
-    _pto.Vmrgsort4Op(
-        unwrap_surface_value(destination),
-        unwrap_surface_value(source0),
-        unwrap_surface_value(source1),
-        unwrap_surface_value(source2),
-        unwrap_surface_value(source3),
-        _coerce_i64(count, context="vmrgsort4(count)"),
-        _coerce_i64(config, context="vmrgsort4(config)"),
-    )
-
-
-def copy_ubuf_to_ubuf(source, destination, sid, n_burst, len_burst, src_stride, dst_stride):
-    """``pto.copy_ubuf_to_ubuf`` – raw UB-to-UB DMA primitive."""
-    _pto.CopyUbufToUbufOp(
-        unwrap_surface_value(source),
-        unwrap_surface_value(destination),
-        _coerce_i64(sid, context="copy_ubuf_to_ubuf(sid)"),
-        _coerce_i64(n_burst, context="copy_ubuf_to_ubuf(n_burst)"),
-        _coerce_i64(len_burst, context="copy_ubuf_to_ubuf(len_burst)"),
-        _coerce_i64(src_stride, context="copy_ubuf_to_ubuf(src_stride)"),
-        _coerce_i64(dst_stride, context="copy_ubuf_to_ubuf(dst_stride)"),
-    )
-
-
-def load_scalar(ptr_value, offset=0, result_type=None):
-    """``pto.load_scalar`` – load one scalar from a pointer-like value."""
-    if result_type is None:
-        result_type = _pointer_element_type(ptr_value, context="load_scalar(ptr)")
-    return wrap_surface_value(
-        _pto.LoadScalarOp(
-            _resolve(result_type),
-            unwrap_surface_value(ptr_value),
-            _coerce_index(offset, context="load_scalar(offset)"),
-        ).value
-    )
-
-
-def store_scalar(ptr_value, offset, value):
-    """``pto.store_scalar`` – store one scalar to a pointer-like value."""
-    _pto.StoreScalarOp(
-        unwrap_surface_value(ptr_value),
-        _coerce_index(offset, context="store_scalar(offset)"),
-        unwrap_surface_value(value),
-    )
 
 
 def vadds(inp, scalar, mask):
@@ -3571,6 +3324,21 @@ def tgather(
         mask_pattern=None if mask_pattern is None else _tile_mask_pattern_attr(mask_pattern),
         cmp_mode=None if cmp_mode is None else _normalize_cmp_mode(cmp_mode),
         offset=offset,
+    )
+
+
+def tgatherb(src, offsets, dst):
+    """``pto.tgatherb`` byte-offset tile gather wrapper.
+
+    Gathers 32B blocks from ``src`` at compact block-address ``offsets`` into
+    ``dst``.  On a2/a3 each offset entry is a 32B-aligned byte address and one
+    repeat consumes 8 entries.
+    On a2/a3 this lowers through ``pto.ub.vgatherb`` to ``llvm.hivm.VGATHERB``.
+    """
+    _pto.tgatherb(
+        unwrap_surface_value(src),
+        unwrap_surface_value(offsets),
+        unwrap_surface_value(dst),
     )
 
 
@@ -5695,48 +5463,21 @@ def pipe_barrier(pipe):
 
 
 def get_buf(pipe, buf_id, mode=0):
-    """``pto.get_buf(pipe, buf_id, mode=0)`` – acquire a buffer token.
-
-    ``buf_id`` accepts a static integer (0–31) or a runtime index-like PTO scalar.
-    """
-    buf_id_op, is_static = _buf_id_operand(
-        buf_id,
-        context="get_buf(..., buf_id=...)",
-    )
-    if is_static:
-        _pto.GetBufOp(_pipe_attr(pipe), buf_id_op, mode=mode)
-        return
-    _pto.GetBufDynOp(
+    """``pto.get_buf(pipe, buf_id, mode=0)`` – acquire a buffer token."""
+    _pto.GetBufOp(
         _pipe_attr(pipe),
+        buf_id,
         mode=mode,
-        buf_id=buf_id_op,
     )
 
 
 def rls_buf(pipe, buf_id, mode=0):
-    """``pto.rls_buf(pipe, buf_id, mode=0)`` – release a buffer token.
-
-    ``buf_id`` accepts a static integer (0–31) or a runtime index-like PTO scalar.
-    """
-    buf_id_op, is_static = _buf_id_operand(
-        buf_id,
-        context="rls_buf(..., buf_id=...)",
-    )
-    if is_static:
-        _pto.RlsBufOp(_pipe_attr(pipe), buf_id_op, mode=mode)
-        return
-    _pto.RlsBufDynOp(
+    """``pto.rls_buf(pipe, buf_id, mode=0)`` – release a buffer token."""
+    _pto.RlsBufOp(
         _pipe_attr(pipe),
+        buf_id,
         mode=mode,
-        buf_id=buf_id_op,
     )
-
-
-def _buf_id_operand(buf_id, *, context: str):
-    if isinstance(buf_id, int):
-        _validate_static_buf_id(buf_id, context=context)
-        return buf_id, True
-    return _coerce_index(buf_id, context=context), False
 
 
 def _sync_event_id_operand(event_id, *, context: str):

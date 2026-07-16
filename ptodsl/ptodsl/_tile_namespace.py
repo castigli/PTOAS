@@ -175,6 +175,7 @@ class _TileNamespace:
     sort32 = staticmethod(_ops.tsort32)
     mrgsort = staticmethod(_ops.tmrgsort)
     gather = staticmethod(_ops.tgather)
+    gatherb = staticmethod(_ops.tgatherb)
 
     sel = staticmethod(_ops.tsel)
     sels = staticmethod(_ops.tsels)
