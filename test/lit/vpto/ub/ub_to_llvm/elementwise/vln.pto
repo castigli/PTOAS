@@ -1,0 +1,26 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// pto.ub.vln -> llvm.hivm.VLN.f32.
+// RUN: ptoas --pto-arch=a3 --pto-backend=vpto %s -o %t --mlir-print-ir-after=convert-func-to-llvm 2>&1 | FileCheck %s
+
+module attributes {pto.target_arch = "a3", pto.kernel_kind = #pto.kernel_kind<vector>} {
+  // CHECK-LABEL: llvm.func @vln_llvm_mix_aiv(
+  func.func @vln_llvm() attributes {pto.aicore} {
+    %c0 = arith.constant 0 : i64
+    %c1 = arith.constant 1 : i64
+    %c8 = arith.constant 8 : i64
+    // CHECK: %[[PTR:.*]] = {{.*}} !llvm.ptr<6>
+    %ptr = pto.castptr %c0 : i64 -> !pto.ptr<f32, ub>
+    // CHECK: llvm.call @llvm.hivm.VLN.f32(%[[PTR]], %[[PTR]], %[[CFG:.*]]) : (!llvm.ptr<6>, !llvm.ptr<6>, i64) -> ()
+    // CHECK-NOT: pto.ub.
+    pto.ub.vln %ptr, %ptr, %c1, %c1, %c1, %c8, %c8 :
+      !pto.ptr<f32, ub>, !pto.ptr<f32, ub>, i64, i64, i64, i64, i64
+    return
+  }
+}

@@ -1,0 +1,69 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// Round-trip (parse -> print) tests for all 7 binary UB elementwise ops.
+// Verifies op mnemonic, operand order, and type annotation survive parsing.
+// RUN: ptoas --pto-arch=a3 --pto-backend=vpto %s -o /dev/null --mlir-print-ir-after=vpto-split-cv-module 2>&1 | FileCheck %s
+
+module attributes {pto.target_arch = "a3", pto.kernel_kind = #pto.kernel_kind<vector>} {
+  // CHECK-LABEL: func.func @rt_vmax
+  func.func @rt_vmax(%dst: !pto.ptr<f32, ub>, %src0: !pto.ptr<f32, ub>, %src1: !pto.ptr<f32, ub>) attributes {pto.aicore} {
+    %c1 = arith.constant 1 : i64
+    %c0 = arith.constant 0 : i64
+    // CHECK: pto.ub.vmax %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}} : !pto.ptr<f32, ub>, !pto.ptr<f32, ub>, !pto.ptr<f32, ub>, i64, i64, i64, i64, i64, i64, i64
+    pto.ub.vmax %dst, %src0, %src1, %c1, %c1, %c1, %c1, %c0, %c0, %c0 : !pto.ptr<f32, ub>, !pto.ptr<f32, ub>, !pto.ptr<f32, ub>, i64, i64, i64, i64, i64, i64, i64
+    return
+  }
+
+  // CHECK-LABEL: func.func @rt_vmin
+  func.func @rt_vmin(%dst: !pto.ptr<f32, ub>, %src0: !pto.ptr<f32, ub>, %src1: !pto.ptr<f32, ub>) attributes {pto.aicore} {
+    %c1 = arith.constant 1 : i64
+    %c0 = arith.constant 0 : i64
+    // CHECK: pto.ub.vmin %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}} : !pto.ptr<f32, ub>, !pto.ptr<f32, ub>, !pto.ptr<f32, ub>, i64, i64, i64, i64, i64, i64, i64
+    pto.ub.vmin %dst, %src0, %src1, %c1, %c1, %c1, %c1, %c0, %c0, %c0 : !pto.ptr<f32, ub>, !pto.ptr<f32, ub>, !pto.ptr<f32, ub>, i64, i64, i64, i64, i64, i64, i64
+    return
+  }
+
+  // CHECK-LABEL: func.func @rt_vand
+  func.func @rt_vand(%dst: !pto.ptr<i16, ub>, %src0: !pto.ptr<i16, ub>, %src1: !pto.ptr<i16, ub>) attributes {pto.aicore} {
+    %c1 = arith.constant 1 : i64
+    %c0 = arith.constant 0 : i64
+    // CHECK: pto.ub.vand %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}} : !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, i64, i64, i64, i64, i64, i64, i64
+    pto.ub.vand %dst, %src0, %src1, %c1, %c1, %c1, %c1, %c0, %c0, %c0 : !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, i64, i64, i64, i64, i64, i64, i64
+    return
+  }
+
+  // CHECK-LABEL: func.func @rt_vor
+  func.func @rt_vor(%dst: !pto.ptr<i16, ub>, %src0: !pto.ptr<i16, ub>, %src1: !pto.ptr<i16, ub>) attributes {pto.aicore} {
+    %c1 = arith.constant 1 : i64
+    %c0 = arith.constant 0 : i64
+    // CHECK: pto.ub.vor %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}} : !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, i64, i64, i64, i64, i64, i64, i64
+    pto.ub.vor %dst, %src0, %src1, %c1, %c1, %c1, %c1, %c0, %c0, %c0 : !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, i64, i64, i64, i64, i64, i64, i64
+    return
+  }
+
+  // CHECK-LABEL: func.func @rt_vshl
+  func.func @rt_vshl(%dst: !pto.ptr<i16, ub>, %src: !pto.ptr<i16, ub>) attributes {pto.aicore} {
+    %c1 = arith.constant 1 : i64
+    %c0 = arith.constant 0 : i64
+    %shift = arith.constant 3 : i64
+    // CHECK: pto.ub.vshl %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}} : !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, i64, i64, i64, i64, i64, i64
+    pto.ub.vshl %dst, %src, %shift, %c1, %c1, %c1, %c1, %c0 : !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, i64, i64, i64, i64, i64, i64
+    return
+  }
+
+  // CHECK-LABEL: func.func @rt_vshr
+  func.func @rt_vshr(%dst: !pto.ptr<i16, ub>, %src: !pto.ptr<i16, ub>) attributes {pto.aicore} {
+    %c1 = arith.constant 1 : i64
+    %c0 = arith.constant 0 : i64
+    %shift = arith.constant 2 : i64
+    // CHECK: pto.ub.vshr %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}} : !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, i64, i64, i64, i64, i64, i64
+    pto.ub.vshr %dst, %src, %shift, %c1, %c1, %c1, %c1, %c0 : !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, i64, i64, i64, i64, i64, i64
+    return
+  }
+}

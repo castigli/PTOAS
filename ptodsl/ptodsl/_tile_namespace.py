@@ -92,6 +92,7 @@ class _TileNamespace:
         return _ops.tstore(tile, part)
 
     add = staticmethod(_ops.tadd)
+    addrelu = staticmethod(_ops.taddrelu)
     sub = staticmethod(_ops.tsub)
     mul = staticmethod(_ops.tmul)
     div = staticmethod(_ops.tdiv)
@@ -174,6 +175,7 @@ class _TileNamespace:
     sort32 = staticmethod(_ops.tsort32)
     mrgsort = staticmethod(_ops.tmrgsort)
     gather = staticmethod(_ops.tgather)
+    gatherb = staticmethod(_ops.tgatherb)
 
     sel = staticmethod(_ops.tsel)
     sels = staticmethod(_ops.tsels)

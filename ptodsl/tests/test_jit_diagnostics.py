@@ -525,6 +525,14 @@ def unknown_branch_result_probe():
     _ = br.other
 
 
+@pto.jit(target="a5")
+def taddrelu_a5_probe():
+    lhs = pto.alloc_tile(shape=[1, 64], dtype=pto.f32)
+    rhs = pto.alloc_tile(shape=[1, 64], dtype=pto.f32)
+    dst = pto.alloc_tile(shape=[1, 64], dtype=pto.f32)
+    pto.tile.addrelu(lhs, rhs, dst)
+
+
 def main() -> None:
     expect_raises(
         native_python_if_runtime_const_probe.compile,
@@ -1068,6 +1076,14 @@ def main() -> None:
         unknown_branch_result_probe.compile,
         AttributeError,
         "br.other was not assigned by this conditional",
+    )
+    expect_raises(
+        taddrelu_a5_probe.compile,
+        ValueError,
+        "pto.tile.addrelu",
+        "target='a2'",
+        "target='a3'",
+        "target='a5'",
     )
     expect_raises(
         lambda: inspect_host_tensor_metadata(MissingDTypeTensor()),

@@ -105,7 +105,7 @@ static std::string normalizePTOASArch(llvm::StringRef archValue) {
 }
 
 static bool isSupportedPTOASArch(llvm::StringRef archValue) {
-  return archValue == "a3" || archValue == "a5";
+  return archValue == "a2" || archValue == "a3" || archValue == "a5";
 }
 
 static std::optional<std::string>
@@ -138,7 +138,7 @@ static bool resolveTextInputArch(llvm::StringRef buffer, bool cliArchSpecified,
   if (cliArchSpecified) {
     if (!isSupportedPTOASArch(arch)) {
       llvm::errs() << "Error: invalid --pto-arch='" << mlir::pto::ptoTargetArch
-                   << "'. Expected 'a3' or 'a5'.\n";
+                   << "'. Expected 'a2', 'a3', or 'a5'.\n";
       return false;
     }
     return true;
@@ -217,7 +217,7 @@ loadInputModule(std::unique_ptr<llvm::MemoryBuffer> inputBuffer,
     arch = normalizePTOASArch(mlir::pto::ptoTargetArch);
     if (cliArchSpecified && !isSupportedPTOASArch(arch)) {
       llvm::errs() << "Error: invalid --pto-arch='" << mlir::pto::ptoTargetArch
-                   << "'. Expected 'a3' or 'a5'.\n";
+                   << "'. Expected 'a2', 'a3', or 'a5'.\n";
       return {};
     }
     module = decodePTOBCModule(buffer, context);

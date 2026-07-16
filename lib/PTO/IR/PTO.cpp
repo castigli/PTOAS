@@ -5348,6 +5348,25 @@ LogicalResult pto::TAddOp::verify() {
       "expects A5 tadd element type to be i32/i16/i8/f16/bf16/f32");
 }
 
+LogicalResult pto::TAddReluOp::verify() {
+  if (shouldBypassDecodedMemrefVerifier(getOperation()))
+    return success();
+  auto verifyA2A3 = [&]() -> LogicalResult {
+    FailureOr<Type> elemOr = verifyMatchingRowMajorBinaryTileOpCommon(
+        getOperation(), getSrc0().getType(), getSrc1().getType(), getDst().getType());
+    if (failed(elemOr))
+      return failure();
+    Type elemTy = *elemOr;
+    if (elemTy.isInteger(16) || elemTy.isF16() || elemTy.isF32())
+      return success();
+    return emitOpError("expects element type to be i16/f16/f32");
+  };
+  auto verifyA5 = [&]() -> LogicalResult {
+    return emitOpError("taddrelu is only supported on A2/A3 targets");
+  };
+  return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
+}
+
 LogicalResult pto::TAddCOp::verify() {
   if (shouldBypassDecodedMemrefVerifier(getOperation()))
     return success();
@@ -7707,13 +7726,40 @@ mlir::LogicalResult mlir::pto::TGatherBOp::verify() {
     FailureOr<std::pair<Type, Type>> elems = verifyCommon();
     if (failed(elems))
       return failure();
+    Type srcTy = getSrc().getType();
+    Type offTy = getOffsets().getType();
     Type dstTy = getDst().getType();
     Type dstElemTy = elems->second;
+    if (failed(verifyTileBufSameValidShape(*this, srcTy, dstTy, "src", "dst")))
+      return failure();
     if (!isRowMajorTileBuf(dstTy))
       return emitOpError() << "expects dst to use row-major layout";
     auto dstBytes = getElemBytes(dstElemTy);
     if (!dstBytes || (*dstBytes != 1 && *dstBytes != 2 && *dstBytes != 4))
       return emitOpError() << "expects dst element size to be 1, 2, or 4 bytes";
+    Type offElemTy = getElemTy(offTy);
+    if (!offElemTy.isInteger(32))
+      return emitOpError() << "expects offsets element type to be i32";
+
+    auto dstValid = getValidShapeVec(dstTy);
+    auto offValid = getValidShapeVec(offTy);
+    if (dstValid.size() != 2 || offValid.size() != 2)
+      return emitOpError() << "expects rank-2 src/offsets/dst tile buffers";
+    if (dstValid[0] != ShapedType::kDynamic &&
+        offValid[0] != ShapedType::kDynamic && dstValid[0] != offValid[0])
+      return emitOpError() << "expects offsets valid rows to match dst valid rows";
+    if (dstValid[1] != ShapedType::kDynamic &&
+        offValid[1] != ShapedType::kDynamic) {
+      int64_t blockElems = 32 / *dstBytes;
+      int64_t blocks = (dstValid[1] + blockElems - 1) / blockElems;
+      int64_t expectedOffsetCols = ((blocks + 7) / 8) * 8;
+      if (offValid[1] != expectedOffsetCols) {
+        return emitOpError()
+               << "expects offsets valid cols to be compact 32B block address "
+                  "count padded to 8 entries; expected "
+               << expectedOffsetCols << ", got " << offValid[1];
+      }
+    }
     return mlir::success();
   };
 
@@ -14112,6 +14158,7 @@ void GetValidShapeOp::getEffects(
 
 // Elementwise + reductions: mostly PIPE_V tilebuf ops
 PTO_DEFINE_BINARY_EFFECTS(TAddOp, getSrc0Mutable(), getSrc1Mutable(), getDstMutable())
+PTO_DEFINE_BINARY_EFFECTS(TAddReluOp, getSrc0Mutable(), getSrc1Mutable(), getDstMutable())
 PTO_DEFINE_TERNARY_EFFECTS(TAddCOp, getSrc0Mutable(), getSrc1Mutable(), getSrc2Mutable(), getDstMutable())
 PTO_DEFINE_UNARY_EFFECTS(TAddSOp, getSrcMutable(), getDstMutable())
 PTO_DEFINE_BINARY_EFFECTS(TAddSCOp, getSrc0Mutable(), getSrc1Mutable(), getDstMutable())

@@ -1,0 +1,31 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// tmax -> ub.vmax lowering for a multi-row tile.
+// RUN: ptoas --pto-arch=a3 --pto-backend=vpto %s -o %t --mlir-print-ir-after=pto-lower-to-ubuf-ops 2>&1 | FileCheck %s
+
+module attributes {pto.target_arch = "a3", pto.kernel_kind = #pto.kernel_kind<vector>} {
+  // CHECK-LABEL: func.func @lower_f32_multi_row()
+  func.func @lower_f32_multi_row() attributes {pto.aicore} {
+    // CHECK: %[[DST_BASE:.*]] = pto.castptr {{.*}} : i64 -> !pto.ptr<f32, ub>
+    %dst  = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=4, cols=64, v_row=4, v_col=64, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    // CHECK: %[[SRC0_BASE:.*]] = pto.castptr {{.*}} : i64 -> !pto.ptr<f32, ub>
+    %src0 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=4, cols=64, v_row=4, v_col=64, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    // CHECK: %[[SRC1_BASE:.*]] = pto.castptr {{.*}} : i64 -> !pto.ptr<f32, ub>
+    %src1 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=4, cols=64, v_row=4, v_col=64, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    // CHECK: scf.for
+    // CHECK: %[[DST:.*]] = pto.addptr %[[DST_BASE]], {{.*}} : <f32, ub> -> <f32, ub>
+    // CHECK: %[[SRC0:.*]] = pto.addptr %[[SRC0_BASE]], {{.*}} : <f32, ub> -> <f32, ub>
+    // CHECK: %[[SRC1:.*]] = pto.addptr %[[SRC1_BASE]], {{.*}} : <f32, ub> -> <f32, ub>
+    // CHECK: pto.ub.vmax %[[DST]], %[[SRC0]], %[[SRC1]]
+    // CHECK-SAME: : !pto.ptr<f32, ub>, !pto.ptr<f32, ub>, !pto.ptr<f32, ub>, i64, i64, i64, i64, i64, i64, i64
+    pto.tmax ins(%src0, %src1 : !pto.tile_buf<loc=vec, dtype=f32, rows=4, cols=64, v_row=4, v_col=64, blayout=row_major, slayout=none_box, fractal=512, pad=0>, !pto.tile_buf<loc=vec, dtype=f32, rows=4, cols=64, v_row=4, v_col=64, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%dst : !pto.tile_buf<loc=vec, dtype=f32, rows=4, cols=64, v_row=4, v_col=64, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+    // CHECK-NOT: pto.tmax
+    return
+  }
+}

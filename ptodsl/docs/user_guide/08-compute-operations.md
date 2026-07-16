@@ -15,8 +15,12 @@ Element-wise operations between two tiles of the same shape.
 #### `pto.tile.mul(src0: Tile, src1: Tile, dst: Tile) -> None`
 #### `pto.tile.max(src0: Tile, src1: Tile, dst: Tile) -> None`
 #### `pto.tile.min(src0: Tile, src1: Tile, dst: Tile) -> None`
+#### `pto.tile.addrelu(src0: Tile, src1: Tile, dst: Tile) -> None`
 
 **Description**: Element-wise `dst[i,j] = src0[i,j] <op> src1[i,j]`.
+For `addrelu`, `dst[i,j] = max(0, src0[i,j] + src1[i,j])`.
+`addrelu` maps to the fused C220 `VADDRELU` path and is supported only for
+A2/A3 VPTO kernels with `f32`, `f16`, or `i16` tile elements.
 
 **Parameters**:
 
@@ -1232,7 +1236,7 @@ pto.tile.gemv_mx_bias(lhs_l0a_mx, lhs_scale, rhs_l0b_mx, rhs_scale, bias_tile, a
 
 | Category | Operations |
 |----------|------------|
-| Binary tile-tile | `tile.add`, `tile.sub`, `tile.mul`, `tile.div`, `tile.max`, `tile.min` |
+| Binary tile-tile | `tile.add`, `tile.sub`, `tile.mul`, `tile.div`, `tile.max`, `tile.min`, `tile.addrelu` |
 | Tile-scalar | `tile.adds`, `tile.subs`, `tile.muls`, `tile.divs`, `tile.maxs`, `tile.mins` |
 | Unary math | `tile.exp`, `tile.log`, `tile.sqrt`, `tile.rsqrt`, `tile.recip`, `tile.abs`, `tile.neg` |
 | Activation | `tile.relu`, `tile.lrelu` |

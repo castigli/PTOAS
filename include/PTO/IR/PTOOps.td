@@ -77,6 +77,7 @@ class PTO_Op<string mnemonic, list<Trait> traits = []>
     : Op<PTO_Dialect, mnemonic, !listconcat(traits, [ ])>;
 
 include "PTO/IR/VPTOOps.td"
+include "PTO/IR/VPTOUbOps.td"
 
 //===----------------------------------------------------------------------===//
 // Pointer/View Ops (for your front-end IR)
@@ -3426,6 +3427,44 @@ def TAddOp : PTO_TOp<"tadd", [
   let summary = "Elementwise add of two tiles ";
   let description = [{
     For each element (i, j): dst[i,j] = src0[i,j] + src1[i,j].
+  }];
+
+  let arguments = (ins
+    PTODpsType:$src0,
+    PTODpsType:$src1,
+    PTODpsType:$dst
+  );
+
+  let results = (outs);
+
+  let assemblyFormat = [{
+    `ins` `(` $src0 `,` $src1 `:` qualified(type($src0)) `,` qualified(type($src1)) `)`
+    `outs` `(` $dst `:` qualified(type($dst) ) `)`
+    attr-dict
+  }];
+
+  let hasVerifier = 1;
+
+  let extraClassDeclaration = [{
+    ::mlir::pto::PIPE getPipe() {
+      return ::mlir::pto::PIPE::PIPE_V;
+    }
+
+    ::mlir::MutableOperandRange getDpsInitsMutable() {
+        return getDstMutable();
+    }
+  }];
+}
+
+def TAddReluOp : PTO_TOp<"taddrelu", [
+  PTO_DpsInitOpInterface,
+  OpPipeInterface,
+  DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
+]> {
+  let summary = "Fused elementwise add + ReLU of two tiles";
+  let description = [{
+    For each element (i, j): dst[i,j] = max(0, src0[i,j] + src1[i,j]).
+    Maps to the fused VADDRELU intrinsic on C220.
   }];
 
   let arguments = (ins

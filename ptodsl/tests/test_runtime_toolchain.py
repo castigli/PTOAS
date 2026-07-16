@@ -10,11 +10,31 @@
 import os
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
-from pathlib import Path
-
 from ptodsl._runtime import toolchain
+
+
+class RuntimeToolchainTest(unittest.TestCase):
+    def test_a2_a3_use_c220_aicore_arch(self):
+        self.assertEqual(
+            toolchain.aicore_arch_for_kernel_kind("vector", "a3"), "dav-c220-vec"
+        )
+        self.assertEqual(
+            toolchain.aicore_arch_for_kernel_kind("cube", "a3"), "dav-c220-cube"
+        )
+        self.assertEqual(
+            toolchain.aicore_arch_for_kernel_kind("vector", "a2"), "dav-c220-vec"
+        )
+
+    def test_a5_uses_c310_aicore_arch(self):
+        self.assertEqual(
+            toolchain.aicore_arch_for_kernel_kind("vector", "a5"), "dav-c310-vec"
+        )
+        self.assertEqual(
+            toolchain.aicore_arch_for_kernel_kind("cube", "a5"), "dav-c310-cube"
+        )
 
 
 class ResolvePtoasBinaryTests(unittest.TestCase):
@@ -28,7 +48,9 @@ class ResolvePtoasBinaryTests(unittest.TestCase):
             repo_build_ptoas.parent.mkdir(parents=True, exist_ok=True)
             repo_build_ptoas.write_text("", encoding="utf-8")
 
-            fake_toolchain_file = temp_root / "repo" / "ptodsl" / "ptodsl" / "_runtime" / "toolchain.py"
+            fake_toolchain_file = (
+                temp_root / "repo" / "ptodsl" / "ptodsl" / "_runtime" / "toolchain.py"
+            )
             fake_toolchain_file.parent.mkdir(parents=True, exist_ok=True)
             fake_toolchain_file.write_text("", encoding="utf-8")
 

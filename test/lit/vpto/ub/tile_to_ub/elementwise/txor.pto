@@ -1,0 +1,39 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// txor -> De Morgan decomposition: vor(tmp) + vand(dst) + vnot(dst) + vand(dst,tmp).
+// The PIPE_V barriers mirror CANN TXOR_IMPL dependencies between these vector ops.
+// RUN: ptoas --pto-arch=a3 --pto-backend=vpto %s -o %t --mlir-print-ir-after=pto-lower-to-ubuf-ops 2>&1 | FileCheck %s
+
+module attributes {pto.target_arch = "a3", pto.kernel_kind = #pto.kernel_kind<vector>} {
+  // CHECK-LABEL: func.func @lower_txor()
+  func.func @lower_txor() attributes {pto.aicore} {
+    %dst  = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=i16, rows=1, cols=64, v_row=1, v_col=64, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %src0 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=i16, rows=1, cols=64, v_row=1, v_col=64, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %src1 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=i16, rows=1, cols=64, v_row=1, v_col=64, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %tmp  = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=i16, rows=1, cols=64, v_row=1, v_col=64, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    // 1. tmp = src0 | src1
+    // CHECK: pto.ub.vor {{%[^ ,]+}}, {{%[^ ,]+}}, {{%[^ ,]+}}
+    // CHECK-SAME: : !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, i64, i64, i64, i64, i64, i64, i64
+    // CHECK: pto.barrier <PIPE_V>
+    // 2. dst = src0 & src1
+    // CHECK: pto.ub.vand {{%[^ ,]+}}, {{%[^ ,]+}}, {{%[^ ,]+}}
+    // CHECK-SAME: : !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, i64, i64, i64, i64, i64, i64, i64
+    // CHECK: pto.barrier <PIPE_V>
+    // 3. dst = ~dst
+    // CHECK: pto.ub.vnot {{%[^ ,]+}}, {{%[^ ,]+}}
+    // CHECK-SAME: : !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, i64, i64, i64, i64, i64
+    // CHECK: pto.barrier <PIPE_V>
+    // 4. dst = dst & tmp
+    // CHECK: pto.ub.vand {{%[^ ,]+}}, {{%[^ ,]+}}, {{%[^ ,]+}}
+    // CHECK-SAME: : !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, !pto.ptr<i16, ub>, i64, i64, i64, i64, i64, i64, i64
+    // CHECK-NOT: pto.txor
+    pto.txor ins(%src0, %src1, %tmp : !pto.tile_buf<loc=vec, dtype=i16, rows=1, cols=64, v_row=1, v_col=64, blayout=row_major, slayout=none_box, fractal=512, pad=0>, !pto.tile_buf<loc=vec, dtype=i16, rows=1, cols=64, v_row=1, v_col=64, blayout=row_major, slayout=none_box, fractal=512, pad=0>, !pto.tile_buf<loc=vec, dtype=i16, rows=1, cols=64, v_row=1, v_col=64, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%dst : !pto.tile_buf<loc=vec, dtype=i16, rows=1, cols=64, v_row=1, v_col=64, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+    return
+  }
+}

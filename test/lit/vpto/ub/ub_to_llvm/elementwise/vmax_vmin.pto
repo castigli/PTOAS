@@ -1,0 +1,64 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// pto.ub.vmax/vmin -> llvm.hivm.VMAX/VMIN.* for f32, f16.
+// RUN: ptoas --pto-arch=a3 --pto-backend=vpto %s -o %t --mlir-print-ir-after=convert-func-to-llvm 2>&1 | FileCheck %s
+
+module attributes {pto.target_arch = "a3", pto.kernel_kind = #pto.kernel_kind<vector>} {
+  // CHECK-LABEL: llvm.func @ub_vmax_f32_mix_aiv(
+  // CHECK-SAME: %[[DST:[^:]+]]: !llvm.ptr<6>, %[[SRC0:[^:]+]]: !llvm.ptr<6>, %[[SRC1:[^:]+]]: !llvm.ptr<6>
+  func.func @ub_vmax_f32(%dst: !pto.ptr<f32, ub>, %src0: !pto.ptr<f32, ub>, %src1: !pto.ptr<f32, ub>) attributes {pto.aicore} {
+    %c1 = arith.constant 1 : i64
+    %c0 = arith.constant 0 : i64
+    // CHECK: llvm.mlir.constant(72057594037927936 : i64) : i64
+    // CHECK: llvm.mlir.constant(255 : i64) : i64
+    // CHECK: llvm.call @llvm.hivm.VMAX.f32(%[[DST]], %[[SRC0]], %[[SRC1]], %[[CFG:.*]]) : (!llvm.ptr<6>, !llvm.ptr<6>, !llvm.ptr<6>, i64) -> ()
+    // CHECK-NOT: pto.ub.
+    pto.ub.vmax %dst, %src0, %src1, %c1, %c1, %c1, %c1, %c0, %c0, %c0 : !pto.ptr<f32, ub>, !pto.ptr<f32, ub>, !pto.ptr<f32, ub>, i64, i64, i64, i64, i64, i64, i64
+    return
+  }
+
+  // CHECK-LABEL: llvm.func @ub_vmax_f16_mix_aiv(
+  // CHECK-SAME: %[[DST:[^:]+]]: !llvm.ptr<6>, %[[SRC0:[^:]+]]: !llvm.ptr<6>, %[[SRC1:[^:]+]]: !llvm.ptr<6>
+  func.func @ub_vmax_f16(%dst: !pto.ptr<f16, ub>, %src0: !pto.ptr<f16, ub>, %src1: !pto.ptr<f16, ub>) attributes {pto.aicore} {
+    %c1 = arith.constant 1 : i64
+    %c0 = arith.constant 0 : i64
+    // CHECK: llvm.mlir.constant(72057594037927936 : i64) : i64
+    // CHECK: llvm.mlir.constant(255 : i64) : i64
+    // CHECK: llvm.call @llvm.hivm.VMAX.f16(%[[DST]], %[[SRC0]], %[[SRC1]], %[[CFG:.*]]) : (!llvm.ptr<6>, !llvm.ptr<6>, !llvm.ptr<6>, i64) -> ()
+    // CHECK-NOT: pto.ub.
+    pto.ub.vmax %dst, %src0, %src1, %c1, %c1, %c1, %c1, %c0, %c0, %c0 : !pto.ptr<f16, ub>, !pto.ptr<f16, ub>, !pto.ptr<f16, ub>, i64, i64, i64, i64, i64, i64, i64
+    return
+  }
+
+  // CHECK-LABEL: llvm.func @ub_vmin_f32_mix_aiv(
+  // CHECK-SAME: %[[DST:[^:]+]]: !llvm.ptr<6>, %[[SRC0:[^:]+]]: !llvm.ptr<6>, %[[SRC1:[^:]+]]: !llvm.ptr<6>
+  func.func @ub_vmin_f32(%dst: !pto.ptr<f32, ub>, %src0: !pto.ptr<f32, ub>, %src1: !pto.ptr<f32, ub>) attributes {pto.aicore} {
+    %c1 = arith.constant 1 : i64
+    %c0 = arith.constant 0 : i64
+    // CHECK: llvm.mlir.constant(72057594037927936 : i64) : i64
+    // CHECK: llvm.mlir.constant(255 : i64) : i64
+    // CHECK: llvm.call @llvm.hivm.VMIN.f32(%[[DST]], %[[SRC0]], %[[SRC1]], %[[CFG:.*]]) : (!llvm.ptr<6>, !llvm.ptr<6>, !llvm.ptr<6>, i64) -> ()
+    // CHECK-NOT: pto.ub.
+    pto.ub.vmin %dst, %src0, %src1, %c1, %c1, %c1, %c1, %c0, %c0, %c0 : !pto.ptr<f32, ub>, !pto.ptr<f32, ub>, !pto.ptr<f32, ub>, i64, i64, i64, i64, i64, i64, i64
+    return
+  }
+
+  // CHECK-LABEL: llvm.func @ub_vmin_f16_mix_aiv(
+  // CHECK-SAME: %[[DST:[^:]+]]: !llvm.ptr<6>, %[[SRC0:[^:]+]]: !llvm.ptr<6>, %[[SRC1:[^:]+]]: !llvm.ptr<6>
+  func.func @ub_vmin_f16(%dst: !pto.ptr<f16, ub>, %src0: !pto.ptr<f16, ub>, %src1: !pto.ptr<f16, ub>) attributes {pto.aicore} {
+    %c1 = arith.constant 1 : i64
+    %c0 = arith.constant 0 : i64
+    // CHECK: llvm.mlir.constant(72057594037927936 : i64) : i64
+    // CHECK: llvm.mlir.constant(255 : i64) : i64
+    // CHECK: llvm.call @llvm.hivm.VMIN.f16(%[[DST]], %[[SRC0]], %[[SRC1]], %[[CFG:.*]]) : (!llvm.ptr<6>, !llvm.ptr<6>, !llvm.ptr<6>, i64) -> ()
+    // CHECK-NOT: pto.ub.
+    pto.ub.vmin %dst, %src0, %src1, %c1, %c1, %c1, %c1, %c0, %c0, %c0 : !pto.ptr<f16, ub>, !pto.ptr<f16, ub>, !pto.ptr<f16, ub>, i64, i64, i64, i64, i64, i64, i64
+    return
+  }
+}
