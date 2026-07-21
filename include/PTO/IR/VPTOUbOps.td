@@ -192,6 +192,73 @@ def PTO_UBVdupOp : PTO_Op<"ub.vdup", [
   }];
 }
 
+def PTO_UBVgatherbOp : PTO_Op<"ub.vgatherb", [
+    DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
+  ]> {
+  let summary = "Raw ubuf byte-offset gather mapping to the CCE vgatherb intrinsic (a2a3).";
+  let description = [{
+    Lowers to the raw CCE `vgatherb` intrinsic for the a2a3 (dav-c220-vec)
+    backend. The bishem-emitted intrinsic is the packed 3-operand form
+    `llvm.hivm.VGATHERB.b16/.b32(ptr dst, ptr offset, i64 config)`, where the
+    2nd pointer is the offset buffer and the source data base address is packed
+    into `config[31:0]`. Config layout (decoded from bisheng IR — see
+    docs/designs/a2a3-vpto-tgather.md): srcAddr[31:0], dstRepeatStride[39:32],
+    dstBlockStride[47:40], reserved[55:48]=0, repeat[63:56]. This is the A2/A3
+    UB-pointer gather primitive used to lower `pto.tgatherb`; do not confuse
+    with the A5 vreg `vgather2`.
+  }];
+
+  let arguments = (ins
+    PTO_BufferType:$dst,
+    PTO_BufferType:$offset,
+    PTO_BufferType:$src,
+    I64:$dstRepeatStride,
+    I64:$dstBlockStride,
+    I64:$repeat
+  );
+
+  let results = (outs);
+
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    $dst `,` $offset `,` $src `,`
+    $dstRepeatStride `,` $dstBlockStride `,` $repeat
+    attr-dict `:` type($dst) `,` type($offset) `,` type($src) `,`
+    type($dstRepeatStride) `,` type($dstBlockStride) `,` type($repeat)
+  }];
+}
+
+def PTO_UBVgatherOp : PTO_Op<"ub.vgather", [
+    DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
+  ]> {
+  let summary = "Raw ubuf element gather mapping to the CCE vgather intrinsic (a2a3).";
+  let description = [{
+    Lowers to `llvm.hivm.VGATHER.b16/.b32(dst_ptr, src_ptr, i64 config)`.
+    The 2nd pointer is the address buffer; `offsetAddr` is a base offset added
+    to each address in the buffer. Config layout: offsetAddr[31:0],
+    dstRepeatStride[39:32], repeat[63:56].
+  }];
+
+  let arguments = (ins
+    PTO_BufferType:$dst,
+    PTO_BufferType:$src,
+    I64:$offsetAddr,
+    I64:$dstRepeatStride,
+    I64:$repeat
+  );
+
+  let results = (outs);
+
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    $dst `,` $src `,` $offsetAddr `,` $dstRepeatStride `,` $repeat
+    attr-dict `:` type($dst) `,` type($src) `,` type($offsetAddr) `,`
+    type($dstRepeatStride) `,` type($repeat)
+  }];
+}
+
 def PTO_UBSetMaskOp : PTO_Op<"ub.set_mask", [
     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
 ]> {
