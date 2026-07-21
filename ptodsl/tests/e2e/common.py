@@ -484,3 +484,235 @@ def launch_and_check_scalar(
     actual = z.cpu().numpy()
     np.testing.assert_allclose(actual, ref, rtol=rtol, atol=atol)
     return compile_s, launch_s
+
+
+# ---------------------------------------------------------------------------
+# Gather e2e helpers
+# ---------------------------------------------------------------------------
+
+def make_gatherb_kernel(
+    rows: int,
+    cols: int,
+    dtype_str: str = "float32",
+    target: str = "a3",
+    backend: str = "vpto",
+    kernel_kind: str = "vector",
+):
+    """Return a ``@pto.jit`` KernelHandle for pto.tile.gatherb (block gather).
+
+    Kernel signature: (Src_ptr f32 GM, Off_ptr i32 GM, Dst_ptr f32 GM).
+    Loads src and compact 32B block addresses into UB tiles, calls gatherb,
+    and stores the gathered blocks.
+    """
+    pto_dtype = getattr(pto, dtype_str)
+    off_dtype = pto.i32
+    fn_name = f"gatherb_{dtype_str}_{rows}x{cols}"
+
+    def kernel_body(
+        Src_ptr: pto.ptr(pto_dtype, "gm"),
+        Off_ptr: pto.ptr(off_dtype, "gm"),
+        Dst_ptr: pto.ptr(pto_dtype, "gm"),
+    ) -> None:
+        c0 = pto.const(0)
+        c1 = pto.const(1)
+        c_rows = pto.const(rows)
+        c_cols = pto.const(cols)
+        c_elems = pto.const(rows * cols)
+        block_elems = 8 if dtype_str == "float32" else 16
+        block_cols = (cols + block_elems - 1) // block_elems
+        block_cols = ((block_cols + 7) // 8) * 8
+        block_total = rows * block_cols
+        c_block_cols = pto.const(block_cols)
+        c_block_total = pto.const(block_total)
+
+        shape = [c1, c1, c1, c_rows, c_cols]
+        strides = [c_elems, c_elems, c_elems, c_cols, c1]
+        off_shape = [c1, c1, c1, c_rows, c_block_cols]
+        off_strides = [c_block_total, c_block_total, c_block_total,
+                       c_block_cols, c1]
+        off = [c0, c0, c0, c0, c0]
+
+        src_view = pto.make_tensor_view(Src_ptr, shape=shape, strides=strides)
+        off_view = pto.make_tensor_view(Off_ptr, shape=off_shape,
+                                        strides=off_strides)
+        dst_view = pto.make_tensor_view(Dst_ptr, shape=shape, strides=strides)
+
+        src_part = pto.partition_view(src_view, offsets=off, sizes=shape)
+        off_part = pto.partition_view(off_view, offsets=off, sizes=off_shape)
+        dst_part = pto.partition_view(dst_view, offsets=off, sizes=shape)
+
+        src_tile = pto.alloc_tile(shape=[rows, cols], dtype=pto_dtype)
+        off_tile = pto.alloc_tile(shape=[rows, block_cols], dtype=off_dtype)
+        dst_tile = pto.alloc_tile(shape=[rows, cols], dtype=pto_dtype)
+
+        pto.tile.load(src_part, src_tile)
+        pto.tile.load(off_part, off_tile)
+        pto.tile.gatherb(src_tile, off_tile, dst_tile)
+        pto.tile.store(dst_tile, dst_part)
+
+    kernel_body.__name__ = fn_name
+    return pto.jit(
+        name=fn_name,
+        kernel_kind=kernel_kind,
+        target=target,
+        backend=backend,
+    )(kernel_body)
+
+
+def launch_and_check_gather(
+    *,
+    rows: int,
+    cols: int,
+    dtype_str: str,
+    torch,
+    kernel_handle,
+    seed: int = 42,
+    rtol: float = 1e-6,
+    atol: float = 1e-6,
+):
+    """Compile, launch, and numerical-check a gatherb kernel.
+
+    ``vgatherb`` is a 32B block gather: each i32 offset entry selects one
+    32B source block, and the instruction copies that whole block to dst.
+    """
+    rng = np.random.RandomState(seed)
+    total = rows * cols
+    elem_size = 4 if dtype_str == "float32" else 2
+    block_elems = 32 // elem_size
+    valid_block_cols = (cols + block_elems - 1) // block_elems
+    block_cols = ((valid_block_cols + 7) // 8) * 8
+    valid_blocks = rows * valid_block_cols
+    total_blocks = rows * block_cols
+    np_dtype = np.float32 if dtype_str == "float32" else np.float16
+
+    # Random source data (small integers for exact results).
+    src_flat = rng.randint(1, 10, size=(total,)).astype(np_dtype)
+    # Random valid 32B-aligned byte offsets, one per output 32B block.
+    valid_src_blocks = valid_blocks
+    block_idx = rng.randint(0, valid_src_blocks, size=(total_blocks,))
+    off_flat = (block_idx * 32).astype(np.int32)
+
+    golden_flat = np.empty((total,), dtype=np_dtype)
+    for row in range(rows):
+        for col_block in range(valid_block_cols):
+            out_block = row * valid_block_cols + col_block
+            src_block = block_idx[row * block_cols + col_block]
+            out_start = out_block * block_elems
+            src_start = src_block * block_elems
+            count = min(block_elems, total - out_start, total - src_start)
+            golden_flat[out_start:out_start + count] = src_flat[src_start:src_start + count]
+    golden = golden_flat.reshape(rows, cols)
+
+    torch_dt = _torch_dtype(torch, dtype_str)
+    src_dev = torch.from_numpy(src_flat).to(device="npu:0", dtype=torch_dt)
+    off_dev = torch.from_numpy(off_flat).to(device="npu:0", dtype=torch.int32)
+    dst_dev = torch.empty(total, dtype=torch_dt, device="npu:0")
+    stream = _npu_stream(torch)
+
+    t0 = time.perf_counter()
+    compiled = kernel_handle.compile()
+    compile_s = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    compiled[1, stream](src_dev.data_ptr(), off_dev.data_ptr(), dst_dev.data_ptr())
+    torch.npu.synchronize()
+    launch_s = time.perf_counter() - t0
+
+    actual = dst_dev.cpu().numpy().reshape(rows, cols)
+    np.testing.assert_allclose(actual, golden, rtol=rtol, atol=atol)
+    return compile_s, launch_s
+
+
+def make_gather_index_kernel(
+    rows: int,
+    cols: int,
+    dtype_str: str = "float32",
+    target: str = "a3",
+    backend: str = "vpto",
+    kernel_kind: str = "vector",
+):
+    """Return a ``@pto.jit`` KernelHandle for scalar index ``pto.tile.gather``."""
+    pto_dtype = getattr(pto, dtype_str)
+    idx_dtype = pto.i32
+    fn_name = f"gather_index_{dtype_str}_{rows}x{cols}"
+
+    def kernel_body(
+        Src_ptr: pto.ptr(pto_dtype, "gm"),
+        Idx_ptr: pto.ptr(idx_dtype, "gm"),
+        Dst_ptr: pto.ptr(pto_dtype, "gm"),
+    ) -> None:
+        c0 = pto.const(0)
+        c1 = pto.const(1)
+        c_rows = pto.const(rows)
+        c_cols = pto.const(cols)
+        c_elems = pto.const(rows * cols)
+
+        shape = [c1, c1, c1, c_rows, c_cols]
+        strides = [c_elems, c_elems, c_elems, c_cols, c1]
+        off = [c0, c0, c0, c0, c0]
+
+        src_view = pto.make_tensor_view(Src_ptr, shape=shape, strides=strides)
+        idx_view = pto.make_tensor_view(Idx_ptr, shape=shape, strides=strides)
+        dst_view = pto.make_tensor_view(Dst_ptr, shape=shape, strides=strides)
+
+        src_part = pto.partition_view(src_view, offsets=off, sizes=shape)
+        idx_part = pto.partition_view(idx_view, offsets=off, sizes=shape)
+        dst_part = pto.partition_view(dst_view, offsets=off, sizes=shape)
+
+        src_tile = pto.alloc_tile(shape=[rows, cols], dtype=pto_dtype)
+        idx_tile = pto.alloc_tile(shape=[rows, cols], dtype=idx_dtype)
+        tmp_tile = pto.alloc_tile(shape=[rows, cols], dtype=idx_dtype)
+        dst_tile = pto.alloc_tile(shape=[rows, cols], dtype=pto_dtype)
+
+        pto.tile.load(src_part, src_tile)
+        pto.tile.load(idx_part, idx_tile)
+        pto.tile.gather(src_tile, dst_tile, indices=idx_tile, tmp=tmp_tile)
+        pto.tile.store(dst_tile, dst_part)
+
+    kernel_body.__name__ = fn_name
+    return pto.jit(
+        name=fn_name,
+        kernel_kind=kernel_kind,
+        target=target,
+        backend=backend,
+    )(kernel_body)
+
+
+def launch_and_check_gather_index(
+    *,
+    rows: int,
+    cols: int,
+    dtype_str: str,
+    torch,
+    kernel_handle,
+    seed: int = 42,
+    rtol: float = 1e-6,
+    atol: float = 1e-6,
+):
+    """Compile, launch, and numerical-check scalar index ``pto.tile.gather``."""
+    rng = np.random.RandomState(seed)
+    total = rows * cols
+    np_dtype = np.float32 if dtype_str == "float32" else np.float16
+
+    src_flat = rng.randint(1, 10, size=(total,)).astype(np_dtype)
+    idx_flat = rng.randint(0, total, size=(total,)).astype(np.int32)
+    golden = src_flat[idx_flat].reshape(rows, cols)
+
+    torch_dt = _torch_dtype(torch, dtype_str)
+    src_dev = torch.from_numpy(src_flat).to(device="npu:0", dtype=torch_dt)
+    idx_dev = torch.from_numpy(idx_flat).to(device="npu:0", dtype=torch.int32)
+    dst_dev = torch.empty(total, dtype=torch_dt, device="npu:0")
+    stream = _npu_stream(torch)
+
+    t0 = time.perf_counter()
+    compiled = kernel_handle.compile()
+    compile_s = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    compiled[1, stream](src_dev.data_ptr(), idx_dev.data_ptr(), dst_dev.data_ptr())
+    torch.npu.synchronize()
+    launch_s = time.perf_counter() - t0
+
+    actual = dst_dev.cpu().numpy().reshape(rows, cols)
+    np.testing.assert_allclose(actual, golden, rtol=rtol, atol=atol)
+    return compile_s, launch_s

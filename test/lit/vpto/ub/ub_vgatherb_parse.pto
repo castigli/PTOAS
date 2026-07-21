@@ -1,0 +1,29 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the software repository for the full text of the License.
+
+// Round-trip / parse-verify for the A2/A3 UB gather primitive pto.ub.vgatherb.
+// Lowers to the packed CCE vgatherb intrinsic (llvm.hivm.VGATHERB.b16/.b32);
+// distinct from the A5 vreg pto.vgather2 path.
+
+// RUN: ptoas --pto-arch=a3 --emit-pto-ir %s -o - 2>&1 | FileCheck %s
+
+module {
+  // CHECK-LABEL: func.func @ub_vgatherb_parse
+  func.func @ub_vgatherb_parse() {
+    %c0 = arith.constant 0 : i64
+    %c8 = arith.constant 8 : i64
+    %c1 = arith.constant 1 : i64
+    %dst = pto.castptr %c0 : i64 -> !pto.ptr<f32, ub>
+    %off = pto.castptr %c0 : i64 -> !pto.ptr<i32, ub>
+    %src = pto.castptr %c0 : i64 -> !pto.ptr<f32, ub>
+    // CHECK: pto.ub.vgatherb
+    // CHECK: !pto.ptr<f32, ub>, !pto.ptr<i32, ub>, !pto.ptr<f32, ub>, i64, i64, i64
+    pto.ub.vgatherb %dst, %off, %src, %c8, %c1, %c1 : !pto.ptr<f32, ub>, !pto.ptr<i32, ub>, !pto.ptr<f32, ub>, i64, i64, i64
+    return
+  }
+}

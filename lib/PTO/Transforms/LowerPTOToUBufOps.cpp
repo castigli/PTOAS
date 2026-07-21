@@ -811,6 +811,202 @@ struct LowerPTOToUBufOpsPass
         op.erase();
     }
 
+    // ---- tgatherb → pto.ub.vgatherb (GatherBlockHead/Tail tiling) ----
+    // Mirrors the pto-isa a2a3/TGatherB.hpp GatherBlockHead/Tail driver.
+    // The CCE vgatherb hardware requires specific repeat counts and pointer
+    // advancement per call.
+    {
+      SmallVector<pto::TGatherBOp> ops;
+      func.walk([&](pto::TGatherBOp op) { ops.push_back(op); });
+      for (auto op : ops) {
+        if (!canLower(op, tileShapes))
+          continue;
+        auto info = extractTileShapeInfo(op, tileShapes);
+        if (!info)
+          continue;
+
+        unsigned bse = info->blockSizeElem;
+        unsigned epr = info->elementsPerRepeat;
+        int64_t validRow = info->vRows;
+        int64_t validCol = info->vCols;
+        if (bse == 0 || epr == 0 || validCol == 0)
+          continue;
+
+        // GatherBlockHead/Tail parameters (from pto-isa a2a3/TGatherB.hpp).
+        // vgatherb reads 8 u32 block addresses per repeat. Each address must
+        // point at a 32B source block; the instruction copies those 8 blocks.
+        int64_t numRepeatPerLine = validCol / epr;
+        int64_t numRemainPerLine = validCol % epr;
+        constexpr int64_t REPEAT_MAX = 255;
+        constexpr int64_t ADDRS_PER_REPEAT = 8;
+
+        // Compact offset tile layout: one i32 address per 32B output block,
+        // padded to 8 entries because even a tail repeat reads 8 addresses.
+        int64_t blocksPerRow = (validCol + bse - 1) / bse;
+        int64_t offsetStridePerRow =
+            ((blocksPerRow + ADDRS_PER_REPEAT - 1) / ADDRS_PER_REPEAT) *
+            ADDRS_PER_REPEAT;
+
+        Location loc = op.getLoc();
+        builder.setInsertionPoint(op);
+
+        Type dstElemTy = getStoredElemType(op.getDst().getType());
+        if (!dstElemTy)
+          continue;
+        auto dstPtrType = getUBPtrType(ctx, dstElemTy);
+        auto offPtrType = getUBPtrType(ctx, builder.getI32Type());
+
+        auto emitAddr = [&](Value tile, pto::PtrType ty) -> Value {
+          if (isa<pto::PtrType>(tile.getType()))
+            return tile;
+          return builder.create<pto::TileBufAddrOp>(loc, ty, tile).getDst();
+        };
+
+        Value dstBase = emitAddr(op.getDst(), dstPtrType);
+        Value offBase = emitAddr(op.getOffsets(), offPtrType);
+        Value srcBase = emitAddr(op.getSrc(), dstPtrType);
+
+        auto emitGatherb = [&](Value dst, Value off, int64_t repStride,
+                               int64_t repeat) {
+          builder.create<pto::UBVgatherbOp>(
+              loc, dst, off, srcBase, i64c(repStride, loc, builder),
+              i64c(1, loc, builder), i64c(repeat, loc, builder));
+        };
+
+        // ---- GatherBlockHead: process full epr-element blocks ----
+        if (numRepeatPerLine > 0) {
+          int64_t numLoop = numRepeatPerLine / REPEAT_MAX;
+          int64_t remainAfterLoop = numRepeatPerLine % REPEAT_MAX;
+
+          for (int64_t i = 0; i < validRow; ++i) {
+            int64_t rowOff = i * validCol;
+            int64_t offRowOff = i * offsetStridePerRow;
+
+            for (int64_t j = 0; j < numLoop; ++j) {
+              int64_t elemOff = rowOff + j * epr * REPEAT_MAX;
+              int64_t offOff = offRowOff + j * ADDRS_PER_REPEAT * REPEAT_MAX;
+              Value dstAdv = addPtr(loc, builder, dstBase, dstPtrType,
+                                    idxc(elemOff, loc, builder));
+              Value offAdv = addPtr(loc, builder, offBase, offPtrType,
+                                    idxc(offOff, loc, builder));
+              emitGatherb(dstAdv, offAdv, ADDRS_PER_REPEAT, REPEAT_MAX);
+            }
+            if (remainAfterLoop > 0) {
+              int64_t elemOff = rowOff + numLoop * epr * REPEAT_MAX;
+              int64_t offOff =
+                  offRowOff + numLoop * ADDRS_PER_REPEAT * REPEAT_MAX;
+              Value dstAdv = addPtr(loc, builder, dstBase, dstPtrType,
+                                    idxc(elemOff, loc, builder));
+              Value offAdv = addPtr(loc, builder, offBase, offPtrType,
+                                    idxc(offOff, loc, builder));
+              emitGatherb(dstAdv, offAdv, ADDRS_PER_REPEAT, remainAfterLoop);
+            }
+          }
+        }
+
+        // ---- GatherBlockTail: process remaining elements ----
+        if (numRemainPerLine > 0) {
+          int64_t tailElemOff = numRepeatPerLine * epr;
+          int64_t tailRepStride = validCol / bse;
+          if (tailRepStride == 0)
+            tailRepStride = 1;
+
+          for (int64_t i = 0; i < validRow; ++i) {
+            int64_t elemOff = i * validCol + tailElemOff;
+            int64_t offOff = i * offsetStridePerRow + tailElemOff / bse;
+            Value dstAdv = addPtr(loc, builder, dstBase, dstPtrType,
+                                  idxc(elemOff, loc, builder));
+            Value offAdv = addPtr(loc, builder, offBase, offPtrType,
+                                  idxc(offOff, loc, builder));
+            emitGatherb(dstAdv, offAdv, tailRepStride, 1);
+          }
+        }
+
+        op.erase();
+      }
+    }
+
+    // ---- tgather (index form) → ub.vmuls + ub.vgather ----
+    // Decomposes element-index gather into byte offsets (vmuls), then passes
+    // the source tile address as vgather's offsetAddr config. This mirrors
+    // pto-isa a2a3/TGather.hpp.
+    {
+      SmallVector<pto::TGatherOp> ops;
+      func.walk([&](pto::TGatherOp op) { ops.push_back(op); });
+      for (auto op : ops) {
+        if (!op.hasIndexForm())
+          continue;
+        if (!canLower(op, tileShapes))
+          continue;
+        auto info = extractTileShapeInfo(op, tileShapes);
+        if (!info)
+          continue;
+        int64_t epr = info->elementsPerRepeat;
+        if (epr == 0)
+          continue;
+
+        // Extract the source base address (i64) from the CastPtrOp that
+        // defines the src tile pointer. Only handle alloc_tile-backed src.
+        Value srcAddr;
+        if (auto *defOp = op.getSrc().getDefiningOp())
+          if (isa<pto::CastPtrOp>(defOp))
+            srcAddr = defOp->getOperand(0);
+        if (!srcAddr)
+          continue;
+
+        Location loc = op.getLoc();
+        builder.setInsertionPoint(op);
+
+        auto i32PtrType = getUBPtrType(ctx, builder.getI32Type());
+        auto emitAddr = [&](Value tile, pto::PtrType ty) -> Value {
+          if (isa<pto::PtrType>(tile.getType()))
+            return tile;
+          return builder.create<pto::TileBufAddrOp>(loc, ty, tile).getDst();
+        };
+
+        Value indicesPtr = emitAddr(op.getIndices(), i32PtrType);
+        Value tmpPtr = emitAddr(op.getTmp(), i32PtrType);
+
+        Type dstElemTy = getStoredElemType(op.getDst().getType());
+        if (!dstElemTy)
+          continue;
+        unsigned elemSize = getElementSize(dstElemTy);
+        if (elemSize == 0)
+          continue;
+        auto dstPtrType = getUBPtrType(ctx, dstElemTy);
+        Value dstPtr = emitAddr(op.getDst(), dstPtrType);
+
+        auto pipeV = pto::PipeAttr::get(ctx, pto::PIPE::PIPE_V);
+        for (int64_t i = 0; i < info->vRows; ++i) {
+          for (int64_t col = 0; col < info->vCols; col += epr) {
+            int64_t chunkElems = std::min<int64_t>(epr, info->vCols - col);
+            Value rowOff = idxc(i * info->cols + col, loc, builder);
+            Value tmpRow = addPtr(loc, builder, tmpPtr, i32PtrType, rowOff);
+            Value idxRow = addPtr(loc, builder, indicesPtr, i32PtrType, rowOff);
+            Value dstRow = addPtr(loc, builder, dstPtr, dstPtrType, rowOff);
+
+            builder.create<pto::UBSetMaskCountOp>(loc);
+            builder.create<pto::UBSetMaskOp>(loc,
+                                             i64c(chunkElems, loc, builder),
+                                             i64c0(loc, builder));
+            // tmp = indices * elemSize (byte offsets). Keep count-mode mask
+            // active for vgather, matching pto-isa a2a3/TGather.hpp.
+            builder.create<pto::UBVmulSOp>(
+                loc, tmpRow, idxRow, i64c(elemSize, loc, builder),
+                i64c1(loc, builder), i64c1(loc, builder), i64c1(loc, builder),
+                i64c8(loc, builder), i64c8(loc, builder));
+            builder.create<pto::BarrierOp>(loc, pipeV);
+            builder.create<pto::UBVgatherOp>(
+                loc, dstRow, tmpRow, srcAddr, i64c(8, loc, builder),
+                i64c1(loc, builder));
+          }
+        }
+        builder.create<pto::UBSetMaskNormOp>(loc);
+        fullMask(loc, builder);
+        op.erase();
+      }
+    }
+
     // ---- cleanup dead PTO ops ----
     SmallVector<Operation *> toErase;
     func.walk([&](Operation *op) {
