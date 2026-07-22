@@ -9,7 +9,7 @@
 // tgatherb lowers to pto.ub.vgatherb on a3/vpto.  The offset tile is compact:
 // one i32 32B-block address per output 32B block (8 entries for 64 f32 values).
 
-// RUN: ptoas --pto-arch=a3 --pto-backend=vpto %s -o %t --mlir-print-ir-after=pto-lower-to-ubuf-ops 2>&1 | FileCheck %s
+// RUN: ptoas --pto-arch=a3 --pto-backend=vpto --emit-vpto-llvm-ir %s -o %t --mlir-print-ir-after=pto-lower-to-ubuf-ops 2>&1 | FileCheck %s
 
 module attributes {pto.target_arch = "a3", pto.kernel_kind = #pto.kernel_kind<vector>} {
   // CHECK-LABEL: func.func @lower_tgatherb_a3()

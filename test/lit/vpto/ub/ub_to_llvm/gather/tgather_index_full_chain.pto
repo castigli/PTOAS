@@ -9,7 +9,7 @@
 // Full-chain: pto.tgather (index form) → vmuls + ub.vgather → VGATHER.b32.
 // Verifies the complete MLIR lowering pipeline for the element-index gather.
 
-// RUN: ptoas --pto-arch=a3 --pto-backend=vpto %s -o %t --mlir-print-ir-after=convert-func-to-llvm 2>&1 | FileCheck %s
+// RUN: ptoas --pto-arch=a3 --pto-backend=vpto --emit-vpto-llvm-ir %s -o %t --mlir-print-ir-after=convert-func-to-llvm 2>&1 | FileCheck %s
 
 module attributes {pto.target_arch = "a3", pto.kernel_kind = #pto.kernel_kind<vector>} {
   // CHECK-LABEL: llvm.func @tgather_index_full_chain

@@ -9,7 +9,7 @@
 // Multi-row tgatherb: 2×64 f32 tile. Each row uses 8 compact 32B block
 // addresses, not 64 scalar offsets.
 
-// RUN: ptoas --pto-arch=a3 --pto-backend=vpto %s -o %t --mlir-print-ir-after=pto-lower-to-ubuf-ops 2>&1 | FileCheck %s
+// RUN: ptoas --pto-arch=a3 --pto-backend=vpto --emit-vpto-llvm-ir %s -o %t --mlir-print-ir-after=pto-lower-to-ubuf-ops 2>&1 | FileCheck %s
 
 module attributes {pto.target_arch = "a3", pto.kernel_kind = #pto.kernel_kind<vector>} {
   // CHECK-LABEL: func.func @tgatherb_multi_repeat

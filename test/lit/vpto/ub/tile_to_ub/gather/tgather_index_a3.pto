@@ -10,7 +10,7 @@
 // pipeline via index→byte-offset decomposition (vmuls + vgather with srcAddr
 // packed as offsetAddr), matching the pto-isa a2a3/TGather.hpp conversion.
 
-// RUN: ptoas --pto-arch=a3 --pto-backend=vpto %s -o %t --mlir-print-ir-after=pto-lower-to-ubuf-ops 2>&1 | FileCheck %s
+// RUN: ptoas --pto-arch=a3 --pto-backend=vpto --emit-vpto-llvm-ir %s -o %t --mlir-print-ir-after=pto-lower-to-ubuf-ops 2>&1 | FileCheck %s
 
 module attributes {pto.target_arch = "a3", pto.kernel_kind = #pto.kernel_kind<vector>} {
   // CHECK-LABEL: func.func @lower_tgather_index_a3()

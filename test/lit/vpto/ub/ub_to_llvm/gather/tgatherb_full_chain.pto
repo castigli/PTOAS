@@ -9,7 +9,7 @@
 // Full-chain: pto.tgatherb → pto.ub.vgatherb → llvm.hivm.VGATHERB.b32.
 // Verifies the complete MLIR lowering pipeline composes for a3/vpto.
 
-// RUN: ptoas --pto-arch=a3 --pto-backend=vpto %s -o %t --mlir-print-ir-after=convert-func-to-llvm 2>&1 | FileCheck %s
+// RUN: ptoas --pto-arch=a3 --pto-backend=vpto --emit-vpto-llvm-ir %s -o %t --mlir-print-ir-after=convert-func-to-llvm 2>&1 | FileCheck %s
 
 module attributes {pto.target_arch = "a3", pto.kernel_kind = #pto.kernel_kind<vector>} {
   // CHECK-LABEL: llvm.func @tgatherb_full_chain
