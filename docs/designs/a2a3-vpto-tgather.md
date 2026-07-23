@@ -62,12 +62,13 @@ The tile driver (`GatherBlockHead`/`GatherBlockTail`) loops over
 `validRow × numRepeatPerLine` with the `REPEAT_MAX` chunking — structurally
 identical to `LowerPTOToUBufOps`'s `dispatch` head/tail repeat loop.
 
-### What A2/A3 does *not* have
+### Related A2/A3 operations
 
-- **No `MGather`** for A2/A3 — GM gather-load (`MGATHER<Coalesce,GatherOOB>`)
-  is A5-only (`npu/a5/MGather.hpp`, implemented via `cce::async_invoke<
-  simt_mgather_*_kernel>`). A2/A3 has `TGather`, `TGatherB`, `TScatter`, but no
-  `MGather.hpp`.
+- **`MGather` exists on A2/A3** — `npu/a2a3/MGather.hpp` implements GM gather
+  loads for row and element coalescing. Its GM-to-UB VPTO lowering is handled
+  as a separate follow-up because it decomposes into scalar address generation,
+  scalar loads/stores, and per-row MTE2 copies rather than the UB-local
+  `vgather`/`vgatherb` instructions covered here.
 - **No vreg** — A5's `vgather2`/`vgather2_bc` (`npu/a5/TGather.hpp:51,79,108`)
   must not be used on A2/A3.
 
@@ -81,9 +82,9 @@ lowering must reproduce:
 |---|---|---|
 | `pto.tgather` | `emitc::CallOpaqueOp "TGATHER"` (`:9772`) | index `TGATHER(dst,src0,indices,tmp)`; compare `TGATHER<D,S,Tmp,C,CmpMode>(dst,src0,k,tmp,c,offset)`; mask `TGATHER<D,S,MaskPattern::Pxxxx>(dst,src0)` |
 | `pto.tgatherb` | `emitc::CallOpaqueOp "TGATHERB"` (`:9875`) | `TGATHERB(dst, src, offsets)` |
-| `pto.mgather` | `emitc::CallOpaqueOp "MGATHER<Coalesce[,OOB]>"` (`:3323`) | A5-only; out of scope for A2/A3 vpto |
+| `pto.mgather` | `emitc::CallOpaqueOp "MGATHER<Coalesce[,OOB]>"` (`:3323`) | Supported by A2/A3 PTO-ISA/EmitC; VPTO lowering is a separate follow-up |
 
-MGATHER semantics (A5, for reference): `dst[r,:]=table[idx[r],:]` (Coalesce::Row)
+MGATHER semantics: `dst[r,:]=table[idx[r],:]` (Coalesce::Row)
 or `dst[i,j]=table[idx[i,j]]` (Coalesce::Elem), with `GatherOOB` modes.
 
 ## Current `pto.ub.*` layer
@@ -218,12 +219,15 @@ job for these today.
    non-trivial at the PTO IR level. The pto-isa `a2a3/TGather.hpp` handles
    these via template-level loops; the MLIR lowering would need to replicate
    that (e.g., generating a constant index buffer + using the index-form path).
-4. (Out of scope for A2/A3) `mgather` — A5-only; do not port.
+4. **Separate follow-up**: A2/A3 `mgather` GM-to-UB Row/Elem lowering. This
+   requires scalar index/OOB handling plus MTE2 or scalar GM access and is kept
+   separate from the UB-local gather implementation in this document.
 
 ## References
 
-- A2/A3 raw CCE gather: `pto-isa:npu/a2a3/TGather.hpp` (`vgather`),
-  `npu/a2a3/TGatherB.hpp` (`vgatherb`), `npu/a2a3/TScatter.hpp`.
+- A2/A3 gather implementations: `pto-isa:npu/a2a3/TGather.hpp` (`vgather`),
+  `npu/a2a3/TGatherB.hpp` (`vgatherb`), `npu/a2a3/MGather.hpp` (GM gather), and
+  `npu/a2a3/TScatter.hpp`.
 - A5 vreg gather (contrast): `pto-isa:npu/a5/TGather.hpp` (`vgather2`).
 - EmitC contract: `PTOToEmitC.cpp:9772` (tgather), `:9875` (tgatherb),
   `:3323` (mgather).
