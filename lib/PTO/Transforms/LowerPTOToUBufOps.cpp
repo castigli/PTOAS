@@ -947,12 +947,14 @@ struct LowerPTOToUBufOpsPass
 
         // Extract the source base address (i64) from the CastPtrOp that
         // defines the src tile pointer. Only handle alloc_tile-backed src.
-        Value srcAddr;
-        if (auto *defOp = op.getSrc().getDefiningOp())
-          if (isa<pto::CastPtrOp>(defOp))
-            srcAddr = defOp->getOperand(0);
-        if (!srcAddr)
-          continue;
+        auto srcCast = op.getSrc().getDefiningOp<pto::CastPtrOp>();
+        if (!srcCast) {
+          op.emitOpError(
+              "requires an alloc_tile-backed src with a planned address");
+          signalPassFailure();
+          return;
+        }
+        Value srcAddr = srcCast.getInput();
 
         Location loc = op.getLoc();
         builder.setInsertionPoint(op);
