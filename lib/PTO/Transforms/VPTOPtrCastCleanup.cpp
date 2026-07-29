@@ -25,6 +25,18 @@ using namespace mlir;
 
 namespace {
 
+struct EraseTrivialCastPtrPattern : public OpRewritePattern<pto::CastPtrOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(pto::CastPtrOp op,
+                                PatternRewriter &rewriter) const override {
+    if (op.getInput().getType() != op.getResult().getType())
+      return failure();
+    rewriter.replaceOp(op, op.getInput());
+    return success();
+  }
+};
+
 struct CollapsePtrMemRefPtrBridgePattern
     : public OpRewritePattern<UnrealizedConversionCastOp> {
   using OpRewritePattern::OpRewritePattern;
@@ -68,7 +80,8 @@ struct VPTOPtrCastCleanupPass
 
   void runOnOperation() override {
     RewritePatternSet patterns(&getContext());
-    patterns.add<CollapsePtrMemRefPtrBridgePattern>(&getContext());
+    patterns.add<CollapsePtrMemRefPtrBridgePattern, EraseTrivialCastPtrPattern>(
+        &getContext());
     if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
       signalPassFailure();
   }

@@ -97,6 +97,13 @@ static bool shouldMaterializeOperand(Operation *owner) {
   if (isa<AllocTileOp, MaterializeTileOp, BindTileOp, PointerCastOp>(owner))
     return false;
 
+  if (isa<MGatherOp>(owner)) {
+    auto module = owner->getParentOfType<ModuleOp>();
+    auto backend = module ? module->getAttrOfType<StringAttr>("pto.backend")
+                          : StringAttr{};
+    return backend && backend.getValue() == "vpto";
+  }
+
   StringRef name = owner->getName().getStringRef();
   if (name == "pto.set_validshape")
     return true;
