@@ -379,6 +379,19 @@ private:
   ModuleOp module;
 };
 
+static LogicalResult rejectResidualTileOps(ModuleOp module) {
+  WalkResult walkResult = module.walk([&](Operation *op) {
+    if (!isa<TileOpInterface>(op))
+      return WalkResult::advance();
+
+    op->emitOpError()
+        << "must be lowered before emission-stage VPTO validation; residual "
+           "tile operations are unsupported";
+    return WalkResult::interrupt();
+  });
+  return walkResult.wasInterrupted() ? failure() : success();
+}
+
 class VPTOLegalityValidator {
 public:
   VPTOLegalityValidator(ModuleOp module, VPTOLegalityStage stage,
@@ -1085,6 +1098,9 @@ private:
   }
 
   LogicalResult validateEmissionOperationSurface() {
+    if (failed(rejectResidualTileOps(helper.getModule())))
+      return failure();
+
     WalkResult walkResult = helper.getModule().walk([&](Operation *op) {
       VPTOBufferAddressFamily family =
           VPTOLegalityHelper::classifyBufferAddressFamily(op);
@@ -1129,6 +1145,25 @@ private:
 
 namespace {
 
+struct PTORejectResidualTileOpsPass
+    : public PassWrapper<PTORejectResidualTileOpsPass,
+                         OperationPass<ModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(PTORejectResidualTileOpsPass)
+
+  StringRef getArgument() const final {
+    return "pto-reject-residual-tile-ops";
+  }
+
+  StringRef getDescription() const final {
+    return "Reject high-level tile operations left after backend lowering";
+  }
+
+  void runOnOperation() override {
+    if (failed(detail::rejectResidualTileOps(getOperation())))
+      signalPassFailure();
+  }
+};
+
 struct PTOValidateVPTOIRPass
     : public PassWrapper<PTOValidateVPTOIRPass, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(PTOValidateVPTOIRPass)
@@ -1167,6 +1202,10 @@ struct PTOValidateVPTOEmissionIRPass
 };
 
 } // namespace
+
+std::unique_ptr<Pass> createPTORejectResidualTileOpsPass() {
+  return std::make_unique<PTORejectResidualTileOpsPass>();
+}
 
 LogicalResult validateVPTOAuthoringIR(ModuleOp module,
                                       llvm::raw_ostream *diagOS) {

@@ -1169,6 +1169,20 @@ def PTOValidateVPTOEmissionIR
                            "mlir::scf::SCFDialect"];
 }
 
+def PTORejectResidualTileOps
+    : Pass<"pto-reject-residual-tile-ops", "ModuleOp"> {
+  let summary =
+      "Reject high-level tile operations left after backend lowering";
+  let description = [{
+    Fails before pointer-boundary normalization when a TileOpInterface
+    operation remains after backend-specific tile lowering. This keeps the
+    operation well-typed long enough to report the unsupported operation
+    directly instead of producing a later pointer-form verifier failure.
+  }];
+  let constructor = "mlir::pto::createPTORejectResidualTileOpsPass()";
+  let dependentDialects = ["mlir::pto::PTODialect"];
+}
+
 def VPTOExpandWrapperOps
     : Pass<"vpto-expand-wrapper-ops", "func::FuncOp"> {
   let summary =

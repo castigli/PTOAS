@@ -2721,6 +2721,7 @@ static void prepareVPTOForEmission(PassManager &pm) {
       pto::createPTOUnrollSIMTForPass());
   kernelModulePM.addPass(createSCCPPass());
   kernelModulePM.addPass(createCanonicalizerPass());
+  kernelModulePM.addPass(pto::createPTORejectResidualTileOpsPass());
   kernelModulePM.addPass(pto::createVPTOPtrNormalizePass());
   kernelModulePM.addPass(pto::createVPTOPtrCastCleanupPass());
   kernelModulePM.addPass(pto::createVPTONormalizeEquivalentVcvtPass());

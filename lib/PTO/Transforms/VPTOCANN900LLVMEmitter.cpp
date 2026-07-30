@@ -10597,7 +10597,8 @@ static void configureVPTOOpLoweringTarget(ConversionTarget &target,
                       pto::MadMxAccOp, pto::MadMxBiasOp,
                       pto::MadRawOp, pto::MadBiasRawOp, pto::MadMxRawOp,
                       pto::MadMxBiasRawOp>();
-  target.markUnknownOpDynamicallyLegal([](Operation *) { return true; });
+  target.markUnknownOpDynamicallyLegal(
+      [](Operation *op) { return !isa<pto::TileOpInterface>(op); });
 }
 
 static void populateVPTOStructuralTypePatterns(
