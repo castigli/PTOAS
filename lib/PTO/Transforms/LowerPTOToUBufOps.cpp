@@ -1042,6 +1042,19 @@ struct LowerPTOToUBufOpsPass
       }
     }
 
+    WalkResult residualTileWalk = func.walk([&](Operation *op) {
+      if (!isa<pto::TileOpInterface>(op))
+        return WalkResult::advance();
+      op->emitOpError()
+          << "must be lowered before emission-stage VPTO validation; residual "
+             "tile operations are unsupported";
+      return WalkResult::interrupt();
+    });
+    if (residualTileWalk.wasInterrupted()) {
+      signalPassFailure();
+      return;
+    }
+
     // ---- cleanup dead PTO ops ----
     SmallVector<Operation *> toErase;
     func.walk([&](Operation *op) {
